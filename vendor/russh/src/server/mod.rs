@@ -79,6 +79,10 @@ pub struct Config {
     pub auth_rejection_time_initial: Option<std::time::Duration>,
     /// The server's keys. The first key pair in the client's preference order will be chosen.
     pub keys: Vec<PrivateKey>,
+    /// Host certificates for `keys`, matched by public key. When a client
+    /// offers the certificate algorithm for a key that has one here, the
+    /// server sends the certificate instead of the plain public key.
+    pub host_certificates: Vec<Certificate>,
     /// The bytes and time limits before key re-exchange.
     pub limits: Limits,
     /// The initial size of a channel (used for flow control).
@@ -115,6 +119,7 @@ impl Default for Config {
             auth_rejection_time: std::time::Duration::from_secs(1),
             auth_rejection_time_initial: None,
             keys: Vec::new(),
+            host_certificates: Vec::new(),
             window_size: 2097152,
             maximum_packet_size: 32768,
             channel_buffer_size: 100,
@@ -130,6 +135,15 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Returns the host certificate for `key`, if there is one.
+    pub(crate) fn host_certificate_for(&self, key: &PrivateKey) -> Option<&Certificate> {
+        self.host_certificates
+            .iter()
+            .find(|c| c.public_key() == key.public_key().key_data())
+    }
+}
+
 impl Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // display everything except the private keys
@@ -142,6 +156,7 @@ impl Debug for Config {
                 &self.auth_rejection_time_initial,
             )
             .field("keys", &"***")
+            .field("host_certificates", &self.host_certificates.len())
             .field("window_size", &self.window_size)
             .field("maximum_packet_size", &self.maximum_packet_size)
             .field("channel_buffer_size", &self.channel_buffer_size)

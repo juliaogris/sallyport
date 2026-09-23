@@ -10,7 +10,10 @@ use std::sync::Arc;
 use base64::Engine as _;
 use futures::StreamExt;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use russh::keys::ssh_key::{Certificate, PrivateKey, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+use crate::ssh::{AgentHandler, AuthAddr};
 use worker::*;
 
 /// The WebSocket subprotocol a stock agent asks for on reverse tunnel
@@ -52,8 +55,19 @@ impl DurableObject for Hub {
 
         let (ws_side, tls_side) = tokio::io::duplex(PIPE_BYTES);
         wasm_bindgen_futures::spawn_local(bridge(ws, ws_side));
+        let (ssh, proxy_name) = ssh_config(&self.env)?;
+        let ssh = Arc::new(ssh);
+        let handler = AgentHandler::new(
+            host_ca(&self.env)?,
+            self.env.var("CLUSTER_NAME")?.to_string(),
+            AuthAddr {
+                host: self.env.var("AUTH_HOST")?.to_string(),
+                port: self.env.var("AUTH_PORT")?.to_string().parse().unwrap_or(3025),
+            },
+            proxy_name,
+        );
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(err) = serve(tls_side, tls).await {
+            if let Err(err) = serve(tls_side, tls, ssh, handler).await {
                 console_error!("tunnel: {err}");
             }
         });
@@ -122,11 +136,10 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
     futures::join!(outbound, inbound);
 }
 
-/// Runs the TLS server on one end of the pipe. SSH comes next; until then
-/// this reads the agent's SSH identification line to prove the TLS layer.
-async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>) -> std::result::Result<(), String> {
+/// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
+async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>, ssh: Arc<russh::server::Config>, handler: AgentHandler) -> std::result::Result<(), String> {
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-    let mut stream = acceptor.accept(pipe).await.map_err(|e| format!("tls accept: {e}"))?;
+    let stream = acceptor.accept(pipe).await.map_err(|e| format!("tls accept: {e}"))?;
     let alpn = stream
         .get_ref()
         .1
@@ -135,17 +148,60 @@ async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>) -> std::resul
         .unwrap_or_default();
     console_log!("tunnel: tls established, alpn {alpn:?}");
 
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 255 {
-        stream.read_exact(&mut byte).await.map_err(|e| format!("read ssh id: {e}"))?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
-    console_log!("tunnel: agent ssh id {:?}", String::from_utf8_lossy(&line).trim_end());
+    let session = russh::server::run_stream(ssh, stream, handler)
+        .await
+        .map_err(|e| format!("ssh handshake: {e}"))?;
+    session.await.map_err(|e| format!("ssh session: {e}"))?;
+    console_log!("tunnel: ssh session ended");
     Ok(())
+}
+
+/// Builds the SSH server config: the hub host key presented with its
+/// host-CA-signed certificate, which is the only form the agent accepts.
+/// Also returns the proxy name, the host UUID in the cert's first principal.
+fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
+    let key = String::from_utf8(secret_bytes(env, "HUB_SSH_KEY")?).map_err(|e| Error::RustError(e.to_string()))?;
+    let cert = String::from_utf8(secret_bytes(env, "HUB_SSH_CERT")?).map_err(|e| Error::RustError(e.to_string()))?;
+    let key = PrivateKey::from_openssh(rewrap_openssh(&key)).map_err(|e| Error::RustError(format!("HUB_SSH_KEY: {e}")))?;
+    let cert = Certificate::from_openssh(cert.trim()).map_err(|e| Error::RustError(format!("HUB_SSH_CERT: {e}")))?;
+    let cluster = env.var("CLUSTER_NAME")?.to_string();
+    let proxy_name = cert
+        .valid_principals()
+        .first()
+        .map(|p| p.trim_end_matches(&format!(".{cluster}")).to_string())
+        .ok_or_else(|| Error::RustError("HUB_SSH_CERT: no principals".into()))?;
+    let config = russh::server::Config {
+        keys: vec![key],
+        host_certificates: vec![cert],
+        // Timers are off: the agent drives keepalives, and hibernation is
+        // not used, so an idle connection needs no server-side timeout.
+        inactivity_timeout: None,
+        keepalive_interval: None,
+        auth_rejection_time: std::time::Duration::from_millis(0),
+        ..Default::default()
+    };
+    Ok((config, proxy_name))
+}
+
+/// Re-wraps an OpenSSH private key at 70 columns. Go's PEM encoder wraps
+/// at 64, and the ssh-key crate only accepts OpenSSH's own 70.
+fn rewrap_openssh(pem: &str) -> String {
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    let mut out = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    for chunk in body.as_bytes().chunks(70) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        out.push('\n');
+    }
+    out.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+    out
+}
+
+fn host_ca(env: &Env) -> Result<PublicKey> {
+    let line = String::from_utf8(secret_bytes(env, "HOST_CA_SSH")?).map_err(|e| Error::RustError(e.to_string()))?;
+    PublicKey::from_openssh(line.trim()).map_err(|e| Error::RustError(format!("HOST_CA_SSH: {e}")))
 }
 
 /// Builds the rustls server config from the hub TLS identity. The agent

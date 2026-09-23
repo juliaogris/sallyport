@@ -85,9 +85,25 @@ so that `[patch.crates-io]` can point at this directory.
   oldest pending request on that channel. Pending requests are dropped when
   the channel closes.
 
+## Host certificates
+
+- `src/server/mod.rs`: New `Config::host_certificates`, matched to `keys` by
+  public key. The default is empty, which keeps the old behavior.
+- `src/negotiation.rs`: New `Names::key_is_cert`. When a host key has a
+  certificate, the server advertises the `*-cert-v01@openssh.com` name right
+  before the plain name, and `read_kex` records which of the two the client
+  chose. `read_kex` and `possible_host_key_algos_for_keys` now take the
+  server `Config` instead of the key list.
+- `src/server/kex.rs`: When the certificate algorithm is chosen, the
+  certificate is used as the host key blob in both the exchange hash and the
+  `KEX_ECDH_REPLY` or `KEX_DH_GEX_REPLY` packet. The signature is still made
+  by the underlying private key.
+
 ## Tests
 
-- `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks and the
-  server-initiated channel, driven by a Go client on golang.org/x/crypto/ssh,
+- `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks, the
+  server-initiated channel and host certificates, driven by a Go client on golang.org/x/crypto/ssh,
   because the russh client cannot open unknown channel types, send arbitrary
   requests or answer custom channel requests.
+
+- **ssh-key `UnixTime`** (`vendor/ssh-key/src/certificate/unix_time.rs`): accept `valid_before = u64::MAX`, which OpenSSH and Teleport use for "forever". The raw value is kept so a re-encoded certificate keeps its CA signature; only the `SystemTime` view saturates.

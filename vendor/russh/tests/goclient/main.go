@@ -4,19 +4,30 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
 
 func main() {
-	if len(os.Args) != 3 {
-		log.Fatalf("usage: goclient <addr> <scenario>")
+	if len(os.Args) < 3 {
+		log.Fatalf("usage: goclient <addr> <scenario> [ca-public-key]")
 	}
 	addr, scenario := os.Args[1], os.Args[2]
+	if scenario == "hostcert" {
+		hostCert(addr, os.Args[3])
+		return
+	}
+	if scenario == "hostkey-plain" {
+		hostKeyPlain(addr)
+		return
+	}
 
 	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
 		User:            "agent",
@@ -101,4 +112,57 @@ func main() {
 	default:
 		log.Fatalf("unknown scenario %q", scenario)
 	}
+}
+
+// hostCert connects with the same host key check as a Teleport agent: a
+// CertChecker that trusts only the given CA and has no fallback for plain
+// host keys. HostKeyAlgorithms is left at its default.
+func hostCert(addr, caAuthorizedKey string) {
+	caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(caAuthorizedKey))
+	if err != nil {
+		log.Fatalf("parse CA key: %v", err)
+	}
+	checker := &ssh.CertChecker{
+		IsHostAuthority: func(k ssh.PublicKey, _ string) bool {
+			return bytes.Equal(k.Marshal(), caPub.Marshal())
+		},
+	}
+	var seen *ssh.Certificate
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User: "agent",
+		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			if cert, ok := key.(*ssh.Certificate); ok {
+				seen = cert
+			}
+			return checker.CheckHostKey(hostname, remote, key)
+		},
+	})
+	if err != nil {
+		fmt.Printf("handshake=failed: %v\n", err)
+		return
+	}
+	defer client.Close()
+	fmt.Println("handshake=ok")
+	if seen != nil {
+		fmt.Printf("cert-principals=%s\n", strings.Join(seen.ValidPrincipals, ","))
+	}
+}
+
+// hostKeyPlain offers only the plain ECDSA host key algorithm, so a server
+// with a host certificate must fall back to its plain public key.
+func hostKeyPlain(addr string) {
+	var keyType string
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:              "agent",
+		HostKeyAlgorithms: []string{ssh.KeyAlgoECDSA256},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			keyType = key.Type()
+			return nil
+		},
+	})
+	if err != nil {
+		log.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+	fmt.Printf("host-key-type=%s\n", keyType)
 }

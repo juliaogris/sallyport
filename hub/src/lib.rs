@@ -4,6 +4,7 @@
 //! agent connections to one Durable Object, which holds every tunnel.
 
 mod ping;
+mod ssh;
 mod tunnel;
 
 use worker::*;

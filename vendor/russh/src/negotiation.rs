@@ -33,6 +33,9 @@ pub struct Names {
     pub kex: kex::Name,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub key: Algorithm,
+    /// Whether the host key algorithm is the `*-cert-v01@openssh.com` variant
+    /// of `key`, so that the server sends its host certificate.
+    pub key_is_cert: bool,
     pub cipher: cipher::Name,
     pub client_mac: mac::Name,
     pub server_mac: mac::Name,
@@ -75,20 +78,39 @@ pub(crate) fn is_key_compatible_with_algo(key: &PrivateKey, algo: &Algorithm) ->
     }
 }
 
+/// Returns the SSH name of a host key algorithm, or of its certificate variant.
+pub(crate) fn host_key_algo_name(algo: &Algorithm, is_cert: bool) -> String {
+    if is_cert {
+        algo.to_certificate_type()
+    } else {
+        algo.to_string()
+    }
+}
+
 impl Preferred {
+    /// Returns the host key algorithms the server can use, in preference
+    /// order. The certificate variant of an algorithm comes right before the
+    /// plain one when a matching key has a certificate in `config`.
     pub(crate) fn possible_host_key_algos_for_keys(
         &self,
-        available_host_keys: &[PrivateKey],
-    ) -> Vec<Algorithm> {
-        self.key
-            .iter()
-            .filter(|n| {
-                available_host_keys
-                    .iter()
-                    .any(|k| is_key_compatible_with_algo(k, n))
-            })
-            .cloned()
-            .collect::<Vec<_>>()
+        config: &Config,
+    ) -> Vec<(Algorithm, bool)> {
+        let mut algos = Vec::new();
+        for algo in self.key.iter() {
+            let mut keys = config
+                .keys
+                .iter()
+                .filter(|k| is_key_compatible_with_algo(k, algo))
+                .peekable();
+            if keys.peek().is_none() {
+                continue;
+            }
+            if keys.any(|k| config.host_certificate_for(k).is_some()) {
+                algos.push((algo.clone(), true));
+            }
+            algos.push((algo.clone(), false));
+        }
+        algos
     }
 }
 
@@ -187,11 +209,11 @@ pub(crate) trait Select {
         kind: AlgorithmKind,
     ) -> Result<(bool, S), Error>;
 
-    /// `available_host_keys`, if present, is used to limit the host key algorithms to the ones we have keys for.
+    /// `server_config`, if present, is used to limit the host key algorithms to the ones we have keys for.
     fn read_kex(
         buffer: &[u8],
         pref: &Preferred,
-        available_host_keys: Option<&[PrivateKey]>,
+        server_config: Option<&Config>,
         cause: &KexCause,
     ) -> Result<Names, Error> {
         let Some(mut r) = &buffer.get(17..) else {
@@ -232,16 +254,30 @@ pub(crate) trait Select {
         // Host key
 
         let key_string = String::decode(&mut r)?;
-        let possible_host_key_algos = match available_host_keys {
-            Some(available_host_keys) => pref.possible_host_key_algos_for_keys(available_host_keys),
-            None => pref.key.iter().map(ToOwned::to_owned).collect::<Vec<_>>(),
+        let possible_host_key_algos = match server_config {
+            Some(config) => pref.possible_host_key_algos_for_keys(config),
+            None => pref
+                .key
+                .iter()
+                .map(|a| (a.clone(), false))
+                .collect::<Vec<_>>(),
         };
+        let possible_host_key_names = possible_host_key_algos
+            .iter()
+            .map(|(a, is_cert)| host_key_algo_name(a, *is_cert))
+            .collect::<Vec<_>>();
 
-        let (key_both_first, key_algorithm) = Self::select(
-            &possible_host_key_algos[..],
+        let (key_both_first, key_name) = Self::select(
+            &possible_host_key_names[..],
             &parse_kex_algo_list(&key_string),
             AlgorithmKind::Key,
         )?;
+        let (key_algorithm, key_is_cert) = possible_host_key_names
+            .iter()
+            .zip(possible_host_key_algos)
+            .find(|(n, _)| **n == key_name)
+            .map(|(_, a)| a)
+            .ok_or(Error::UnknownAlgo)?;
 
         // Cipher
 
@@ -314,6 +350,7 @@ pub(crate) trait Select {
         Ok(Names {
             kex: kex_algorithm,
             key: key_algorithm,
+            key_is_cert,
             cipher,
             client_mac,
             server_mac,
@@ -425,15 +462,9 @@ pub(crate) fn write_kex(
             // Only advertise host key algorithms that we have keys for.
             NameList(
                 prefs
-                    .key
+                    .possible_host_key_algos_for_keys(server_config)
                     .iter()
-                    .filter(|algo| {
-                        server_config
-                            .keys
-                            .iter()
-                            .any(|k| is_key_compatible_with_algo(k, algo))
-                    })
-                    .map(|x| x.to_string())
+                    .map(|(algo, is_cert)| host_key_algo_name(algo, *is_cert))
                     .collect(),
             )
             .encode(w)?;

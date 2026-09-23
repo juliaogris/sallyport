@@ -126,6 +126,60 @@ only plain host keys. One more patch is needed: advertise the
 the host key blob in the key exchange reply, signing with the underlying
 key.
 
+## Result, 2026-09-24: SSH layer passes
+
+With the host-certificate patch and two more fixes, a stock v18.10.0 app
+service runs its whole reverse tunnel through the hub:
+
+```
+ssh: agent "<host>.sallyport" authenticated, role Instance
+ssh: passthrough to auth 127.0.0.1:3025
+ssh: agent "<host>.sallyport" authenticated, role App
+ssh: heartbeat channel accepted
+ssh: first ping "2026-09-23T21:44:34.713547Z"
+ssh: discovery sent, proxy b4d32df5-3eff-45ae-84ac-e69f9eca18f4
+ssh: test dial into agent accepted: true
+```
+
+and the agent logs `Connected to Auth Server through tunnel.` and
+`Agent state updated ... current_state:connected`.
+
+### 5. ssh-key cannot parse Teleport host certificates
+
+Teleport host certs have `valid_before = u64::MAX`, OpenSSH's "forever".
+The forked `ssh-key` caps timestamps at `i64::MAX` and rejects the cert.
+`vendor/ssh-key` keeps the raw value, so a re-encoded cert keeps its CA
+signature, and only saturates the `SystemTime` view.
+
+### 6. The agent dials with two identities
+
+The auth client dials with the process's `Instance` certificate and the
+tunnel pool with `App`. The hub admits exactly those two. `Proxy` and
+every other role are still rejected, so the hub's own identity cannot
+authenticate to itself. The heartbeat channel requires `App`.
+
+### 7. Discovery is required, not optional
+
+Without a `discovery` request naming the hub as the only proxy, the agent
+pool dials a new connection about every two seconds and aborts each one
+with `proxy already claimed`. Every attempt costs a full WebSocket, TLS
+and SSH handshake on the Durable Object. The hub now sends discovery on
+every ping. The plan listed discovery as cut; this reverses that.
+
+### Smaller fixes
+
+- Go's PEM encoder wraps OpenSSH private keys at 64 columns; `ssh-key`
+  accepts only 70. The hub re-wraps before parsing.
+- The SSH user is already `<host UUID>.<cluster>`; that is the dial
+  `server_id` as is.
+
+### Still to check
+
+- Keepalive reply at the agent's 5-minute interval, and the tunnel still
+  up after two intervals.
+- Agent behaviour across a hub restart.
+- Size budget: see below.
+
 ## Progress, 2026-09-24
 
 - **`ring` needs LLVM clang for wasm32.** Its C code is not built by

@@ -115,9 +115,24 @@ struct Run {
     stdout: String,
 }
 
+fn ed25519_config() -> server::Config {
+    server::Config {
+        keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
+        ..Default::default()
+    }
+}
+
 /// Runs one Go client scenario against one server session. `with_handle`
 /// runs on the server side once the client has authenticated.
 async fn run<F, Fut>(scenario: &str, with_handle: F) -> Run
+where
+    F: FnOnce(server::Handle) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    run_with(ed25519_config(), &[scenario], with_handle).await
+}
+
+async fn run_with<F, Fut>(config: server::Config, args: &[&str], with_handle: F) -> Run
 where
     F: FnOnce(server::Handle) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
@@ -128,16 +143,13 @@ where
 
     let child = tokio::process::Command::new(bin)
         .arg(addr.to_string())
-        .arg(scenario)
+        .args(args)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
 
     let (stream, _) = listener.accept().await.unwrap();
-    let config = Arc::new(server::Config {
-        keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
-        ..Default::default()
-    });
+    let config = Arc::new(config);
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let (authed_tx, authed_rx) = oneshot::channel();
     let handler = Handler {
@@ -152,7 +164,7 @@ where
     });
 
     let out = child.wait_with_output().await.unwrap();
-    assert!(out.status.success(), "goclient {scenario} failed");
+    assert!(out.status.success(), "goclient {args:?} failed");
     server_side.await.unwrap();
     // The session ends with an error when the client drops the connection.
     let _ = session.await;
@@ -267,4 +279,68 @@ async fn server_opens_custom_channel_and_sends_custom_requests() {
     );
     assert_eq!(results_rx.await.unwrap(), (true, false, true));
     assert_eq!(r.events, vec![]);
+}
+
+/// Returns a CA key and a server config whose ECDSA host key has a host
+/// certificate signed by that CA.
+fn host_cert_config() -> (PrivateKey, server::Config) {
+    let ca = PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap();
+    let host = PrivateKey::random(
+        &mut OsRng,
+        ssh_key::Algorithm::Ecdsa {
+            curve: ssh_key::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut builder =
+        ssh_key::certificate::Builder::new([7u8; 16], host.public_key(), now - 60, now + 3600)
+            .unwrap();
+    builder
+        .cert_type(ssh_key::certificate::CertType::Host)
+        .unwrap();
+    builder.key_id("hub").unwrap();
+    builder.valid_principal("127.0.0.1").unwrap();
+    builder.valid_principal("hub.sallyport").unwrap();
+    let cert = builder.sign(&ca).unwrap();
+    let config = server::Config {
+        keys: vec![host],
+        host_certificates: vec![cert],
+        ..Default::default()
+    };
+    (ca, config)
+}
+
+#[tokio::test]
+async fn host_certificate_passes_cert_checker() {
+    let (ca, config) = host_cert_config();
+    let ca_pub = ca.public_key().to_openssh().unwrap();
+    let r = run_with(config, &["hostcert", &ca_pub], |_| async {}).await;
+    assert_eq!(
+        r.stdout,
+        "handshake=ok\ncert-principals=127.0.0.1,hub.sallyport\n"
+    );
+}
+
+#[tokio::test]
+async fn plain_host_key_fails_cert_checker() {
+    let (ca, mut config) = host_cert_config();
+    config.host_certificates.clear();
+    let ca_pub = ca.public_key().to_openssh().unwrap();
+    let r = run_with(config, &["hostcert", &ca_pub], |_| async {}).await;
+    assert!(
+        r.stdout.starts_with("handshake=failed: ") && r.stdout.contains("host key"),
+        "stdout: {}",
+        r.stdout
+    );
+}
+
+#[tokio::test]
+async fn host_certificate_falls_back_to_plain_key() {
+    let (_, config) = host_cert_config();
+    let r = run_with(config, &["hostkey-plain"], |_| async {}).await;
+    assert_eq!(r.stdout, "host-key-type=ecdsa-sha2-nistp256\n");
 }

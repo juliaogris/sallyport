@@ -113,7 +113,7 @@ impl ServerKex {
                     negotiation::Server::read_kex(
                         &input.buffer,
                         &self.config.preferred,
-                        Some(&self.config.keys),
+                        Some(&self.config),
                         &self.cause,
                     )?
                 };
@@ -240,12 +240,10 @@ impl ServerKex {
                 let exchange = &mut self.exchange;
                 kex.server_dh(exchange, &input.buffer)?;
 
-                let Some(matching_key_index) = self
-                    .config
-                    .keys
-                    .iter()
-                    .position(|key| is_key_compatible_with_algo(key, &names.key))
-                else {
+                let Some(matching_key_index) = self.config.keys.iter().position(|key| {
+                    is_key_compatible_with_algo(key, &names.key)
+                        && (!names.key_is_cert || self.config.host_certificate_for(key).is_some())
+                }) else {
                     debug!("we don't have a host key of type {:?}", names.key);
                     return Err(Error::UnknownKey.into());
                 };
@@ -253,6 +251,13 @@ impl ServerKex {
                 // Look up the key we'll be using to sign the exchange hash
                 #[allow(clippy::indexing_slicing)] // key index checked
                 let key = &self.config.keys[matching_key_index];
+                // The client verifies the certificate and the signature is
+                // still made by the certificate's key.
+                let host_key_blob = match self.config.host_certificate_for(key) {
+                    Some(cert) if names.key_is_cert => cert.to_bytes(),
+                    _ => key.public_key().to_bytes(),
+                }
+                .map_err(Error::from)?;
                 let signature_hash_alg = match &names.key {
                     Algorithm::Rsa { hash } => *hash,
                     _ => None,
@@ -263,7 +268,7 @@ impl ServerKex {
                     buffer.clear();
 
                     let mut pubkey_vec = CryptoVec::new();
-                    key.public_key().to_bytes()?.encode(&mut pubkey_vec)?;
+                    host_key_blob.encode(&mut pubkey_vec)?;
 
                     let hash = kex.compute_exchange_hash(&pubkey_vec, exchange, &mut buffer)?;
 
@@ -284,7 +289,7 @@ impl ServerKex {
                         false => &msg::KEX_ECDH_REPLY,
                     }
                     .encode(w)?;
-                    key.public_key().to_bytes()?.encode(w)?;
+                    host_key_blob.encode(w)?;
                     exchange.server_ephemeral.encode(w)?;
                     signature.encode(w)?;
                     Ok(())

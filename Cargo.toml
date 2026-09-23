@@ -7,3 +7,7 @@ exclude = ["vendor", "spikes"]
 opt-level = "z"
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+russh = { path = "vendor/russh" }
+internal-russh-forked-ssh-key = { path = "vendor/ssh-key" }
