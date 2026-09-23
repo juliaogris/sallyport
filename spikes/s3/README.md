@@ -78,3 +78,27 @@ Vendor `russh` 0.54.5 into `vendor/russh` and patch it:
 
 The patch is the S3 result as much as the handshake is. It is small enough
 to carry, and a candidate for upstreaming to `russh`.
+
+## Progress, 2026-09-24 (paused)
+
+- **`ring` needs LLVM clang for wasm32.** Its C code is not built by
+  Apple clang, so the link fails with undefined `ring_core_*` symbols.
+  `hub/wrangler.toml` sets `CC_wasm32_unknown_unknown` to Homebrew LLVM.
+- **Hub skeleton builds and runs** under `wrangler dev` over HTTPS with a
+  `mkcert` cert: `/webapi/find` answers, and the Durable Object bridges
+  the WebSocket to a rustls server with the hub TLS identity. Until the
+  patched `russh` lands it logs the agent's SSH banner. Not yet run
+  against an agent. Size 1.45 MB uncompressed.
+- **App service joins only through a proxy.** v18.10.0 refuses
+  `auth_server` when `app_service` is enabled, so the first join went
+  through the reference Go proxy (`cluster/proxy.yaml`) and succeeded:
+  `Successfully obtained credentials to connect to the cluster.` The
+  identity is in the app data dir for reuse against the hub.
+- **Reference proxy ran in separate mode.** The agent then dialled
+  `[::1]:3024`, so the cluster networking config is not `multiplex`.
+  Set `proxy_listener_mode: multiplex` explicitly before the next run.
+- **`vendor/russh` is partial and uncommitted.** The patch agent was
+  stopped mid-way. Re-check it against the patch list above before use.
+
+Next: finish the `russh` patch, wire `run_stream` into `hub/src/tunnel.rs`,
+point `cluster/app-tunnel.yaml` at the hub, and check the S3 exit criteria.

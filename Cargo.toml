@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["hub"]
+exclude = ["vendor", "spikes"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

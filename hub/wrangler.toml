@@ -1,0 +1,20 @@
+name = "sallyport-hub"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-09-01"
+
+[build]
+# ring's C code needs a clang with a wasm32 target; Apple clang has none.
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+[vars]
+CLUSTER_NAME = "sallyport"
+PUBLIC_ADDR = "localhost:8787"
+SERVER_VERSION = "18.10.0"

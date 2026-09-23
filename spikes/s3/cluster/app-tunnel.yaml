@@ -1,0 +1,25 @@
+# S3 spike: stock v18.10.0 app service. app-join.yaml joins once against
+# auth directly; app-tunnel.yaml then reaches auth only through the hub.
+version: v3
+teleport:
+  nodename: sallyport-app
+  data_dir: ../../../.local/data/app
+  proxy_server: localhost:8787
+  join_params:
+    method: token
+    token_name: joined-already
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: false
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  - name: octoprint
+    uri: http://octo.local
+    public_addr: octo.jul.run
