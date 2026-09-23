@@ -1,4 +1,4 @@
-# S0 - edge ALPN probe
+# S1 - edge ALPN probe
 
 Does a stock Teleport v18.10.0 agent decide on its own to use the
 WebSocket connection upgrade when its proxy address is a Cloudflare
@@ -37,6 +37,6 @@ Still to run: the same probe against `teleport.jul.run` once the zone is
 on Cloudflare. A custom domain goes through the same edge, so the result
 is expected to match.
 
-S0 gates nothing. The plan sets `TELEPORT_TLS_ROUTING_CONN_UPGRADE=yes`
+S1 gates nothing. The plan sets `TELEPORT_TLS_ROUTING_CONN_UPGRADE=yes`
 on the agent either way; this result says the variable is a safety net,
 not a requirement.
