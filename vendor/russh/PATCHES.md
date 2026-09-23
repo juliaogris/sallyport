@@ -1,0 +1,93 @@
+# Patches to russh 0.54.5
+
+This is russh 0.54.5 from crates.io, patched so that its SSH server runs on
+`wasm32-unknown-unknown` in a Cloudflare Durable Object and can speak
+Teleport's reverse tunnel protocol. The crate name and version are unchanged
+so that `[patch.crates-io]` can point at this directory.
+
+## Packaging
+
+- `Cargo.toml`: Removed the cargo-generated header, the example and bench
+  targets, and the dev-dependencies that only the examples used (`clap`,
+  `ratatui`, `shell-escape`, `termion`, `tokio-fd`, `russh-sftp`).
+- `Cargo.toml`: Added an empty `[workspace]` table so that `cargo test` works
+  in this directory when the parent repository has its own workspace.
+- `Cargo.toml`: Added the wasm-only dependencies `web-time`, `gloo-timers`
+  (with `futures`) and `wasm-bindgen-futures`.
+- `Cargo.toml`: Added the `teleport_hooks` test target.
+- `examples/`, `benches/`: Removed.
+- `LICENSE.txt`: Added from the upstream `v0.54.5` tag, because the published
+  crate does not include it.
+- `src/keys/mod.rs`: Marked the `load_public_key` doctest `no_run`, because
+  it reads `../files/id_ed25519.pub`, which the published crate does not ship.
+
+## Time shim
+
+- `src/rt.rs`: New private module with `Instant`, `sleep`, `sleep_until`,
+  `timeout`, `Elapsed` and `system_now`. On native targets these are tokio's
+  and `std::time::SystemTime::now`. On `wasm32` they use `web_time` and a JS
+  `setTimeout` timer that runs in a `spawn_local` task and signals over a
+  `futures` oneshot, so the sleep future stays `Send`. `Sleep::reset` keeps
+  one JS timer per sleep.
+- `src/lib_inner.rs`: Declared `mod rt`. `Error::Elapsed` now wraps
+  `crate::rt::Elapsed`, which is tokio's type on native targets.
+- `src/server/session.rs`: The keepalive and inactivity timers use
+  `crate::rt::sleep` and reset with `crate::rt::Instant`.
+- `src/server/encrypted.rs`: Auth rejection deadlines use `crate::rt::Instant`
+  and `crate::rt::sleep_until`.
+- `src/server/encrypted.rs`: The certificate validity check uses
+  `crate::rt::system_now` instead of `SystemTime::now`, which panics on
+  `wasm32-unknown-unknown`.
+- `src/server/mod.rs`: The SSH identification read timeout uses
+  `crate::rt::timeout`.
+- `src/keys/agent/server.rs`, `src/keys/agent/client.rs`: Replaced
+  `tokio::time::sleep` with `crate::rt::sleep`.
+
+## Building the server on wasm
+
+- `src/lib_inner.rs`: The `server` module is no longer gated off on `wasm32`.
+- `src/server/mod.rs`: `Server::run_on_socket`, `Server::run_on_address` and
+  the `tokio::net` import are gated off on `wasm32`. `run_stream` is the wasm
+  entry point.
+- `src/msg.rs`, `src/cert.rs`, `src/negotiation.rs`: Removed the
+  `not(wasm32)` gates on server-only message constants,
+  `PublicKeyOrCertificate::decode` and `server::Config`, and removed the
+  wasm-only `Config` stub.
+
+## Handler hooks
+
+- `src/server/mod.rs`, `src/server/encrypted.rs`: New
+  `Handler::channel_open_unknown(typ, channel, session)`. `true` confirms the
+  channel and `false` sends the existing "unknown channel type" failure. The
+  default returns `false`.
+- `src/server/mod.rs`, `src/server/encrypted.rs`: New
+  `Handler::channel_request_unknown(channel, typ, want_reply, data, session)`.
+  `data` is the bytes after the want-reply byte. The reply is sent only if the
+  client asked for one. The default returns `false`.
+- `src/server/mod.rs`, `src/server/encrypted.rs`: New
+  `Handler::global_request_unknown(typ, want_reply, data, session)`. The reply
+  is sent only if the client asked for one. Before this patch, an unknown
+  global request always got `SSH_MSG_REQUEST_FAILURE`. The default returns
+  `false`.
+
+## Server-initiated channels and requests
+
+- `src/server/session.rs`: New `Handle::channel_open_custom(typ, extra)` and
+  `Session::channel_open_custom(typ, extra)` that open a channel of any type.
+  New `Msg::ChannelOpenCustom` variant.
+- `src/server/session.rs`: New `Channel<server::Msg>::request_custom(typ,
+  want_reply, data)` and `Session::channel_request_custom`. With
+  `want_reply`, it waits for the reply and returns `true` or `false`. New
+  `Msg::ChannelRequestCustom` variant and `Session::pending_channel_requests`
+  queue.
+- `src/server/encrypted.rs`: The server now handles incoming
+  `SSH_MSG_CHANNEL_SUCCESS` and `SSH_MSG_CHANNEL_FAILURE` by answering the
+  oldest pending request on that channel. Pending requests are dropped when
+  the channel closes.
+
+## Tests
+
+- `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks and the
+  server-initiated channel, driven by a Go client on golang.org/x/crypto/ssh,
+  because the russh client cannot open unknown channel types, send arbitrary
+  requests or answer custom channel requests.

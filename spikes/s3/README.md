@@ -53,10 +53,9 @@ About 13 call sites outside the client.
   and `teleport-transport` opened by the agent get `unknown channel type`.
 - **The server cannot open a custom channel type.** The hub must open
   `teleport-transport` to the agent to dial the app service.
-- **Unknown channel requests get `CHANNEL_FAILURE` even when no reply was
-  asked for.** The agent's heartbeat `ping` has `want_reply = false`, so
-  it would receive an unexpected failure. `teleport-transport-dial` needs
-  a real `true` reply.
+- **Unknown channel requests always fail.** `teleport-transport-dial`
+  needs a real `true` reply. (Corrected: stock russh already sends no
+  reply when `want_reply` is false, so the heartbeat `ping` was safe.)
 - **Unknown global requests get `REQUEST_FAILURE` regardless of
   `want_reply`.** `keepalive@openssh.com` wants a reply, so a failure is
   tolerated by the agent. Replying when no reply was asked for is still a
@@ -109,6 +108,23 @@ tunnel.`, then `Agent state updated ... current_state:connected`.
 The newer join client also tries a WebSocket upgrade with a subprotocol
 other than `alpn-ping` before it falls back to `/webapi/host/credentials`.
 The hub returns 400 for it. Phase 1 has to handle both.
+
+## russh patch, 2026-09-24
+
+`vendor/russh` is patched and committed; `vendor/russh/PATCHES.md` lists
+every change. Native tests: 48 pass, including 4 new hook tests driven by
+a Go client on `golang.org/x/crypto/ssh`. It builds for wasm32 at
+457 KB gzipped. The wasm timer code has not yet run under workerd.
+
+### 4. The agent requires an SSH host certificate
+
+The agent verifies the hub with `NewHostKeyCallback`, which accepts only
+a host certificate signed by the host CA and has no plain-key fallback
+(`lib/reversetunnel/agent_dialer.go:78-105`). russh's server can present
+only plain host keys. One more patch is needed: advertise the
+`*-cert-v01@openssh.com` host key algorithms and send the certificate as
+the host key blob in the key exchange reply, signing with the underlying
+key.
 
 ## Progress, 2026-09-24
 
