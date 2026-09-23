@@ -1,0 +1,5 @@
+target/
+.wrangler/
+*.pem
+*.key
+node_modules/
