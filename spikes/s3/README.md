@@ -79,7 +79,38 @@ Vendor `russh` 0.54.5 into `vendor/russh` and patch it:
 The patch is the S3 result as much as the handshake is. It is small enough
 to carry, and a candidate for upstreaming to `russh`.
 
-## Progress, 2026-09-24 (paused)
+## Result so far, 2026-09-24: TLS layer passes
+
+A stock v18.10.0 app service, joined once through the reference proxy
+and then pointed at the hub, completed the WebSocket upgrade with
+`alpn-ping` and the inner TLS handshake with ALPN
+`teleport-reversetunnel`, then sent its SSH identification:
+
+```
+tunnel: tls established, alpn "teleport-reversetunnel"
+tunnel: agent ssh id "SSH-2.0-Go"
+```
+
+The agent verifies the hub's TLS cert against the cluster host CA before
+it sends anything, so this also proves the minted identity. SSH is next.
+
+Two fixes it took:
+
+- **`binaryType` must be `arraybuffer`.** With compatibility date
+  2026-09-01, workerd delivers binary WebSocket messages as `Blob`, and
+  `workers-rs` 0.8.6 `MessageEvent::bytes()` reads a `Blob` as zero
+  bytes. The hub sets `binaryType` before `accept()`.
+- **Auth must run with `proxy_listener_mode: multiplex`.** Otherwise the
+  reference proxy runs in separate mode and the agent dials port 3024.
+
+The reference proxy run is the oracle: `Connected to Auth Server through
+tunnel.`, then `Agent state updated ... current_state:connected`.
+
+The newer join client also tries a WebSocket upgrade with a subprotocol
+other than `alpn-ping` before it falls back to `/webapi/host/credentials`.
+The hub returns 400 for it. Phase 1 has to handle both.
+
+## Progress, 2026-09-24
 
 - **`ring` needs LLVM clang for wasm32.** Its C code is not built by
   Apple clang, so the link fails with undefined `ring_core_*` symbols.

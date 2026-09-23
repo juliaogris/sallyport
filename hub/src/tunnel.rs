@@ -44,6 +44,10 @@ impl DurableObject for Hub {
         let tls = Arc::new(server_tls_config(&self.env)?);
         let pair = WebSocketPair::new()?;
         let ws = pair.server;
+        // Newer compatibility dates deliver binary messages as Blob, which
+        // workers-rs 0.8 reads as zero bytes. Ask for ArrayBuffer instead.
+        worker::js_sys::Reflect::set(ws.as_ref(), &"binaryType".into(), &"arraybuffer".into())
+            .map_err(|_| Error::RustError("setting binaryType".into()))?;
         ws.accept()?;
 
         let (ws_side, tls_side) = tokio::io::duplex(PIPE_BYTES);
@@ -72,6 +76,7 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    console_log!("tunnel: pipe -> ws {n} bytes");
                     if ws_out.send_with_bytes(&buf[..n]).is_err() {
                         break;
                     }
@@ -92,7 +97,11 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
         while let Some(event) = events.next().await {
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {
-                    let Some(bytes) = msg.bytes() else { continue };
+                    let Some(bytes) = msg.bytes() else {
+                        console_log!("tunnel: ws message without bytes, text {:?}", msg.text().map(|t| t.len()));
+                        continue;
+                    };
+                    console_log!("tunnel: ws -> pipe {} bytes", bytes.len());
                     if wr.write_all(&bytes).await.is_err() {
                         break;
                     }

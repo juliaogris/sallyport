@@ -11,6 +11,7 @@ auth_service:
   cluster_name: sallyport
   listen_addr: 127.0.0.1:3025
   proxy_protocol: off
+  proxy_listener_mode: multiplex
   authentication:
     type: local
     second_factor: "on"
