@@ -2,6 +2,6 @@
 // what the Cloudflare edge does with the TLS ClientHello's ALPN list.
 export default {
   async fetch(request) {
-    return new Response("s0 bare worker\n", { status: 200 });
+    return new Response("s1 bare worker\n", { status: 200 });
   },
 };
