@@ -1,4 +1,4 @@
-module github.com/juliaogris/sallyport/spikes/s0/probe
+module github.com/juliaogris/sallyport/spikes/s1/probe
 
 go 1.26.5
 

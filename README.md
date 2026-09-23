@@ -10,7 +10,7 @@ a time.
 
 ## Status
 
-Feasibility and planning. No code yet. Spikes S0 to S5 come first.
+Feasibility and planning. No code yet. Spikes S1 to S5 come first, in that order.
 
 ## Layout
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the S0 probe against Teleport's api module exactly as tagged
+# Build the S1 probe against Teleport's api module exactly as tagged
 # v18.10.0, then run it against the address given as $1.
 set -euo pipefail
 cd "$(dirname "$0")"
