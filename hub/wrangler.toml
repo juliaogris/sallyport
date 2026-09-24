@@ -17,7 +17,7 @@ new_sqlite_classes = ["Hub"]
 [vars]
 CLUSTER_NAME = "sallyport"
 PUBLIC_ADDR = "localhost:8787"
-SERVER_VERSION = "18.10.0"
+SERVER_VERSION = "18.11.1"
 # S4 spike: the Host header for /spike/s4. The endpoint is off unless
 # DEV_S4 is "1" in .dev.vars; never set it in a deployment.
 S4_APP_HOST = "bench-julia.example.com"
@@ -41,7 +41,7 @@ routes = [
 [env.edge.vars]
 CLUSTER_NAME = "sallyport"
 PUBLIC_ADDR = "julia.example.com:443"
-SERVER_VERSION = "18.10.0"
+SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "julia.example.com"
 # The login host is OWNER.DOMAIN and app hosts are <app>-OWNER.DOMAIN.
 DOMAIN = "example.com"
