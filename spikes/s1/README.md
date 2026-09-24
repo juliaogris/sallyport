@@ -33,7 +33,7 @@ Cloudflare completes the handshake and ignores the ALPN offer. The probe
 reads the empty negotiated protocol as "ALPN stripped" and returns
 `true`, so a stock agent upgrades without the env var.
 
-Still to run: the same probe against `teleport.jul.run` once the zone is
+Still to run: the same probe against `julia.example.com` once the zone is
 on Cloudflare. A custom domain goes through the same edge, so the result
 is expected to match.
 

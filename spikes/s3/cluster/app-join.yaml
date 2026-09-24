@@ -22,4 +22,4 @@ app_service:
   apps:
   - name: octoprint
     uri: http://octo.local
-    public_addr: octo.jul.run
+    public_addr: octo-julia.example.com

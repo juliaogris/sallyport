@@ -22,12 +22,12 @@ app_service:
   apps:
   - name: octoprint
     uri: http://octo.local
-    public_addr: octo.jul.run
+    public_addr: octo-julia.example.com
     labels:
       sallyport-spike: s4
   # S4 spike: a local static server with index.html and a 10 MB file.
   - name: bench
     uri: http://127.0.0.1:18080
-    public_addr: bench.jul.run
+    public_addr: bench-julia.example.com
     labels:
       sallyport-spike: s4

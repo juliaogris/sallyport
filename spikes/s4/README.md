@@ -27,7 +27,7 @@ tctl --config=auth.yaml create -f spikes/s4/role.yaml
 tctl --config=auth.yaml users add s4user --roles=s4-apps --ttl=48h
 tctl --config=auth.yaml auth sign --user=s4user --format=tls --out=s4user --ttl=8h
 appsessmint -user-identity s4user -proxy-identity hub-identity \
-  -user s4user -app bench -public-addr bench.jul.run -cluster sallyport \
+  -user s4user -app bench -public-addr bench-julia.example.com -cluster sallyport \
   -out s4-appsession
 ```
 
