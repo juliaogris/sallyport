@@ -48,7 +48,7 @@ CALLOUT_HOST = "julia.example.com"
 DOMAIN = "example.com"
 OWNER = "julia"
 # Apps with a launch button on the dashboard.
-APPS = "bench,octo,octocam"
+APPS = "bench,octo,octocam:/stream"
 # Quick proof only: the Host header for /spike/s4, which is off unless the
 # DEV_S4 secret is "1". Remove DEV_S4 with `wrangler secret delete` after.
 S4_APP_HOST = "bench-julia.example.com"

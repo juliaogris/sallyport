@@ -224,23 +224,35 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
     let Some((user, _, _)) = web_session(req, cx).await? else {
         return redirect("/web/login");
     };
-    let apps = cx.env.var("APPS")?.to_string();
-    let buttons: String = apps
-        .split(',')
-        .map(str::trim)
-        .filter(|a| valid_name(a))
-        .map(|a| format!(r#"<form method="post" action="/web/launch/{a}"><button>{a}</button></form>"#))
+    let buttons: String = app_list(cx.env)?
+        .iter()
+        .map(|(a, _)| format!(r#"<form method="post" action="/web/launch/{a}"><button>{a}</button></form>"#))
         .collect();
     Response::from_html(format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>sallyport</title>
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">{STYLE}<title>sallyport</title>
 <p>Logged in as {user}.</p>{buttons}<form method="post" action="/web/logout"><button>Log out</button></form>"#
     ))
 }
 
+/// Returns the dashboard apps from `APPS`, a comma-separated list of
+/// `name` or `name:/start/path`. The start path is where a launch lands.
+fn app_list(env: &Env) -> Result<Vec<(String, String)>> {
+    Ok(env
+        .var("APPS")?
+        .to_string()
+        .split(',')
+        .filter_map(|e| {
+            let (name, path) = e.trim().split_once(':').unwrap_or((e.trim(), "/"));
+            let path_ok = path.starts_with('/') && !path.starts_with("//") && path.bytes().all(|b| b.is_ascii_graphic());
+            (valid_name(name) && path_ok).then(|| (name.to_string(), path.to_string()))
+        })
+        .collect())
+}
+
 async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
-    if !valid_name(app) {
+    let Some(start) = app_list(cx.env)?.into_iter().find(|(a, _)| a == app).map(|(_, p)| p) else {
         return Response::error("not found", 404);
-    }
+    };
     let Some((user, _, spec)) = web_session(req, cx).await? else {
         return redirect("/web/login");
     };
@@ -270,7 +282,7 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     match res {
         Ok((sid, bearer)) => {
             let mut res = Response::empty()?.with_status(303);
-            res.headers_mut().set("Location", &format!("https://{public_addr}{AUTH_PATH}#{sid}.{bearer}"))?;
+            res.headers_mut().set("Location", &format!("https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}", b64(start.as_bytes())))?;
             res.headers_mut().set("Referrer-Policy", "no-referrer")?;
             Ok(res)
         }
@@ -445,8 +457,11 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Larger text and buttons, so they are easy to tap on a phone.
+const STYLE: &str = "<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>";
+
 const LOGIN_PAGE: &str = concat!(
-    r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>sallyport login</title>
+    r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport login</title>
 <button id="go">Log in with passkey</button><pre id="out"></pre><script>
 "#,
     r#"const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
@@ -478,7 +493,7 @@ document.getElementById('go').onclick = async () => {
 </script>"#
 );
 
-const INVITE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>sallyport invite</title>
+const INVITE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport invite</title>
 <button id="go">Register a passkey</button><pre id="out"></pre><script>
 const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -508,10 +523,12 @@ document.getElementById('go').onclick = async () => {
 };
 </script>"#;
 
-const HANDOFF_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>sallyport</title>
+const HANDOFF_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
-const [sid, subject] = location.hash.slice(1).split('.');
+const [sid, subject, start] = location.hash.slice(1).split('.');
+let path = '/';
+try { const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/')); if (p.startsWith('/') && !p.startsWith('//')) path = p; } catch (e) {}
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
-  .then(r => r.ok ? location.replace('/') : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));
+  .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));
 </script>"#;
