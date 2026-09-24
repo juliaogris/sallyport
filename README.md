@@ -24,5 +24,12 @@ Feasibility and planning. No code yet. Spikes S1 to S5 come first, in that order
 ## Pi side
 
 Stock Teleport v18.10.0 app service. Auth built from a Teleport branch
-that adds auth dial-out (`tunnel_to`), so that auth opens the pipe to the
+that adds auth dial-out (`callout_to`), so that auth opens the pipe to the
 hub itself.
+
+## License
+
+sallyport is licensed under the GNU Affero General Public License v3.0 or
+later, the license of Teleport, which it adapts. See `LICENSE`. The
+vendored crates in `vendor/` keep their own licenses: `russh` is
+Apache-2.0 and `ssh-key` is Apache-2.0 or MIT.
