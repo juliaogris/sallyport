@@ -99,13 +99,19 @@ reference proxy's reset page:
   gobwas because gorilla caches read errors. For the callout a read
   error ends the stream anyway.
 
+### Agent passthrough on the pool, 2026-09-24
+
+The agent's `@remote-auth-server` dial now takes a stream from the pool,
+and the S3 direct TCP shortcut to `127.0.0.1:3025` is gone. After a hub
+reload the agent's `Instance` connection logs `passthrough to auth over
+the callout`, and S4 and S5 still pass. With no stream in the pool the
+dial is refused and the agent retries.
+
 ### Not done
 
 - **`ws://`.** Only `wss://localhost:8787` ran, because `wrangler dev`
   serves HTTPS here. The Go side's URL check has a unit test for `ws://`.
 - **A bad signature, live.** The stream bound refused the wrong-key pool
   before its challenge. The Go unit test covers a rejected signature.
-- **The agent's `@remote-auth-server` passthrough** still uses the S3
-  direct TCP shortcut, not the pool.
 - **The process-level test** from the plan, a `TeleportProcess` with the
   callout set, is not written. The pool, listener and config tests are.

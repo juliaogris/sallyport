@@ -8,9 +8,9 @@
 //! until the hub takes it. Auth hands the stream to its listener on the
 //! hub's first message.
 
-use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::{select, Either};
@@ -33,23 +33,23 @@ const MAX_STREAMS: usize = 8;
 struct Stream {
     pipe: DuplexStream,
     /// False once the WebSocket has closed.
-    alive: Rc<Cell<bool>>,
+    alive: Arc<AtomicBool>,
 }
 
 /// The verified streams waiting for the hub, oldest first. The Durable
-/// Object is single-threaded.
+/// Object is single-threaded, but russh's handler must be `Send`.
 #[derive(Clone, Default)]
 pub struct Pool {
-    ready: Rc<RefCell<VecDeque<Stream>>>,
-    open: Rc<Cell<usize>>,
+    ready: Arc<Mutex<VecDeque<Stream>>>,
+    open: Arc<AtomicUsize>,
 }
 
 impl Pool {
     /// Takes the oldest open stream, or returns None if there is none.
     pub fn take(&self) -> Option<DuplexStream> {
-        let mut ready = self.ready.borrow_mut();
+        let mut ready = self.ready.lock().unwrap();
         while let Some(s) = ready.pop_front() {
-            if s.alive.get() {
+            if s.alive.load(Ordering::Relaxed) {
                 return Some(s.pipe);
             }
         }
@@ -58,13 +58,13 @@ impl Pool {
 
     /// Returns the number of verified streams waiting.
     pub fn ready(&self) -> usize {
-        self.ready.borrow().iter().filter(|s| s.alive.get()).count()
+        self.ready.lock().unwrap().iter().filter(|s| s.alive.load(Ordering::Relaxed)).count()
     }
 }
 
 /// Accepts one WebSocket from auth and runs the challenge on it.
 pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
-    if pool.open.get() >= MAX_STREAMS {
+    if pool.open.load(Ordering::Relaxed) >= MAX_STREAMS {
         console_log!("tunnel/auth: stream limit reached");
         return Response::error("too many streams", 503);
     }
@@ -82,10 +82,10 @@ pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
     console_log!("tunnel/auth: connection accepted");
 
     let pool = pool.clone();
-    pool.open.set(pool.open.get() + 1);
+    pool.open.fetch_add(1, Ordering::Relaxed);
     wasm_bindgen_futures::spawn_local(async move {
         serve(ws, key, host, &pool).await;
-        pool.open.set(pool.open.get().saturating_sub(1));
+        pool.open.fetch_sub(1, Ordering::Relaxed);
     });
     Response::from_websocket(pair.client)
 }
@@ -132,11 +132,11 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
     console_log!("tunnel/auth: stream ready");
 
     let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
-    let alive = Rc::new(Cell::new(true));
-    pool.ready.borrow_mut().push_back(Stream {
+    let alive = Arc::new(AtomicBool::new(true));
+    pool.ready.lock().unwrap().push_back(Stream {
         pipe: hub_side,
         alive: alive.clone(),
     });
     pump(&ws, events, pipe_side).await;
-    alive.set(false);
+    alive.store(false, Ordering::Relaxed);
 }

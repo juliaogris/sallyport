@@ -41,19 +41,11 @@ const MAX_AUTH_FAILURES: u32 = 3;
 const MAX_PENDING_TRANSPORTS: usize = 16;
 /// How long an agent-opened transport channel may wait for its dial.
 const DIAL_DEADLINE: Duration = Duration::from_secs(10);
-/// Passthroughs to auth per connection, and across the Durable Object.
-/// Workers limit simultaneous outbound connections per invocation.
+/// Passthroughs to auth per connection, and across the Durable Object. Each
+/// one holds an auth pipe stream, so the total stays under the pool size to
+/// leave streams for the hub's own calls.
 const MAX_PASSTHROUGHS_PER_CONN: usize = 2;
 pub const MAX_PASSTHROUGHS_TOTAL: usize = 4;
-
-/// Where the agent-to-auth passthrough connects. This is a spike shortcut
-/// that only works under `wrangler dev`; the auth callout replaces it.
-/// None disables the passthrough.
-#[derive(Clone)]
-pub struct AuthAddr {
-    pub host: String,
-    pub port: u16,
-}
 
 /// An authenticated `App` connection and the agent's host ID, which is the
 /// `server_id` of a dial into it.
@@ -72,13 +64,14 @@ pub struct Shared {
     pub passthroughs: Arc<AtomicUsize>,
     /// Where an `App` connection registers itself after its first ping.
     pub app_tunnel: crate::app::TunnelSlot,
+    /// Streams to auth that auth opened with its callout.
+    pub auth_pipe: crate::authpipe::Pool,
 }
 
 /// Per-connection state for one agent SSH connection.
 pub struct AgentHandler {
     host_ca: PublicKey,
     cluster: String,
-    auth_addr: Option<AuthAddr>,
     shared: Shared,
     auth_failures: u32,
     passthroughs: Arc<AtomicUsize>,
@@ -97,7 +90,7 @@ pub struct AgentHandler {
 }
 
 impl AgentHandler {
-    pub fn new(host_ca: PublicKey, cluster: String, auth_addr: Option<AuthAddr>, proxy_name: String, shared: Shared) -> Self {
+    pub fn new(host_ca: PublicKey, cluster: String, proxy_name: String, shared: Shared) -> Self {
         Self {
             shared,
             auth_failures: 0,
@@ -106,7 +99,6 @@ impl AgentHandler {
             discovery: Arc::new(Mutex::new(None)),
             host_ca,
             cluster,
-            auth_addr,
             host_id: None,
             role: None,
             heartbeat: None,
@@ -253,31 +245,25 @@ impl russh::server::Handler for AgentHandler {
                     console_log!("ssh: rejected dial to {addr:?}");
                     return Ok(false);
                 }
-                let Some(auth) = self.auth_addr.clone() else {
-                    console_log!("ssh: passthrough disabled");
-                    return Ok(false);
-                };
                 if self.passthroughs.load(Ordering::Relaxed) >= MAX_PASSTHROUGHS_PER_CONN
                     || self.shared.passthroughs.load(Ordering::Relaxed) >= MAX_PASSTHROUGHS_TOTAL
                 {
                     console_log!("ssh: passthrough limit reached");
                     return Ok(false);
                 }
-                let socket = match Socket::builder().connect(auth.host.clone(), auth.port) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        console_log!("ssh: auth connect {}:{}: {err}", auth.host, auth.port);
-                        return Ok(false);
-                    }
+                // The bytes are the agent's own mTLS to auth. The hub only
+                // copies them.
+                let Some(mut pipe) = self.shared.auth_pipe.take() else {
+                    console_log!("ssh: passthrough refused, no auth pipe stream");
+                    return Ok(false);
                 };
-                console_log!("ssh: passthrough to auth {}:{}", auth.host, auth.port);
+                console_log!("ssh: passthrough to auth over the callout");
                 let (conn_count, total_count) = (self.passthroughs.clone(), self.shared.passthroughs.clone());
                 conn_count.fetch_add(1, Ordering::Relaxed);
                 total_count.fetch_add(1, Ordering::Relaxed);
                 wasm_bindgen_futures::spawn_local(async move {
                     let mut stream = ch.into_stream();
-                    let mut socket = socket;
-                    match tokio::io::copy_bidirectional(&mut stream, &mut socket).await {
+                    match tokio::io::copy_bidirectional(&mut stream, &mut pipe).await {
                         Ok((up, down)) => console_log!("ssh: passthrough closed, {up} up, {down} down"),
                         Err(err) => console_log!("ssh: passthrough error: {err}"),
                     }

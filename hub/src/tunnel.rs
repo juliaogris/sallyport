@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use crate::app::TunnelSlot;
 use crate::authpipe;
-use crate::ssh::{AgentHandler, AuthAddr, Shared};
+use crate::ssh::{AgentHandler, Shared};
 use worker::*;
 
 /// The WebSocket subprotocol a stock agent asks for on reverse tunnel
@@ -100,6 +100,7 @@ impl DurableObject for Hub {
             authed: Arc::new(AtomicBool::new(false)),
             passthroughs: self.passthroughs.clone(),
             app_tunnel: self.app_tunnel.clone(),
+            auth_pipe: self.auth_pipe.clone(),
         };
         let authed = shared.authed.clone();
         let deadline_ws = ws.clone();
@@ -115,7 +116,6 @@ impl DurableObject for Hub {
         let handler = AgentHandler::new(
             host_ca(&self.env)?,
             self.env.var("CLUSTER_NAME")?.to_string(),
-            dev_passthrough(&self.env)?,
             proxy_name,
             shared,
         );
@@ -254,24 +254,6 @@ fn rewrap_openssh(pem: &str) -> String {
     }
     out.push_str("-----END OPENSSH PRIVATE KEY-----\n");
     out
-}
-
-/// The spike-only direct connection from the hub to auth. It is off unless
-/// `DEV_PASSTHROUGH` is "1", because in a deployment it would make the hub
-/// a TCP relay to whatever `AUTH_HOST` names. The auth callout replaces it.
-fn dev_passthrough(env: &Env) -> Result<Option<AuthAddr>> {
-    let enabled = env.var("DEV_PASSTHROUGH").map(|v| v.to_string() == "1").unwrap_or(false);
-    if !enabled {
-        return Ok(None);
-    }
-    let port = env.var("AUTH_PORT")?.to_string();
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| Error::RustError(format!("AUTH_PORT {port:?} is not a port")))?;
-    Ok(Some(AuthAddr {
-        host: env.var("AUTH_HOST")?.to_string(),
-        port,
-    }))
 }
 
 fn host_ca(env: &Env) -> Result<PublicKey> {
