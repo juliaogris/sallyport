@@ -5,7 +5,11 @@
 //! agent runs TLS with ALPN `teleport-reversetunnel`, pinned to the cluster
 //! host CA, and inside that SSH.
 
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use futures::StreamExt;
@@ -13,7 +17,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use russh::keys::ssh_key::{Certificate, PrivateKey, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-use crate::ssh::{AgentHandler, AuthAddr};
+use crate::ssh::{AgentHandler, AuthAddr, Shared};
 use worker::*;
 
 /// The WebSocket subprotocol a stock agent asks for on reverse tunnel
@@ -23,16 +27,29 @@ const SUBPROTOCOL: &str = "alpn-ping";
 const ALPN_REVERSE_TUNNEL: &[u8] = b"teleport-reversetunnel";
 /// Buffer size of the in-memory pipe between the WebSocket and TLS.
 const PIPE_BYTES: usize = 64 * 1024;
+/// A connection that has not authenticated by then is closed. Without it an
+/// unauthenticated client can hold a tunnel open forever.
+const AUTH_DEADLINE: Duration = Duration::from_secs(30);
+/// Open tunnels the Durable Object accepts. One app service uses about
+/// three: its auth client, its tunnel, and a short-lived probe.
+const MAX_CONNECTIONS: usize = 16;
 
 #[durable_object]
 pub struct Hub {
     env: Env,
+    /// Open tunnels, for [`MAX_CONNECTIONS`]. The object is single-threaded.
+    connections: Rc<Cell<usize>>,
+    passthroughs: Arc<AtomicUsize>,
 }
 
 impl DurableObject for Hub {
     fn new(_state: State, env: Env) -> Self {
         console_log!("hub: durable object started");
-        Self { env }
+        Self {
+            env,
+            connections: Rc::new(Cell::new(0)),
+            passthroughs: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -44,6 +61,10 @@ impl DurableObject for Hub {
             return Response::error("unsupported subprotocol", 400);
         }
 
+        if self.connections.get() >= MAX_CONNECTIONS {
+            console_log!("tunnel: connection limit reached");
+            return Response::error("too many connections", 503);
+        }
         let tls = Arc::new(server_tls_config(&self.env)?);
         let pair = WebSocketPair::new()?;
         let ws = pair.server;
@@ -54,17 +75,35 @@ impl DurableObject for Hub {
         ws.accept()?;
 
         let (ws_side, tls_side) = tokio::io::duplex(PIPE_BYTES);
-        wasm_bindgen_futures::spawn_local(bridge(ws, ws_side));
+        let connections = self.connections.clone();
+        connections.set(connections.get() + 1);
+        let bridge_ws = ws.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            bridge(bridge_ws, ws_side).await;
+            connections.set(connections.get().saturating_sub(1));
+        });
+
+        let shared = Shared {
+            authed: Arc::new(AtomicBool::new(false)),
+            passthroughs: self.passthroughs.clone(),
+        };
+        let authed = shared.authed.clone();
+        let deadline_ws = ws.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            worker::Delay::from(AUTH_DEADLINE).await;
+            if !authed.load(Ordering::Relaxed) {
+                console_log!("tunnel: not authenticated after {AUTH_DEADLINE:?}, closing");
+                let _ = deadline_ws.close(Some(1008), Some("auth timeout"));
+            }
+        });
         let (ssh, proxy_name) = ssh_config(&self.env)?;
         let ssh = Arc::new(ssh);
         let handler = AgentHandler::new(
             host_ca(&self.env)?,
             self.env.var("CLUSTER_NAME")?.to_string(),
-            AuthAddr {
-                host: self.env.var("AUTH_HOST")?.to_string(),
-                port: self.env.var("AUTH_PORT")?.to_string().parse().unwrap_or(3025),
-            },
+            dev_passthrough(&self.env)?,
             proxy_name,
+            shared,
         );
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(err) = serve(tls_side, tls, ssh, handler).await {
@@ -90,7 +129,6 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    console_log!("tunnel: pipe -> ws {n} bytes");
                     if ws_out.send_with_bytes(&buf[..n]).is_err() {
                         break;
                     }
@@ -112,10 +150,8 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {
                     let Some(bytes) = msg.bytes() else {
-                        console_log!("tunnel: ws message without bytes, text {:?}", msg.text().map(|t| t.len()));
                         continue;
                     };
-                    console_log!("tunnel: ws -> pipe {} bytes", bytes.len());
                     if wr.write_all(&bytes).await.is_err() {
                         break;
                     }
@@ -177,7 +213,9 @@ fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
         // not used, so an idle connection needs no server-side timeout.
         inactivity_timeout: None,
         keepalive_interval: None,
-        auth_rejection_time: std::time::Duration::from_millis(0),
+        // A delay on each rejected attempt, so failing auth is not a free
+        // CPU loop. The handler also drops the connection after 3 attempts.
+        auth_rejection_time: Duration::from_secs(1),
         ..Default::default()
     };
     Ok((config, proxy_name))
@@ -197,6 +235,24 @@ fn rewrap_openssh(pem: &str) -> String {
     }
     out.push_str("-----END OPENSSH PRIVATE KEY-----\n");
     out
+}
+
+/// The spike-only direct connection from the hub to auth. It is off unless
+/// `DEV_PASSTHROUGH` is "1", because in a deployment it would make the hub
+/// a TCP relay to whatever `AUTH_HOST` names. The auth callout replaces it.
+fn dev_passthrough(env: &Env) -> Result<Option<AuthAddr>> {
+    let enabled = env.var("DEV_PASSTHROUGH").map(|v| v.to_string() == "1").unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let port = env.var("AUTH_PORT")?.to_string();
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| Error::RustError(format!("AUTH_PORT {port:?} is not a port")))?;
+    Ok(Some(AuthAddr {
+        host: env.var("AUTH_HOST")?.to_string(),
+        port,
+    }))
 }
 
 fn host_ca(env: &Env) -> Result<PublicKey> {

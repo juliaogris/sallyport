@@ -6,7 +6,9 @@
 //! `teleport-transport` with dial address `@remote-auth-server`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use russh::server::{Auth, Handle, Msg, Session};
 use russh::{Channel, ChannelId};
@@ -18,6 +20,11 @@ const CHAN_HEARTBEAT: &str = "teleport-heartbeat";
 const CHAN_TRANSPORT: &str = "teleport-transport";
 const CHAN_DISCOVERY: &str = "teleport-discovery";
 const REQ_DISCOVERY: &str = "discovery";
+/// How often the hub re-announces itself. The agent forgets a proxy
+/// 3 minutes after the last announcement (lib/reversetunnel/track,
+/// DefaultProxyExpiry) and then dials to find more, so this stays well
+/// under that. The agent's 5-minute ping is too slow to piggyback on.
+const DISCOVERY_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 const REQ_DIAL: &str = "teleport-transport-dial";
 const REQ_PING: &str = "ping";
 const GLOBAL_KEEPALIVE: &str = "keepalive@openssh.com";
@@ -28,20 +35,43 @@ const ROLE_APP: &str = "App";
 /// The app service's process identity, used by its auth client, which
 /// reaches auth through the `@remote-auth-server` passthrough.
 const ROLE_INSTANCE: &str = "Instance";
+/// Rejected auth attempts after which the connection is dropped.
+const MAX_AUTH_FAILURES: u32 = 3;
+/// Transport channels one connection may hold before their dial request.
+const MAX_PENDING_TRANSPORTS: usize = 16;
+/// How long an agent-opened transport channel may wait for its dial.
+const DIAL_DEADLINE: Duration = Duration::from_secs(10);
+/// Passthroughs to auth per connection, and across the Durable Object.
+/// Workers limit simultaneous outbound connections per invocation.
+const MAX_PASSTHROUGHS_PER_CONN: usize = 2;
+pub const MAX_PASSTHROUGHS_TOTAL: usize = 4;
 
 /// Where the agent-to-auth passthrough connects. This is a spike shortcut
 /// that only works under `wrangler dev`; the auth callout replaces it.
+/// None disables the passthrough.
 #[derive(Clone)]
 pub struct AuthAddr {
     pub host: String,
     pub port: u16,
 }
 
+/// State shared by every connection in the Durable Object.
+#[derive(Clone)]
+pub struct Shared {
+    /// Set once this connection authenticates; the pre-auth deadline reads it.
+    pub authed: Arc<AtomicBool>,
+    /// Passthroughs to auth open across the Durable Object.
+    pub passthroughs: Arc<AtomicUsize>,
+}
+
 /// Per-connection state for one agent SSH connection.
 pub struct AgentHandler {
     host_ca: PublicKey,
     cluster: String,
-    auth_addr: AuthAddr,
+    auth_addr: Option<AuthAddr>,
+    shared: Shared,
+    auth_failures: u32,
+    passthroughs: Arc<AtomicUsize>,
     /// The authenticated agent's host ID, set by certificate auth.
     host_id: Option<String>,
     /// The authenticated certificate's system role, `App` or `Instance`.
@@ -57,8 +87,11 @@ pub struct AgentHandler {
 }
 
 impl AgentHandler {
-    pub fn new(host_ca: PublicKey, cluster: String, auth_addr: AuthAddr, proxy_name: String) -> Self {
+    pub fn new(host_ca: PublicKey, cluster: String, auth_addr: Option<AuthAddr>, proxy_name: String, shared: Shared) -> Self {
         Self {
+            shared,
+            auth_failures: 0,
+            passthroughs: Arc::new(AtomicUsize::new(0)),
             proxy_name,
             discovery: Arc::new(Mutex::new(None)),
             host_ca,
@@ -75,9 +108,17 @@ impl AgentHandler {
     /// Returns why a certificate is not an acceptable agent credential, or
     /// None if it is. russh has already checked the validity window and the
     /// certificate's own signature.
-    fn reject_reason(&self, cert: &Certificate) -> Option<String> {
+    fn reject_reason(&self, user: &str, cert: &Certificate) -> Option<String> {
         if cert.cert_type() != CertType::Host {
             return Some("not a host certificate".into());
+        }
+        // ssh-key treats an empty principal list as "any principal"; Go's
+        // CertChecker requires the SSH user to be one of them.
+        if !cert.valid_principals().iter().any(|p| p == user) {
+            return Some("user is not a certificate principal".into());
+        }
+        if !cert.critical_options().is_empty() {
+            return Some("unexpected critical options".into());
         }
         if cert.signature_key() != self.host_ca.key_data() {
             return Some("not signed by the cluster host CA".into());
@@ -99,23 +140,36 @@ impl AgentHandler {
     }
 }
 
+impl AgentHandler {
+    /// Rejects one auth attempt, and drops the connection after
+    /// [`MAX_AUTH_FAILURES`], since russh has no attempt limit.
+    fn fail_auth(&mut self) -> std::result::Result<Auth, russh::Error> {
+        self.auth_failures += 1;
+        if self.auth_failures >= MAX_AUTH_FAILURES {
+            return Err(russh::Error::Disconnect);
+        }
+        Ok(Auth::reject())
+    }
+}
+
 impl russh::server::Handler for AgentHandler {
     type Error = russh::Error;
 
     async fn auth_publickey(&mut self, user: &str, _key: &PublicKey) -> std::result::Result<Auth, Self::Error> {
         console_log!("ssh: rejected plain key for {user:?}");
-        Ok(Auth::reject())
+        self.fail_auth()
     }
 
     async fn auth_openssh_certificate(&mut self, user: &str, cert: &Certificate) -> std::result::Result<Auth, Self::Error> {
-        if let Some(reason) = self.reject_reason(cert) {
+        if let Some(reason) = self.reject_reason(user, cert) {
             console_log!("ssh: rejected certificate for {user:?}: {reason}");
-            return Ok(Auth::reject());
+            return self.fail_auth();
         }
         let role = cert.extensions().get(EXT_ROLE).cloned().unwrap_or_default();
         console_log!("ssh: agent {user:?} authenticated, role {role}");
         self.host_id = Some(user.to_string());
         self.role = Some(role);
+        self.shared.authed.store(true, Ordering::Relaxed);
         Ok(Auth::Accept)
     }
 
@@ -127,7 +181,25 @@ impl russh::server::Handler for AgentHandler {
                 Ok(true)
             }
             CHAN_TRANSPORT => {
-                self.transports.lock().unwrap().insert(channel.id(), channel);
+                let id = channel.id();
+                {
+                    let mut pending = self.transports.lock().unwrap();
+                    if pending.len() >= MAX_PENDING_TRANSPORTS {
+                        console_log!("ssh: rejected transport, {} pending", pending.len());
+                        return Ok(false);
+                    }
+                    pending.insert(id, channel);
+                }
+                // Drop a transport channel whose dial request never comes.
+                let pending = self.transports.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    worker::Delay::from(DIAL_DEADLINE).await;
+                    let stale = pending.lock().unwrap().remove(&id);
+                    if let Some(ch) = stale {
+                        console_log!("ssh: transport channel never dialed, closing");
+                        let _ = ch.close().await;
+                    }
+                });
                 Ok(true)
             }
             other => {
@@ -147,11 +219,8 @@ impl russh::server::Handler for AgentHandler {
                         // The SSH user is already `<host UUID>.<cluster>`.
                         wasm_bindgen_futures::spawn_local(test_dial(session.handle(), host_id));
                     }
+                    wasm_bindgen_futures::spawn_local(discovery_loop(session.handle(), self.discovery.clone(), self.proxy_name.clone()));
                 }
-                // Tell the agent this hub is the only proxy, on every ping.
-                // Without it the agent pool keeps dialling for more proxies
-                // and aborts each attempt with "proxy already claimed".
-                wasm_bindgen_futures::spawn_local(announce(session.handle(), self.discovery.clone(), self.proxy_name.clone()));
                 Ok(true)
             }
             REQ_DIAL => {
@@ -170,7 +239,16 @@ impl russh::server::Handler for AgentHandler {
                     console_log!("ssh: rejected dial to {addr:?}");
                     return Ok(false);
                 }
-                let auth = self.auth_addr.clone();
+                let Some(auth) = self.auth_addr.clone() else {
+                    console_log!("ssh: passthrough disabled");
+                    return Ok(false);
+                };
+                if self.passthroughs.load(Ordering::Relaxed) >= MAX_PASSTHROUGHS_PER_CONN
+                    || self.shared.passthroughs.load(Ordering::Relaxed) >= MAX_PASSTHROUGHS_TOTAL
+                {
+                    console_log!("ssh: passthrough limit reached");
+                    return Ok(false);
+                }
                 let socket = match Socket::builder().connect(auth.host.clone(), auth.port) {
                     Ok(s) => s,
                     Err(err) => {
@@ -179,6 +257,9 @@ impl russh::server::Handler for AgentHandler {
                     }
                 };
                 console_log!("ssh: passthrough to auth {}:{}", auth.host, auth.port);
+                let (conn_count, total_count) = (self.passthroughs.clone(), self.shared.passthroughs.clone());
+                conn_count.fetch_add(1, Ordering::Relaxed);
+                total_count.fetch_add(1, Ordering::Relaxed);
                 wasm_bindgen_futures::spawn_local(async move {
                     let mut stream = ch.into_stream();
                     let mut socket = socket;
@@ -186,6 +267,8 @@ impl russh::server::Handler for AgentHandler {
                         Ok((up, down)) => console_log!("ssh: passthrough closed, {up} up, {down} down"),
                         Err(err) => console_log!("ssh: passthrough error: {err}"),
                     }
+                    conn_count.fetch_sub(1, Ordering::Relaxed);
+                    total_count.fetch_sub(1, Ordering::Relaxed);
                 });
                 Ok(true)
             }
@@ -194,6 +277,11 @@ impl russh::server::Handler for AgentHandler {
                 Ok(false)
             }
         }
+    }
+
+    async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> std::result::Result<(), Self::Error> {
+        self.transports.lock().unwrap().remove(&channel);
+        Ok(())
     }
 
     async fn global_request_unknown(&mut self, typ: &str, _want_reply: bool, _data: &[u8], _session: &mut Session) -> std::result::Result<bool, Self::Error> {
@@ -224,9 +312,18 @@ async fn test_dial(handle: Handle, server_id: String) {
     let _ = ch.close().await;
 }
 
+/// Announces this hub every [`DISCOVERY_EVERY`] until the connection closes.
+async fn discovery_loop(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_name: String) {
+    while announce(handle.clone(), slot.clone(), proxy_name.clone()).await {
+        worker::Delay::from(DISCOVERY_EVERY).await;
+    }
+    console_log!("ssh: discovery loop ended");
+}
+
 /// Sends a discovery request listing this hub as the cluster's only proxy
 /// (lib/reversetunnel/discovery.go). Opens the channel on first use.
-async fn announce(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_name: String) {
+/// Returns false once the connection is gone.
+async fn announce(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_name: String) -> bool {
     let existing = slot.lock().unwrap().take();
     let ch = match existing {
         Some(ch) => ch,
@@ -234,16 +331,17 @@ async fn announce(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_
             Ok(ch) => ch,
             Err(err) => {
                 console_log!("ssh: discovery open failed: {err}");
-                return;
+                return false;
             }
         },
     };
     let req = serde_json::json!({
         "proxies": [{ "version": "v2", "metadata": { "name": proxy_name } }],
     });
-    match ch.request_custom(REQ_DISCOVERY, false, req.to_string().into_bytes()).await {
-        Ok(_) => console_log!("ssh: discovery sent, proxy {proxy_name}"),
-        Err(err) => console_log!("ssh: discovery failed: {err}"),
+    if let Err(err) = ch.request_custom(REQ_DISCOVERY, false, req.to_string().into_bytes()).await {
+        console_log!("ssh: discovery failed: {err}");
+        return false;
     }
     *slot.lock().unwrap() = Some(ch);
+    true
 }

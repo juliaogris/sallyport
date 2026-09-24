@@ -49,9 +49,12 @@ impl UnixTime {
     #[cfg(feature = "std")]
     pub fn new(secs: u64) -> Result<Self> {
         // sallyport patch: OpenSSH and Teleport use u64::MAX in
-        // valid_before to mean "forever". Keep the raw value, so a
-        // re-encoded certificate keeps its CA signature, and saturate only
-        // the SystemTime view.
+        // valid_before to mean "forever". Accept exactly that value above
+        // MAX_SECS, keep it raw so a re-encoded certificate keeps its CA
+        // signature, and saturate only the SystemTime view.
+        if secs > MAX_SECS && secs != u64::MAX {
+            return Err(Error::Time);
+        }
         let time = UNIX_EPOCH
             .checked_add(Duration::from_secs(secs.min(MAX_SECS)))
             .or_else(|| UNIX_EPOCH.checked_add(Duration::from_secs(FOREVER_SECS)))
@@ -134,5 +137,11 @@ mod tests {
     #[test]
     fn new_over_max_secs_returns_error() {
         assert_eq!(UnixTime::new(MAX_SECS + 1), Err(Error::Time));
+    }
+
+    #[test]
+    fn new_u64_max_is_forever() {
+        let t = UnixTime::new(u64::MAX).unwrap();
+        assert_eq!(u64::from(t), u64::MAX);
     }
 }

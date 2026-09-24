@@ -21,14 +21,14 @@ Reviewer: security-auditor agent (Opus 5.5), read-only, on sallyport at
 
 ## Findings
 
-| ID | Severity | Finding | Fix |
-|---|---|---|---|
-| H1 | High | No pre-auth deadline, no connection cap; `inactivity_timeout: None` also disables the SSH id read timeout; `auth_rejection_time: 0` | 30 s deadline over TLS accept plus SSH auth; cap connections per DO; non-zero rejection time; drop after repeated auth failures |
-| H2 | High | SSH user not checked against `valid_principals`; empty principals means any | Reject unless principals contain the user; reject empty principals |
-| M1 | Medium | Undialed transport channels leak and can stall the session loop | Cap transports per connection; remove on close and after a dial deadline |
-| M2 | Medium | Passthrough sockets unbounded; Instance is held by every agent type | Cap passthroughs per connection and in total |
-| M3 | Medium | `AUTH_HOST`/`AUTH_PORT` silent port fallback; relay risk if shipped | Fail on bad port; passthrough only with `DEV_PASSTHROUGH=1`; replace with the callout before deploy |
-| L1 | Low | ssh-key accepts any value above `i64::MAX`; upstream test fails | Accept only `u64::MAX`; update test |
-| L2 | Low | Per-frame logging controllable by unauthenticated clients | Remove per-frame logs |
-| L3 | Low | One pinned host CA key; fails during CA rotation | Accept a CA list (functional, not security) |
-| L4 | Low | Unknown critical options not rejected | Reject non-empty critical options |
+| ID | Severity | Finding | Fix | Status |
+|---|---|---|---|---|
+| H1 | High | No pre-auth deadline, no connection cap; `inactivity_timeout: None` also disables the SSH id read timeout; `auth_rejection_time: 0` | 30 s deadline over TLS accept plus SSH auth; cap connections per DO; non-zero rejection time; drop after repeated auth failures | fixed: 30 s deadline verified (idle client closed 1008 at 30 s), cap 16 connections, 1 s rejection, drop after 3 failures. Per-IP rate limit is a Phase 5 Cloudflare rule. |
+| H2 | High | SSH user not checked against `valid_principals`; empty principals means any | Reject unless principals contain the user; reject empty principals | fixed |
+| M1 | Medium | Undialed transport channels leak and can stall the session loop | Cap transports per connection; remove on close and after a dial deadline | fixed: cap 16, removed on close, 10 s dial deadline |
+| M2 | Medium | Passthrough sockets unbounded; Instance is held by every agent type | Cap passthroughs per connection and in total | fixed: 2 per connection, 4 total |
+| M3 | Medium | `AUTH_HOST`/`AUTH_PORT` silent port fallback; relay risk if shipped | Fail on bad port; passthrough only with `DEV_PASSTHROUGH=1`; replace with the callout before deploy | fixed: passthrough only with DEV_PASSTHROUGH=1, bad port fails |
+| L1 | Low | ssh-key accepts any value above `i64::MAX`; upstream test fails | Accept only `u64::MAX`; update test | fixed, with a test |
+| L2 | Low | Per-frame logging controllable by unauthenticated clients | Remove per-frame logs | fixed |
+| L3 | Low | One pinned host CA key; fails during CA rotation | Accept a CA list (functional, not security) | deferred: rotation is a non-goal |
+| L4 | Low | Unknown critical options not rejected | Reject non-empty critical options | fixed |
