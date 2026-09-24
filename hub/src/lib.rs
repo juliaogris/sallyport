@@ -3,6 +3,7 @@
 //! The Worker answers the unauthenticated discovery endpoint and forwards
 //! agent connections to one Durable Object, which holds every tunnel.
 
+mod app;
 mod ping;
 mod ssh;
 mod tunnel;
@@ -31,6 +32,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             if !upgrade.eq_ignore_ascii_case("websocket") {
                 return Response::error("upgrade required", 426);
             }
+            let ns = env.durable_object("HUB")?;
+            let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
+            stub.fetch_with_request(req).await
+        }
+        app::PATH => {
             let ns = env.durable_object("HUB")?;
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await

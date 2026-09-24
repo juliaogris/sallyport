@@ -17,7 +17,7 @@ use russh::keys::ssh_key::{Certificate, PublicKey};
 use worker::*;
 
 const CHAN_HEARTBEAT: &str = "teleport-heartbeat";
-const CHAN_TRANSPORT: &str = "teleport-transport";
+pub const CHAN_TRANSPORT: &str = "teleport-transport";
 const CHAN_DISCOVERY: &str = "teleport-discovery";
 const REQ_DISCOVERY: &str = "discovery";
 /// How often the hub re-announces itself. The agent forgets a proxy
@@ -25,7 +25,7 @@ const REQ_DISCOVERY: &str = "discovery";
 /// DefaultProxyExpiry) and then dials to find more, so this stays well
 /// under that. The agent's 5-minute ping is too slow to piggyback on.
 const DISCOVERY_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
-const REQ_DIAL: &str = "teleport-transport-dial";
+pub const REQ_DIAL: &str = "teleport-transport-dial";
 const REQ_PING: &str = "ping";
 const GLOBAL_KEEPALIVE: &str = "keepalive@openssh.com";
 const ADDR_REMOTE_AUTH: &str = "@remote-auth-server";
@@ -55,6 +55,14 @@ pub struct AuthAddr {
     pub port: u16,
 }
 
+/// An authenticated `App` connection and the agent's host ID, which is the
+/// `server_id` of a dial into it.
+#[derive(Clone)]
+pub struct AppTunnel {
+    pub handle: Handle,
+    pub server_id: String,
+}
+
 /// State shared by every connection in the Durable Object.
 #[derive(Clone)]
 pub struct Shared {
@@ -62,6 +70,8 @@ pub struct Shared {
     pub authed: Arc<AtomicBool>,
     /// Passthroughs to auth open across the Durable Object.
     pub passthroughs: Arc<AtomicUsize>,
+    /// Where an `App` connection registers itself after its first ping.
+    pub app_tunnel: crate::app::TunnelSlot,
 }
 
 /// Per-connection state for one agent SSH connection.
@@ -217,7 +227,11 @@ impl russh::server::Handler for AgentHandler {
                     console_log!("ssh: first ping {:?}", String::from_utf8_lossy(data));
                     if let Some(host_id) = self.host_id.clone() {
                         // The SSH user is already `<host UUID>.<cluster>`.
-                        wasm_bindgen_futures::spawn_local(test_dial(session.handle(), host_id));
+                        wasm_bindgen_futures::spawn_local(test_dial(session.handle(), host_id.clone()));
+                        *self.shared.app_tunnel.lock().unwrap() = Some(AppTunnel {
+                            handle: session.handle(),
+                            server_id: host_id,
+                        });
                     }
                     wasm_bindgen_futures::spawn_local(discovery_loop(session.handle(), self.discovery.clone(), self.proxy_name.clone()));
                 }

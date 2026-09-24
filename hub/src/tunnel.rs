@@ -17,6 +17,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use russh::keys::ssh_key::{Certificate, PrivateKey, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
+use crate::app::TunnelSlot;
 use crate::ssh::{AgentHandler, AuthAddr, Shared};
 use worker::*;
 
@@ -40,6 +41,7 @@ pub struct Hub {
     /// Open tunnels, for [`MAX_CONNECTIONS`]. The object is single-threaded.
     connections: Rc<Cell<usize>>,
     passthroughs: Arc<AtomicUsize>,
+    app_tunnel: TunnelSlot,
 }
 
 impl DurableObject for Hub {
@@ -49,10 +51,14 @@ impl DurableObject for Hub {
             env,
             connections: Rc::new(Cell::new(0)),
             passthroughs: Arc::new(AtomicUsize::new(0)),
+            app_tunnel: Default::default(),
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if req.path() == crate::app::PATH {
+            return crate::app::handle(&req, &self.env, &self.app_tunnel).await;
+        }
         let protocols = req
             .headers()
             .get("Sec-WebSocket-Protocol")?
@@ -86,6 +92,7 @@ impl DurableObject for Hub {
         let shared = Shared {
             authed: Arc::new(AtomicBool::new(false)),
             passthroughs: self.passthroughs.clone(),
+            app_tunnel: self.app_tunnel.clone(),
         };
         let authed = shared.authed.clone();
         let deadline_ws = ws.clone();
@@ -286,7 +293,7 @@ fn server_tls_config(env: &Env) -> Result<rustls::ServerConfig> {
 
 /// Reads a base64-encoded secret. Secrets are base64 so that multi-line
 /// PEM survives `.dev.vars` and `wrangler secret put`.
-fn secret_bytes(env: &Env, name: &str) -> Result<Vec<u8>> {
+pub fn secret_bytes(env: &Env, name: &str) -> Result<Vec<u8>> {
     let value = env.secret(name)?.to_string();
     base64::engine::general_purpose::STANDARD
         .decode(value.trim())
