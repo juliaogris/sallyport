@@ -154,6 +154,12 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         res.headers_mut().append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
         Ok(res)
     };
+    // Every `<app>-<owner>.<domain>` is the same site, so SameSite=Lax still
+    // sends the app cookies on a POST from a sibling app host. Only this
+    // host may send a request that can change state.
+    if !matches!(req.method(), Method::Get | Method::Head | Method::Options) && !same_origin_fetch(&req, &host)? {
+        return Response::error("bad origin", 403);
+    }
     let (Some(sid), Some(subject)) = (cookie(&req, APP_COOKIE)?, cookie(&req, SUBJECT_COOKIE)?) else {
         return to_login();
     };
@@ -427,6 +433,19 @@ fn same_origin(req: &Request, host: &str) -> Result<bool> {
     Ok(req.headers().get("Origin")?.as_deref() == Some(format!("https://{host}").as_str()))
 }
 
+/// Returns false when the browser says the request came from another
+/// origin. A request with neither `Sec-Fetch-Site` nor `Origin` is not from
+/// a browser page and passes.
+fn same_origin_fetch(req: &Request, host: &str) -> Result<bool> {
+    if let Some(site) = req.headers().get("Sec-Fetch-Site")? {
+        return Ok(site == "same-origin" || site == "none");
+    }
+    match req.headers().get("Origin")? {
+        Some(origin) => Ok(origin == format!("https://{host}")),
+        None => Ok(true),
+    }
+}
+
 fn cookie(req: &Request, name: &str) -> Result<Option<String>> {
     let header = req.headers().get("Cookie")?.unwrap_or_default();
     Ok(header.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v.to_string()))
@@ -527,7 +546,7 @@ const HANDOFF_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="r
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
-try { const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/')); if (p.startsWith('/') && !p.startsWith('//')) path = p; } catch (e) {}
+try { const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/')); if (p.startsWith('/') && !p.startsWith('//') && !p.includes('\\')) path = p; } catch (e) {}
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
   .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));

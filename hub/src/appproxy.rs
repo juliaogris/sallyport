@@ -121,6 +121,10 @@ fn build_response(response: http::Response<hyper::body::Incoming>) -> std::resul
             continue;
         }
         let value = value.to_str().map_err(|e| format!("response header {name}: {e}"))?;
+        // The app must not replace or clear the hub's own session cookies.
+        if name == http::header::SET_COOKIE && value.trim_start().starts_with(SP_COOKIE_PREFIX) {
+            continue;
+        }
         headers.append(name.as_str(), value).map_err(|e| format!("response header {name}: {e}"))?;
     }
     let body = Response::from_stream(body_stream(incoming)).map_err(|e| format!("response body: {e}"))?;
