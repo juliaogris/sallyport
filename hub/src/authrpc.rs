@@ -171,8 +171,154 @@ pub struct WebSessionSpecV2 {
     pub priv_key: Vec<u8>,
     #[prost(bytes = "vec", tag = "4")]
     pub tls_cert: Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub bearer_token: String,
+    #[prost(message, optional, tag = "7")]
+    pub expires: Option<Timestamp>,
     #[prost(bytes = "vec", tag = "15")]
     pub tls_priv: Vec<u8>,
+}
+
+/// `google.protobuf.Timestamp`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Timestamp {
+    #[prost(int64, tag = "1")]
+    pub seconds: i64,
+    #[prost(int32, tag = "2")]
+    pub nanos: i32,
+}
+
+impl WebSessionSpecV2 {
+    /// Returns true when the session has an expiry and it has not passed.
+    pub fn unexpired(&self) -> bool {
+        let now = (Date::now().as_millis() / 1000) as i64;
+        self.expires.as_ref().is_some_and(|t| t.seconds > now)
+    }
+}
+
+pub const CREATE_REGISTER_CHALLENGE: &str = "/proto.AuthService/CreateRegisterChallenge";
+pub const CHANGE_USER_AUTHENTICATION: &str = "/proto.AuthService/ChangeUserAuthentication";
+/// `proto.DeviceType` value for WebAuthn.
+pub const DEVICE_TYPE_WEBAUTHN: i32 = 3;
+/// `proto.DeviceUsage` value for a passkey.
+pub const DEVICE_USAGE_PASSWORDLESS: i32 = 2;
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CreateRegisterChallengeRequest {
+    #[prost(string, tag = "1")]
+    pub token_id: String,
+    #[prost(int32, tag = "2")]
+    pub device_type: i32,
+    #[prost(int32, tag = "3")]
+    pub device_usage: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct MfaRegisterChallenge {
+    #[prost(message, optional, tag = "3")]
+    pub webauthn: Option<CredentialCreation>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialCreation {
+    #[prost(message, optional, tag = "1")]
+    pub public_key: Option<CreationOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CreationOptions {
+    #[prost(bytes = "vec", tag = "1")]
+    pub challenge: Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    pub rp: Option<RelyingParty>,
+    #[prost(message, optional, tag = "3")]
+    pub user: Option<UserEntity>,
+    #[prost(message, repeated, tag = "4")]
+    pub credential_parameters: Vec<CredentialParameter>,
+    #[prost(int64, tag = "5")]
+    pub timeout_ms: i64,
+    #[prost(message, repeated, tag = "6")]
+    pub exclude_credentials: Vec<CredentialDescriptor>,
+    #[prost(string, tag = "7")]
+    pub attestation: String,
+    #[prost(message, optional, tag = "9")]
+    pub authenticator_selection: Option<AuthenticatorSelection>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RelyingParty {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct UserEntity {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(string, tag = "3")]
+    pub display_name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialParameter {
+    #[prost(string, tag = "1")]
+    pub r#type: String,
+    #[prost(int32, tag = "2")]
+    pub alg: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AuthenticatorSelection {
+    #[prost(string, tag = "1")]
+    pub authenticator_attachment: String,
+    #[prost(bool, tag = "2")]
+    pub require_resident_key: bool,
+    #[prost(string, tag = "3")]
+    pub user_verification: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ChangeUserAuthenticationRequest {
+    #[prost(string, tag = "1")]
+    pub token_id: String,
+    #[prost(message, optional, tag = "3")]
+    pub new_mfa_register_response: Option<MfaRegisterResponse>,
+    #[prost(string, tag = "4")]
+    pub new_device_name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct MfaRegisterResponse {
+    #[prost(message, optional, tag = "3")]
+    pub webauthn: Option<CredentialCreationResponse>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialCreationResponse {
+    #[prost(string, tag = "1")]
+    pub r#type: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub raw_id: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub response: Option<AttestationResponse>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AttestationResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_data_json: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub attestation_object: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ChangeUserAuthenticationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub web_session: Option<WebSessionV2>,
 }
 
 /// Builds a TLS client config toward auth, with the client cert and key in
