@@ -8,7 +8,11 @@ mod appproxy;
 mod authpipe;
 mod authrpc;
 mod ping;
+#[cfg(feature = "spikes")]
+mod s4;
+#[cfg(feature = "spikes")]
 mod s5;
+#[cfg(feature = "spikes")]
 mod s5login;
 mod ssh;
 mod tunnel;
@@ -48,16 +52,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await
         }
-        app::PATH | s5::PATH => {
-            let ns = env.durable_object("HUB")?;
-            let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
-            stub.fetch_with_request(req).await
-        }
-        p if p.starts_with(s5login::LOGIN) => {
-            let ns = env.durable_object("HUB")?;
-            let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
-            stub.fetch_with_request(req).await
-        }
+        #[cfg(feature = "spikes")]
+        p if p.starts_with("/spike/") => hub(&env)?.fetch_with_request(req).await,
         _ if kind.is_some() => hub(&env)?.fetch_with_request(req).await,
         _ => Response::error("not found", 404),
     }

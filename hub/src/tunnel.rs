@@ -88,9 +88,12 @@ impl DurableObject for Hub {
             }
         }
         match req.path().as_str() {
-            crate::app::PATH => return crate::app::handle(&req, &self.env, &self.app_tunnel).await,
             authpipe::PATH => return authpipe::accept(&self.env, &self.auth_pipe),
+            #[cfg(feature = "spikes")]
+            crate::s4::PATH => return crate::s4::handle(&req, &self.env, &self.app_tunnel).await,
+            #[cfg(feature = "spikes")]
             crate::s5::PATH => return crate::s5::handle(&self.env, &self.auth_pipe).await,
+            #[cfg(feature = "spikes")]
             p if p.starts_with(crate::s5login::LOGIN) => return crate::s5login::handle(req, &self.env, &self.auth_pipe).await,
             _ => {}
         }

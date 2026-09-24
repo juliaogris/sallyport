@@ -4,7 +4,7 @@ compatibility_date = "2026-09-01"
 
 [build]
 # ring's C code needs a clang with a wasm32 target; Apple clang has none.
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release . --features spikes"
 
 [[durable_objects.bindings]]
 name = "HUB"
@@ -30,13 +30,18 @@ S5_APP_HOST = "bench-julia.example.com"
 
 # The deployment on Cloudflare: `wrangler deploy --env edge`. Secrets are
 # set per env with `wrangler secret put --env edge`. DEV_S4 and DEV_S5 are
-# never set here, so the spike endpoints answer 404.
+# never set here, and the edge build leaves out the spike endpoints.
 [env.edge]
 routes = [
   { pattern = "julia.example.com", custom_domain = true },
   { pattern = "bench-julia.example.com", custom_domain = true },
+  { pattern = "octo-julia.example.com", custom_domain = true },
   { pattern = "octocam-julia.example.com", custom_domain = true },
 ]
+
+# The same build without the `spikes` feature, so /spike/* answers 404.
+[env.edge.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
 
 [env.edge.vars]
 CLUSTER_NAME = "sallyport"
@@ -47,10 +52,7 @@ CALLOUT_HOST = "julia.example.com"
 DOMAIN = "example.com"
 OWNER = "julia"
 # Apps with a launch button on the dashboard.
-APPS = "bench,octocam:/stream"
-# Quick proof only: the Host header for /spike/s4, which is off unless the
-# DEV_S4 secret is "1". Remove DEV_S4 with `wrangler secret delete` after.
-S4_APP_HOST = "bench-julia.example.com"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.edge.durable_objects.bindings]]
 name = "HUB"
