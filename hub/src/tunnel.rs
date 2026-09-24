@@ -63,6 +63,7 @@ impl DurableObject for Hub {
             crate::app::PATH => return crate::app::handle(&req, &self.env, &self.app_tunnel).await,
             authpipe::PATH => return authpipe::accept(&self.env, &self.auth_pipe),
             crate::s5::PATH => return crate::s5::handle(&self.env, &self.auth_pipe).await,
+            p if p.starts_with(crate::s5login::LOGIN) => return crate::s5login::handle(req, &self.env, &self.auth_pipe).await,
             _ => {}
         }
         let protocols = req

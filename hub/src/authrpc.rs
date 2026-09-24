@@ -28,6 +28,73 @@ pub const PING: &str = "/proto.AuthService/Ping";
 pub const GET_CLUSTER_NAME: &str = "/teleport.clusterconfig.v1.ClusterConfigService/GetClusterName";
 pub const CREATE_APP_SESSION: &str = "/proto.AuthService/CreateAppSession";
 pub const GET_APP_SESSION: &str = "/proto.AuthService/GetAppSession";
+pub const CREATE_AUTHENTICATE_CHALLENGE: &str = "/proto.AuthService/CreateAuthenticateChallenge";
+pub const GET_WEB_SESSION: &str = "/proto.AuthService/GetWebSession";
+/// The legacy HTTP route for `AuthenticateWebUser`. A passwordless login has
+/// an empty user, so the path has an empty segment, as the Go proxy sends it.
+pub const AUTHENTICATE_WEB_USER_PASSWORDLESS: &str = "/v2/users//web/authenticate";
+
+/// `teleport.mfa.v1.ChallengeScope` value for a passwordless login.
+pub const SCOPE_PASSWORDLESS_LOGIN: i32 = 2;
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CreateAuthenticateChallengeRequest {
+    #[prost(message, optional, tag = "4")]
+    pub passwordless: Option<Passwordless>,
+    #[prost(message, optional, tag = "6")]
+    pub challenge_extensions: Option<ChallengeExtensions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Passwordless {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ChallengeExtensions {
+    #[prost(int32, tag = "1")]
+    pub scope: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct MfaAuthenticateChallenge {
+    #[prost(message, optional, tag = "3")]
+    pub webauthn: Option<CredentialAssertion>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialAssertion {
+    #[prost(message, optional, tag = "1")]
+    pub public_key: Option<RequestOptions>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RequestOptions {
+    #[prost(bytes = "vec", tag = "1")]
+    pub challenge: Vec<u8>,
+    #[prost(int64, tag = "2")]
+    pub timeout_ms: i64,
+    #[prost(string, tag = "3")]
+    pub rp_id: String,
+    #[prost(message, repeated, tag = "4")]
+    pub allow_credentials: Vec<CredentialDescriptor>,
+    #[prost(string, tag = "6")]
+    pub user_verification: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialDescriptor {
+    #[prost(string, tag = "1")]
+    pub r#type: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct GetWebSessionRequest {
+    #[prost(string, tag = "1")]
+    pub user: String,
+    #[prost(string, tag = "2")]
+    pub session_id: String,
+}
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct PingRequest {}
@@ -111,6 +178,12 @@ pub struct WebSessionSpecV2 {
 /// Builds a TLS client config toward auth, with the client cert and key in
 /// the named base64 PEM secrets.
 pub fn tls_config(env: &Env, cert_secret: &str, key_secret: &str) -> Result<rustls::ClientConfig> {
+    tls_config_from_pem(env, &secret_bytes(env, cert_secret)?, &secret_bytes(env, key_secret)?)
+        .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))
+}
+
+/// Builds a TLS client config toward auth from a PEM cert and key.
+pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&secret_bytes(env, "HOST_CA_TLS")?) {
         let cert = cert.map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
@@ -118,17 +191,16 @@ pub fn tls_config(env: &Env, cert_secret: &str, key_secret: &str) -> Result<rust
             .add(cert)
             .map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
     }
-    let certs = CertificateDer::pem_slice_iter(&secret_bytes(env, cert_secret)?)
+    let certs = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(&secret_bytes(env, key_secret)?)
-        .map_err(|e| Error::RustError(format!("{key_secret}: {e}")))?;
+        .map_err(|e| Error::RustError(format!("cert: {e}")))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| Error::RustError(format!("key: {e}")))?;
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .map_err(|e| Error::RustError(e.to_string()))?
         .with_root_certificates(roots)
         .with_client_auth_cert(certs, key)
-        .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))?;
+        .map_err(|e| Error::RustError(format!("client identity: {e}")))?;
     config.alpn_protocols = vec![ALPN_H2.to_vec()];
     Ok(config)
 }
@@ -205,6 +277,74 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
         return Err(format!("{path}: short gRPC frame"));
     }
     Resp::decode(&data[5..5 + len]).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Sends one JSON `POST` to auth's legacy HTTP API on its own stream,
+/// within [`CALL_DEADLINE`]. Auth's TLS offers only `h2`, and `h2` goes to
+/// gRPC, so this runs TLS with no ALPN and HTTP/1.1. Returns the HTTP status
+/// and the body.
+pub async fn post_json(stream: DuplexStream, tls: &rustls::ClientConfig, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
+    let mut tls = tls.clone();
+    tls.alpn_protocols.clear();
+    let call = Box::pin(post_json_inner(stream, Arc::new(tls), path, body));
+    match select(call, Box::pin(Delay::from(CALL_DEADLINE))).await {
+        Either::Left((res, _)) => res,
+        Either::Right(_) => Err(format!("{path}: no answer within {CALL_DEADLINE:?}")),
+    }
+}
+
+async fn post_json_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let name = ServerName::try_from(AUTH_SNI).map_err(|e| e.to_string())?;
+    let mut tls = tokio_rustls::TlsConnector::from(tls)
+        .connect(name, stream)
+        .await
+        .map_err(|e| format!("tls to auth: {e}"))?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {AUTH_SNI}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    tls.write_all(head.as_bytes()).await.map_err(|e| format!("{path}: {e}"))?;
+    tls.write_all(&body).await.map_err(|e| format!("{path}: {e}"))?;
+    let mut resp = Vec::new();
+    match tls.read_to_end(&mut resp).await {
+        Ok(_) => {}
+        // Auth may close without a TLS close_notify.
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        Err(err) => return Err(format!("{path}: {err}")),
+    }
+    let end = resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| format!("{path}: no HTTP header end"))?;
+    let head = String::from_utf8_lossy(&resp[..end]).to_ascii_lowercase();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("{path}: bad status line"))?;
+    let body = &resp[end + 4..];
+    let body = if head.contains("transfer-encoding: chunked") { dechunk(body)? } else { body.to_vec() };
+    Ok((status, body))
+}
+
+/// Decodes an HTTP/1.1 chunked body.
+fn dechunk(mut b: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    loop {
+        let line = b.windows(2).position(|w| w == b"\r\n").ok_or("bad chunk")?;
+        let size = std::str::from_utf8(&b[..line]).map_err(|e| e.to_string())?;
+        let size = usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16).map_err(|e| e.to_string())?;
+        b = &b[line + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if b.len() < size + 2 {
+            return Err("short chunk".into());
+        }
+        out.extend_from_slice(&b[..size]);
+        b = &b[size + 2..];
+    }
 }
 
 /// Decodes the percent-encoding gRPC uses in `grpc-message`.

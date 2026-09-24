@@ -8,6 +8,7 @@ mod authpipe;
 mod authrpc;
 mod ping;
 mod s5;
+mod s5login;
 mod ssh;
 mod tunnel;
 
@@ -40,6 +41,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             stub.fetch_with_request(req).await
         }
         app::PATH | s5::PATH => {
+            let ns = env.durable_object("HUB")?;
+            let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
+            stub.fetch_with_request(req).await
+        }
+        p if p.starts_with(s5login::LOGIN) => {
             let ns = env.durable_object("HUB")?;
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await

@@ -59,7 +59,35 @@ $ curl https://localhost:8787/spike/s5
   four calls in 12 to 23 ms.
 - **Size:** 2.4 MB raw, 817 KB gzipped, against the 10 MB budget.
 
+### Passwordless login, 2026-09-24: pass
+
+`/spike/s5/login` is a page with one button. It runs the login the plan
+describes for Phase 3, with a passkey registered for `s4user` through the
+reference proxy's reset page:
+
+1. `CreateAuthenticateChallenge` with the hub identity and scope
+   `PASSWORDLESS_LOGIN`. The hub gives the challenge to
+   `navigator.credentials.get`.
+2. `AuthenticateWebUser` with the hub identity and the browser's
+   assertion unchanged, as `{"username": "", "webauthn": ...}`.
+3. `GetWebSession` with the hub identity. It returns the user's TLS cert
+   and key.
+4. `CreateAppSession` with that cert, then `GetAppSession` with the hub
+   identity.
+
+```
+200
+{"app_session":{"has_tls_private_key":true,"tls_cert_bytes":1549,"user":"s4user"},
+ "web_session":{"has_key":true,"tls_cert_bytes":1326,"user":"s4user"}}
+```
+
 ### Findings
+
+- **`AuthenticateWebUser` is HTTP/1.1, not gRPC.** It is the legacy
+  route `POST /v2/users//web/authenticate`, with an empty user segment for
+  a passwordless login. Auth's TLS offers only ALPN `h2`, and `h2` goes to
+  the gRPC server, which answers 415. The hub sends this call on its own
+  stream, with TLS and no ALPN, as HTTP/1.1.
 
 - **`tonic` was not tried.** The plan's fallback, `prost` with gRPC
   framing by hand over `h2`, was small enough to be the first choice.
@@ -73,9 +101,6 @@ $ curl https://localhost:8787/spike/s5
 
 ### Not done
 
-- **`AuthenticateWebUser` and `GetWebSession`.** Both need a passwordless
-  login, which needs a passkey touch. The user cert came from
-  `tctl auth sign`.
 - **`ws://`.** Only `wss://localhost:8787` ran, because `wrangler dev`
   serves HTTPS here. The Go side's URL check has a unit test for `ws://`.
 - **A bad signature, live.** The stream bound refused the wrong-key pool
