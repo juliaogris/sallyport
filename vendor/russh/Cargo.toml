@@ -55,7 +55,7 @@ version = "1.13.1"
 optional = true
 
 [dependencies.base64ct]
-version = "~1.6"
+version = "1.6"
 
 [dependencies.bitflags]
 version = "2.0"

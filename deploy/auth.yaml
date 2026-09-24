@@ -1,0 +1,25 @@
+# Auth on the Mac, calling out to the deployed hub on julia.example.com.
+version: v3
+teleport:
+  nodename: sallyport-auth
+  data_dir: ../.local/data/auth
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: true
+  cluster_name: sallyport
+  listen_addr: 127.0.0.1:3025
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  callout_to: wss://julia.example.com/tunnel/auth
+  callout_key_file: ../.local/callout.pem
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      rp_id: localhost
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false

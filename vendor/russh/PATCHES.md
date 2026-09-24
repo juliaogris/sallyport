@@ -107,3 +107,5 @@ so that `[patch.crates-io]` can point at this directory.
   requests or answer custom channel requests.
 
 - **ssh-key `UnixTime`** (`vendor/ssh-key/src/certificate/unix_time.rs`): accept `valid_before = u64::MAX`, which OpenSSH and Teleport use for "forever". The raw value is kept so a re-encoded certificate keeps its CA signature; only the `SystemTime` view saturates.
+
+- **`base64ct` requirement** (`Cargo.toml`): `~1.6` relaxed to `1.6`, so the lockfile can use 1.8.3. `base64ct` 1.6.0 rejects some valid OpenSSH private keys with `InvalidLength`, depending on the key's encoded length. A hub identity minted for `julia.example.com` hit it; 1.8.3 parses the same key.

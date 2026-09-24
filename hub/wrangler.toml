@@ -27,3 +27,19 @@ CALLOUT_HOST = "localhost:8787"
 S5_USER = "s4user"
 S5_APP_NAME = "bench"
 S5_APP_HOST = "bench-julia.example.com"
+
+# The deployment on Cloudflare: `wrangler deploy --env edge`. Secrets are
+# set per env with `wrangler secret put --env edge`. DEV_S4 and DEV_S5 are
+# never set here, so the spike endpoints answer 404.
+[env.edge]
+routes = [{ pattern = "julia.example.com", custom_domain = true }]
+
+[env.edge.vars]
+CLUSTER_NAME = "sallyport"
+PUBLIC_ADDR = "julia.example.com:443"
+SERVER_VERSION = "18.10.0"
+CALLOUT_HOST = "julia.example.com"
+
+[[env.edge.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
