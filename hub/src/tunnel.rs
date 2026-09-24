@@ -44,6 +44,7 @@ pub struct Hub {
     passthroughs: Arc<AtomicUsize>,
     app_tunnel: TunnelSlot,
     auth_pipe: authpipe::Pool,
+    hub_auth: crate::authrpc::HubAuth,
 }
 
 impl DurableObject for Hub {
@@ -55,10 +56,26 @@ impl DurableObject for Hub {
             passthroughs: Arc::new(AtomicUsize::new(0)),
             app_tunnel: Default::default(),
             auth_pipe: Default::default(),
+            hub_auth: Default::default(),
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        let host = req.url()?.host_str().unwrap_or_default().to_string();
+        let special = matches!(req.path().as_str(), "/webapi/find" | "/webapi/ping" | "/webapi/connectionupgrade" | authpipe::PATH);
+        if let Some(kind) = crate::web::classify(&self.env, &host) {
+            let cx = crate::web::Ctx {
+                env: &self.env,
+                pool: &self.auth_pipe,
+                auth: &self.hub_auth,
+                tunnel: &self.app_tunnel,
+            };
+            match kind {
+                crate::web::Host::App(app) => return crate::web::app_host_request(req, &cx, &app).await,
+                crate::web::Host::Login if !special => return crate::web::login_host_request(req, &cx).await,
+                crate::web::Host::Login => {}
+            }
+        }
         match req.path().as_str() {
             crate::app::PATH => return crate::app::handle(&req, &self.env, &self.app_tunnel).await,
             authpipe::PATH => return authpipe::accept(&self.env, &self.auth_pipe),

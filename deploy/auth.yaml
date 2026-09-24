@@ -18,7 +18,7 @@ auth_service:
     type: local
     second_factor: "on"
     webauthn:
-      rp_id: localhost
+      rp_id: julia.example.com
 proxy_service:
   enabled: false
 ssh_service:

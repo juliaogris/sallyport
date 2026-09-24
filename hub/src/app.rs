@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use rustls::pki_types::ServerName;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use worker::*;
@@ -29,6 +29,10 @@ const READ_BYTES: usize = 64 * 1024;
 /// The authenticated `App` connection the hub dials apps through. The
 /// newest connection replaces the previous one. S4 has one agent.
 pub type TunnelSlot = Arc<Mutex<Option<AppTunnel>>>;
+
+/// A TLS connection to the app service, running over one channel of the
+/// agent tunnel.
+pub(crate) type AppStream = tokio_rustls::client::TlsStream<russh::ChannelStream<russh::server::Msg>>;
 
 /// Answers `/spike/s4`. Off unless `DEV_S4` is "1".
 pub async fn handle(req: &Request, env: &Env, slot: &TunnelSlot) -> Result<Response> {
@@ -64,32 +68,8 @@ pub async fn handle(req: &Request, env: &Env, slot: &TunnelSlot) -> Result<Respo
 /// whole response. Returns the status line, the body size and the timing.
 async fn get(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str, host: &str, path: &str) -> std::result::Result<serde_json::Value, String> {
     let start = Date::now().as_millis();
-    let ch = tunnel
-        .handle
-        .channel_open_custom(CHAN_TRANSPORT, Vec::new())
-        .await
-        .map_err(|e| format!("transport open: {e}"))?;
-    let dial = json!({
-        "address": "@local-node",
-        "server_id": tunnel.server_id,
-        "conn_type": "app",
-    });
-    let accepted = ch
-        .request_custom(REQ_DIAL, true, dial.to_string().into_bytes())
-        .await
-        .map_err(|e| format!("dial request: {e}"))?;
-    if !accepted {
-        return Err("dial refused by agent".into());
-    }
+    let mut stream = dial_app(tunnel, tls, cluster).await?;
     let dialed = Date::now().as_millis();
-
-    let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
-    let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
-    let mut stream = tokio_rustls::TlsConnector::from(tls)
-        .connect(name, ch.into_stream())
-        .await
-        .map_err(|e| format!("tls connect: {e}"))?;
-    let handshook = Date::now().as_millis();
 
     let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream
@@ -125,14 +105,15 @@ async fn get(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str, 
 
     let head = String::from_utf8_lossy(&head);
     let status = head.lines().next().unwrap_or_default().to_string();
-    let transfer_ms = done.saturating_sub(handshook).max(1);
+    let transfer_ms = done.saturating_sub(dialed).max(1);
     let mb_per_s = body_bytes as f64 / (1024.0 * 1024.0) / (transfer_ms as f64 / 1000.0);
     console_log!("app: GET {path} {status:?}, {body_bytes} bytes in {transfer_ms} ms, {mb_per_s:.2} MB/s");
     Ok(json!({
         "status": status,
         "body_bytes": body_bytes,
+        // Covers the transport dial and the TLS handshake, which now share
+        // one round trip through `dial_app`.
         "dial_ms": dialed - start,
-        "tls_ms": handshook - dialed,
         "transfer_ms": transfer_ms,
         "mb_per_s": (mb_per_s * 100.0).round() / 100.0,
     }))
@@ -143,6 +124,37 @@ fn head_end(head: &[u8]) -> Option<usize> {
     head.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
+/// Opens a transport channel into the agent, asks it to dial its local app
+/// service, and runs TLS toward the app service with the given identity.
+/// The SNI is the hex-encoded cluster name, as the app service expects it
+/// (api/utils/cluster.go, EncodeClusterName).
+pub(crate) async fn dial_app(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str) -> std::result::Result<AppStream, String> {
+    let ch = tunnel
+        .handle
+        .channel_open_custom(CHAN_TRANSPORT, Vec::new())
+        .await
+        .map_err(|e| format!("transport open: {e}"))?;
+    let dial = json!({
+        "address": "@local-node",
+        "server_id": tunnel.server_id,
+        "conn_type": "app",
+    });
+    let accepted = ch
+        .request_custom(REQ_DIAL, true, dial.to_string().into_bytes())
+        .await
+        .map_err(|e| format!("dial request: {e}"))?;
+    if !accepted {
+        return Err("dial refused by agent".into());
+    }
+
+    let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
+    let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
+    tokio_rustls::TlsConnector::from(tls)
+        .connect(name, ch.into_stream())
+        .await
+        .map_err(|e| format!("tls connect: {e}"))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -150,23 +162,6 @@ fn hex(bytes: &[u8]) -> String {
 /// Builds the TLS client config: the app service's cert must chain to the
 /// cluster host CA, and the hub presents the user's app session cert.
 fn client_tls_config(env: &Env) -> Result<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in CertificateDer::pem_slice_iter(&secret_bytes(env, "HOST_CA_TLS")?) {
-        let cert = cert.map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
-        roots
-            .add(cert)
-            .map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
-    }
-    let certs = CertificateDer::pem_slice_iter(&secret_bytes(env, "S4_APP_CERT")?)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::RustError(format!("S4_APP_CERT: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(&secret_bytes(env, "S4_APP_KEY")?)
-        .map_err(|e| Error::RustError(format!("S4_APP_KEY: {e}")))?;
-
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| Error::RustError(e.to_string()))?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)
+    crate::appproxy::tls_from_pem(env, &secret_bytes(env, "S4_APP_CERT")?, &secret_bytes(env, "S4_APP_KEY")?)
         .map_err(|e| Error::RustError(format!("app session identity: {e}")))
 }

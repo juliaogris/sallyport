@@ -19,8 +19,8 @@ ssh_service:
 app_service:
   enabled: true
   apps:
-  - name: octoprint
-    uri: http://octo.local
+  - name: octo
+    uri: http://octo.lan
     public_addr: octo-julia.example.com
     labels:
       sallyport-spike: s4
@@ -28,5 +28,12 @@ app_service:
   - name: bench
     uri: http://127.0.0.1:18080
     public_addr: bench-julia.example.com
+    labels:
+      sallyport-spike: s4
+  # The OctoPrint webcam through ~/bin/octocam, which serves /snapshot and
+  # /stream on the loopback address.
+  - name: octocam
+    uri: http://127.0.0.1:18081
+    public_addr: octocam-julia.example.com
     labels:
       sallyport-spike: s4

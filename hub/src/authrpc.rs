@@ -512,3 +512,41 @@ fn percent_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
+
+/// One HTTP/2 connection to auth with the hub TLS identity, reused across
+/// calls. A call that fails at the transport opens a new connection from
+/// the pool and is retried once. A gRPC error status is not retried.
+#[derive(Clone, Default)]
+pub struct HubAuth {
+    send: Arc<std::sync::Mutex<Option<SendRequest<Bytes>>>>,
+}
+
+impl HubAuth {
+    async fn conn(&self, env: &Env, pool: &crate::authpipe::Pool, fresh: bool) -> std::result::Result<SendRequest<Bytes>, String> {
+        if !fresh {
+            let cached = self.send.lock().unwrap().clone();
+            if let Some(send) = cached {
+                if send.clone().ready().await.is_ok() {
+                    return Ok(send);
+                }
+            }
+        }
+        let tls = Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
+        let send = connect(pool.take().ok_or("no auth pipe stream")?, tls).await?;
+        *self.send.lock().unwrap() = Some(send.clone());
+        Ok(send)
+    }
+
+    /// Makes one unary call with the hub identity.
+    pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(&self, env: &Env, pool: &crate::authpipe::Pool, path: &str, req: &Req) -> std::result::Result<Resp, String> {
+        let send = self.conn(env, pool, false).await?;
+        match unary(&send, path, req).await {
+            Err(err) if !err.contains("grpc-status") => {
+                console_log!("authrpc: {err}, reconnecting");
+                let send = self.conn(env, pool, true).await?;
+                unary(&send, path, req).await
+            }
+            res => res,
+        }
+    }
+}

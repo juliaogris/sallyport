@@ -32,13 +32,26 @@ S5_APP_HOST = "bench-julia.example.com"
 # set per env with `wrangler secret put --env edge`. DEV_S4 and DEV_S5 are
 # never set here, so the spike endpoints answer 404.
 [env.edge]
-routes = [{ pattern = "julia.example.com", custom_domain = true }]
+routes = [
+  { pattern = "julia.example.com", custom_domain = true },
+  { pattern = "bench-julia.example.com", custom_domain = true },
+  { pattern = "octo-julia.example.com", custom_domain = true },
+  { pattern = "octocam-julia.example.com", custom_domain = true },
+]
 
 [env.edge.vars]
 CLUSTER_NAME = "sallyport"
 PUBLIC_ADDR = "julia.example.com:443"
 SERVER_VERSION = "18.10.0"
 CALLOUT_HOST = "julia.example.com"
+# The login host is OWNER.DOMAIN and app hosts are <app>-OWNER.DOMAIN.
+DOMAIN = "example.com"
+OWNER = "julia"
+# Apps with a launch button on the dashboard.
+APPS = "bench,octo,octocam"
+# Quick proof only: the Host header for /spike/s4, which is off unless the
+# DEV_S4 secret is "1". Remove DEV_S4 with `wrangler secret delete` after.
+S4_APP_HOST = "bench-julia.example.com"
 
 [[env.edge.durable_objects.bindings]]
 name = "HUB"

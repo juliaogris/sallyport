@@ -4,6 +4,7 @@
 //! agent connections to one Durable Object, which holds every tunnel.
 
 mod app;
+mod appproxy;
 mod authpipe;
 mod authrpc;
 mod ping;
@@ -11,6 +12,7 @@ mod s5;
 mod s5login;
 mod ssh;
 mod tunnel;
+mod web;
 
 use worker::*;
 
@@ -26,6 +28,12 @@ fn start() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    let host = req.url()?.host_str().unwrap_or_default().to_string();
+    let kind = web::classify(&env, &host);
+    // Every path on an app host is app traffic, so it goes to the hub.
+    if matches!(kind, Some(web::Host::App(_))) {
+        return hub(&env)?.fetch_with_request(req).await;
+    }
     let path = req.path();
     match path.as_str() {
         "/webapi/find" | "/webapi/ping" => ping::handle(&env),
@@ -50,6 +58,12 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await
         }
+        _ if kind.is_some() => hub(&env)?.fetch_with_request(req).await,
         _ => Response::error("not found", 404),
     }
+}
+
+/// Returns the stub of the single Durable Object that holds all state.
+fn hub(env: &Env) -> Result<Stub> {
+    env.durable_object("HUB")?.id_from_name(HUB_INSTANCE)?.get_stub()
 }
