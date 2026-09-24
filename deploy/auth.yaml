@@ -14,6 +14,9 @@ auth_service:
   proxy_listener_mode: multiplex
   callout_to: wss://julia.example.com/tunnel/auth
   callout_key_file: ../.local/callout.pem
+  # A hub deploy drops the agent's tunnel, and the agent only notices at its
+  # next keepalive. The default is 5 minutes, up to 15 with retries.
+  keep_alive_interval: 30s
   authentication:
     type: local
     second_factor: "on"
