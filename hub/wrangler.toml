@@ -25,3 +25,9 @@ AUTH_PORT = "3025"
 # S4 spike: the Host header for /spike/s4. The endpoint is off unless
 # DEV_S4 is "1" in .dev.vars; never set it in a deployment.
 S4_APP_HOST = "bench.jul.run"
+# S5 spike: the host auth's callout dials, which auth signs in the challenge.
+CALLOUT_HOST = "localhost:8787"
+# S5 spike: the app session /spike/s5 creates. Off unless DEV_S5 is "1".
+S5_USER = "s4user"
+S5_APP_NAME = "bench"
+S5_APP_HOST = "bench.jul.run"

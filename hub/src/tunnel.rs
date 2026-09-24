@@ -18,6 +18,7 @@ use russh::keys::ssh_key::{Certificate, PrivateKey, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use crate::app::TunnelSlot;
+use crate::authpipe;
 use crate::ssh::{AgentHandler, AuthAddr, Shared};
 use worker::*;
 
@@ -27,7 +28,7 @@ const SUBPROTOCOL: &str = "alpn-ping";
 /// The ALPN value the agent offers inside the upgraded connection.
 const ALPN_REVERSE_TUNNEL: &[u8] = b"teleport-reversetunnel";
 /// Buffer size of the in-memory pipe between the WebSocket and TLS.
-const PIPE_BYTES: usize = 64 * 1024;
+pub const PIPE_BYTES: usize = 64 * 1024;
 /// A connection that has not authenticated by then is closed. Without it an
 /// unauthenticated client can hold a tunnel open forever.
 const AUTH_DEADLINE: Duration = Duration::from_secs(30);
@@ -42,6 +43,7 @@ pub struct Hub {
     connections: Rc<Cell<usize>>,
     passthroughs: Arc<AtomicUsize>,
     app_tunnel: TunnelSlot,
+    auth_pipe: authpipe::Pool,
 }
 
 impl DurableObject for Hub {
@@ -52,12 +54,16 @@ impl DurableObject for Hub {
             connections: Rc::new(Cell::new(0)),
             passthroughs: Arc::new(AtomicUsize::new(0)),
             app_tunnel: Default::default(),
+            auth_pipe: Default::default(),
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if req.path() == crate::app::PATH {
-            return crate::app::handle(&req, &self.env, &self.app_tunnel).await;
+        match req.path().as_str() {
+            crate::app::PATH => return crate::app::handle(&req, &self.env, &self.app_tunnel).await,
+            authpipe::PATH => return authpipe::accept(&self.env, &self.auth_pipe),
+            crate::s5::PATH => return crate::s5::handle(&self.env, &self.auth_pipe).await,
+            _ => {}
         }
         let protocols = req
             .headers()
@@ -127,32 +133,37 @@ impl DurableObject for Hub {
 /// Copies bytes between the WebSocket and one end of an in-memory pipe
 /// until either side closes.
 async fn bridge(ws: WebSocket, pipe: DuplexStream) {
+    let events = match ws.events() {
+        Ok(events) => events,
+        Err(err) => {
+            console_error!("tunnel: websocket events: {err}");
+            return;
+        }
+    };
+    pump(&ws, events, pipe).await;
+}
+
+/// Copies bytes between a WebSocket, read from `events`, and one end of an
+/// in-memory pipe until either side closes.
+pub async fn pump(ws: &WebSocket, mut events: EventStream<'_>, pipe: DuplexStream) {
     let (mut rd, mut wr) = tokio::io::split(pipe);
 
-    let ws_out = ws.clone();
     let outbound = async move {
         let mut buf = vec![0u8; PIPE_BYTES];
         loop {
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_out.send_with_bytes(&buf[..n]).is_err() {
+                    if ws.send_with_bytes(&buf[..n]).is_err() {
                         break;
                     }
                 }
             }
         }
-        let _ = ws_out.close(Some(1000), Some("pipe closed"));
+        let _ = ws.close(Some(1000), Some("pipe closed"));
     };
 
     let inbound = async move {
-        let mut events = match ws.events() {
-            Ok(events) => events,
-            Err(err) => {
-                console_error!("tunnel: websocket events: {err}");
-                return;
-            }
-        };
         while let Some(event) = events.next().await {
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {

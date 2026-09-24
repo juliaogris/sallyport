@@ -4,7 +4,10 @@
 //! agent connections to one Durable Object, which holds every tunnel.
 
 mod app;
+mod authpipe;
+mod authrpc;
 mod ping;
+mod s5;
 mod ssh;
 mod tunnel;
 
@@ -25,7 +28,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.path();
     match path.as_str() {
         "/webapi/find" | "/webapi/ping" => ping::handle(&env),
-        "/webapi/connectionupgrade" => {
+        "/webapi/connectionupgrade" | authpipe::PATH => {
             // Reject before waking the Durable Object when the request is
             // not a WebSocket upgrade at all.
             let upgrade = req.headers().get("Upgrade")?.unwrap_or_default();
@@ -36,7 +39,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await
         }
-        app::PATH => {
+        app::PATH | s5::PATH => {
             let ns = env.durable_object("HUB")?;
             let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
             stub.fetch_with_request(req).await
