@@ -6,7 +6,7 @@
 //! `teleport-transport` with dial address `@remote-auth-server`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +25,10 @@ const REQ_DISCOVERY: &str = "discovery";
 /// DefaultProxyExpiry) and then dials to find more, so this stays well
 /// under that. The agent's 5-minute ping is too slow to piggyback on.
 const DISCOVERY_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The time of the last discovery request the agent took, in milliseconds
+/// since the epoch, or 0 before the first one.
+pub static LAST_DISCOVERY_MS: AtomicU64 = AtomicU64::new(0);
 pub const REQ_DIAL: &str = "teleport-transport-dial";
 const REQ_PING: &str = "ping";
 const GLOBAL_KEEPALIVE: &str = "keepalive@openssh.com";
@@ -342,6 +346,7 @@ async fn announce(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_
         console_log!("ssh: discovery failed: {err}");
         return false;
     }
+    LAST_DISCOVERY_MS.store(Date::now().as_millis(), Ordering::Relaxed);
     *slot.lock().unwrap() = Some(ch);
     true
 }

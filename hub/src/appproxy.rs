@@ -134,7 +134,10 @@ fn body_stream(incoming: hyper::body::Incoming) -> impl futures::Stream<Item = s
         loop {
             match incoming.frame().await {
                 None => return None,
-                Some(Err(err)) => return Some((Err(Error::RustError(err.to_string())), incoming)),
+                Some(Err(err)) => {
+                    console_error!("appproxy: response body: {err}");
+                    return Some((Err(Error::RustError(err.to_string())), incoming));
+                }
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => return Some((Ok(data.to_vec()), incoming)),
                     // A trailers frame, which HTTP/1.1 responses rarely

@@ -637,24 +637,37 @@ impl Session {
                     }
                 }
                 self.flush()?;
+                let msg = match ext {
+                    Some(ext) => ChannelMsg::ExtendedData {
+                        ext,
+                        data: CryptoVec::from_slice(&data),
+                    },
+                    None => ChannelMsg::Data {
+                        data: CryptoVec::from_slice(&data),
+                    },
+                };
+                // sallyport: never wait on one channel's reader here. The
+                // window is adjusted on receipt, so a reader that stops
+                // reading would block this loop, and with it every other
+                // channel on the connection. A full queue closes that
+                // channel instead; its reader sees end of stream after
+                // draining what is queued.
+                let full = match self.channels.get(&channel_num) {
+                    Some(chan) => matches!(
+                        chan.try_send(msg),
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                    ),
+                    None => false,
+                };
+                if full {
+                    warn!("channel {channel_num:?}: reader too slow, closing");
+                    self.channels.remove(&channel_num);
+                    self.close(channel_num)?;
+                    return Ok(());
+                }
                 if let Some(ext) = ext {
-                    if let Some(chan) = self.channels.get(&channel_num) {
-                        chan.send(ChannelMsg::ExtendedData {
-                            ext,
-                            data: CryptoVec::from_slice(&data),
-                        })
-                        .await
-                        .unwrap_or(())
-                    }
                     handler.extended_data(channel_num, ext, &data, self).await
                 } else {
-                    if let Some(chan) = self.channels.get(&channel_num) {
-                        chan.send(ChannelMsg::Data {
-                            data: CryptoVec::from_slice(&data),
-                        })
-                        .await
-                        .unwrap_or(())
-                    }
                     handler.data(channel_num, &data, self).await
                 }
             }

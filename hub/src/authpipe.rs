@@ -60,6 +60,11 @@ impl Pool {
     pub fn ready(&self) -> usize {
         self.ready.lock().unwrap().iter().filter(|s| s.alive.load(Ordering::Relaxed)).count()
     }
+
+    /// Returns the number of open WebSockets from auth, waiting or in use.
+    pub fn open(&self) -> usize {
+        self.open.load(Ordering::Relaxed)
+    }
 }
 
 /// Accepts one WebSocket from auth and runs the challenge on it.
@@ -139,4 +144,5 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
     });
     pump(&ws, events, pipe_side).await;
     alive.store(false, Ordering::Relaxed);
+    console_log!("tunnel/auth: stream closed");
 }

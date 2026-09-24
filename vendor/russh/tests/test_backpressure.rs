@@ -1,109 +1,88 @@
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+//! sallyport: a channel whose reader stops reading is closed, and the other
+//! channels on the connection keep flowing. Upstream instead blocked the
+//! whole connection until the slow reader caught up.
 
-use futures::FutureExt;
-use rand::RngCore;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use rand_core::OsRng;
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{client, Channel, ChannelMsg};
 use ssh_key::PrivateKey;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::watch;
-use tokio::time::sleep;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
 
-pub const WINDOW_SIZE: usize = 8 * 2048;
-pub const CHANNEL_BUFFER_SIZE: usize = 10;
+const CHANNEL_BUFFER_SIZE: usize = 10;
+const CHUNK: usize = 16 * 1024;
 
 #[tokio::test]
-async fn test_backpressure() -> Result<(), anyhow::Error> {
-    env_logger::init();
-
+async fn slow_reader_is_closed_and_others_flow() -> Result<(), anyhow::Error> {
     let addr = addr();
-    let data = data();
-    let (tx, rx) = watch::channel(());
-
-    tokio::spawn(Server::run(addr, rx));
-
-    // Wait until the server is started
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    tokio::spawn(Server::run(addr, got_tx));
     while TcpStream::connect(addr).is_err() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    stream(addr, &data, tx).await?;
-
-    Ok(())
-}
-
-async fn stream(addr: SocketAddr, data: &[u8], tx: watch::Sender<()>) -> Result<(), anyhow::Error> {
     let config = Arc::new(client::Config::default());
     let key = Arc::new(PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap());
+    let mut session = client::connect(config, addr, Client).await?;
+    let hash = session.best_supported_rsa_hash().await.unwrap().flatten();
+    assert!(session.authenticate_publickey("user", PrivateKeyWithHashAlg::new(key, hash)).await?.success());
 
-    let mut session = russh::client::connect(config, addr, Client).await?;
-    let channel = match session
-        .authenticate_publickey(
-            "user",
-            PrivateKeyWithHashAlg::new(
-                key,
-                session.best_supported_rsa_hash().await.unwrap().flatten(),
-            ),
-        )
-        .await
-        .map(|x| x.success())
-    {
-        Ok(true) => session.channel_open_session().await?,
-        Ok(false) => panic!("Authentication failed"),
-        Err(err) => return Err(err.into()),
-    };
+    // The server never reads the first channel.
+    let mut slow = session.channel_open_session().await?;
+    let fast = session.channel_open_session().await?;
 
-    let mut writer = channel.make_writer();
-
-    // TCP listener will buffer one extra message
-    for _ in 0..=CHANNEL_BUFFER_SIZE {
-        assert!(writer.write(data).await.is_ok());
+    let mut writer = slow.make_writer();
+    let data = vec![7u8; CHUNK];
+    for _ in 0..CHANNEL_BUFFER_SIZE * 2 {
+        if writer.write_all(&data).await.is_err() {
+            break;
+        }
     }
-    let pending_write = async { writer.write(data).await.unwrap() };
-    sleep(std::time::Duration::from_millis(100)).await;
-    assert_eq!(pending_write.now_or_never(), None);
-    // Make space on the buffer
-    tx.send(()).unwrap();
-    assert!(writer.write(data).await.is_ok());
+    let closed = timeout(Duration::from_secs(5), async {
+        loop {
+            match slow.wait().await {
+                Some(ChannelMsg::Close) | None => return,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "slow channel was not closed");
 
+    fast.data(&b"hello"[..]).await?;
+    let got = timeout(Duration::from_secs(5), got_rx.recv()).await?;
+    assert_eq!(got.as_deref(), Some(&b"hello"[..]));
     Ok(())
 }
 
-fn data() -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-
-    let mut data = vec![0u8; WINDOW_SIZE]; // Check whether the window_size resizing works
-    rng.fill_bytes(&mut data);
-
-    data
-}
-
-/// Find a unused local address to bind our server to
+/// Finds an unused local address to bind the server to.
 fn addr() -> SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
+    TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap()
 }
 
 #[derive(Clone)]
 struct Server {
-    rx: Option<watch::Receiver<()>>,
+    opened: Arc<AtomicUsize>,
+    got: mpsc::UnboundedSender<Vec<u8>>,
+    /// Holds the unread channel open.
+    held: Arc<Mutex<Vec<Channel<Msg>>>>,
 }
 
 impl Server {
-    async fn run(addr: SocketAddr, rx: watch::Receiver<()>) {
+    async fn run(addr: SocketAddr, got: mpsc::UnboundedSender<Vec<u8>>) {
         let config = Arc::new(server::Config {
             keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
-            window_size: WINDOW_SIZE as u32,
             channel_buffer_size: CHANNEL_BUFFER_SIZE,
             ..Default::default()
         });
-        let mut sh = Server { rx: Some(rx) };
-
+        let mut sh = Server { opened: Default::default(), got, held: Default::default() };
         sh.run_on_address(config, addr).await.unwrap();
     }
 }
@@ -111,7 +90,7 @@ impl Server {
 impl russh::server::Server for Server {
     type Handler = Self;
 
-    fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
+    fn new_client(&mut self, _: Option<SocketAddr>) -> Self::Handler {
         self.clone()
     }
 }
@@ -119,29 +98,23 @@ impl russh::server::Server for Server {
 impl russh::server::Handler for Server {
     type Error = anyhow::Error;
 
-    async fn auth_publickey(
-        &mut self,
-        _: &str,
-        _: &ssh_key::PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, _: &str, _: &ssh_key::PublicKey) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
 
-    async fn channel_open_session(
-        &mut self,
-        mut channel: Channel<Msg>,
-        _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        let mut rx = self.rx.take().unwrap();
+    async fn channel_open_session(&mut self, mut channel: Channel<Msg>, _session: &mut Session) -> Result<bool, Self::Error> {
+        if self.opened.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.held.lock().unwrap().push(channel);
+            return Ok(true);
+        }
+        let got = self.got.clone();
         tokio::spawn(async move {
-            while let Ok(_) = rx.changed().await {
-                match channel.wait().await {
-                    Some(ChannelMsg::Data { .. }) => (),
-                    other => panic!("unexpected message {:?}", other),
+            while let Some(msg) = channel.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    let _ = got.send(data.to_vec());
                 }
             }
         });
-
         Ok(true)
     }
 }

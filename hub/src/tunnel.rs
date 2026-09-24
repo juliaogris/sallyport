@@ -35,6 +35,10 @@ const AUTH_DEADLINE: Duration = Duration::from_secs(30);
 /// Open tunnels the Durable Object accepts. One app service uses about
 /// three: its auth client, its tunnel, and a short-lived probe.
 const MAX_CONNECTIONS: usize = 16;
+/// Messages queued per SSH channel before the channel is closed.
+const CHANNEL_BUFFER: usize = 256;
+/// How often the hub logs its counters.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
 #[durable_object]
 pub struct Hub {
@@ -50,14 +54,21 @@ pub struct Hub {
 impl DurableObject for Hub {
     fn new(_state: State, env: Env) -> Self {
         console_log!("hub: durable object started");
-        Self {
+        let hub = Self {
             env,
             connections: Rc::new(Cell::new(0)),
             passthroughs: Arc::new(AtomicUsize::new(0)),
             app_tunnel: Default::default(),
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
-        }
+        };
+        wasm_bindgen_futures::spawn_local(heartbeat(
+            hub.connections.clone(),
+            hub.passthroughs.clone(),
+            hub.app_tunnel.clone(),
+            hub.auth_pipe.clone(),
+        ));
+        hub
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -148,6 +159,28 @@ impl DurableObject for Hub {
     }
 }
 
+/// Logs the hub's counters every [`HEARTBEAT_EVERY`], so that `wrangler
+/// tail` shows whether the object is alive and what it holds.
+async fn heartbeat(connections: Rc<Cell<usize>>, passthroughs: Arc<AtomicUsize>, app_tunnel: TunnelSlot, auth_pipe: authpipe::Pool) {
+    loop {
+        worker::Delay::from(HEARTBEAT_EVERY).await;
+        let last = crate::ssh::LAST_DISCOVERY_MS.load(Ordering::Relaxed);
+        let discovery = if last == 0 {
+            "never".to_string()
+        } else {
+            format!("{}s ago", Date::now().as_millis().saturating_sub(last) / 1000)
+        };
+        console_log!(
+            "hub: heartbeat, {} tunnels, app tunnel {}, auth streams {} open {} ready, {} passthroughs, discovery {discovery}",
+            connections.get(),
+            if app_tunnel.lock().unwrap().is_some() { "up" } else { "down" },
+            auth_pipe.open(),
+            auth_pipe.ready(),
+            passthroughs.load(Ordering::Relaxed),
+        );
+    }
+}
+
 /// Copies bytes between the WebSocket and one end of an in-memory pipe
 /// until either side closes.
 async fn bridge(ws: WebSocket, pipe: DuplexStream) {
@@ -170,9 +203,14 @@ pub async fn pump(ws: &WebSocket, mut events: EventStream<'_>, pipe: DuplexStrea
         let mut buf = vec![0u8; PIPE_BYTES];
         loop {
             match rd.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(err) => {
+                    console_error!("tunnel: pipe read: {err}");
+                    break;
+                }
                 Ok(n) => {
-                    if ws.send_with_bytes(&buf[..n]).is_err() {
+                    if let Err(err) = ws.send_with_bytes(&buf[..n]) {
+                        console_error!("tunnel: websocket send: {err}");
                         break;
                     }
                 }
@@ -188,7 +226,8 @@ pub async fn pump(ws: &WebSocket, mut events: EventStream<'_>, pipe: DuplexStrea
                     let Some(bytes) = msg.bytes() else {
                         continue;
                     };
-                    if wr.write_all(&bytes).await.is_err() {
+                    if let Err(err) = wr.write_all(&bytes).await {
+                        console_error!("tunnel: pipe write: {err}");
                         break;
                     }
                 }
@@ -252,6 +291,10 @@ fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
         // A delay on each rejected attempt, so failing auth is not a free
         // CPU loop. The handler also drops the connection after 3 attempts.
         auth_rejection_time: Duration::from_secs(1),
+        // The patched russh closes a channel whose reader falls this many
+        // messages behind, up to 32 KiB each, so one slow browser cannot
+        // stall the tunnel. 256 allows a lag of up to 8 MiB.
+        channel_buffer_size: CHANNEL_BUFFER,
         ..Default::default()
     };
     Ok((config, proxy_name))
