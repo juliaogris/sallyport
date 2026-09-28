@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew the sallyport admin UI cert
+
+[Service]
+Type=oneshot
+ExecStart=/home/julia/sallyport/bin/renew-cert.sh

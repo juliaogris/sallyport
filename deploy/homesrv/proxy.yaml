@@ -1,0 +1,29 @@
+# A stock proxy on homesrv that serves Teleport's web UI on the LAN at
+# teleport.julia.example.com:3080. DNS points that name at homesrv's LAN
+# address, so it is reachable only at home. The cert is Let's Encrypt,
+# issued with lego and a DNS-01 challenge. Browser access to apps still
+# goes through the hub on julia.example.com.
+version: v3
+teleport:
+  nodename: sallyport-proxy
+  data_dir: /home/julia/sallyport/data/proxy
+  auth_server: 127.0.0.1:3025
+  join_params:
+    method: token
+    token_name: /home/julia/sallyport/proxy-token.tmp
+  ca_pin: "sha256:1f2cdb8fb6165e56ef00e580938b7ba60242d2b128bc1f0d10a463067b773863"
+  log:
+    output: stderr
+    severity: INFO
+auth_service:
+  enabled: false
+ssh_service:
+  enabled: false
+proxy_service:
+  enabled: true
+  web_listen_addr: 0.0.0.0:3080
+  public_addr: teleport.julia.example.com:3080
+  https_keypairs:
+  - cert_file: /home/julia/sallyport/acme/certificates/teleport.julia.example.com.crt
+    key_file: /home/julia/sallyport/acme/certificates/teleport.julia.example.com.key
+  https_keypairs_reload_interval: 12h

@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew the sallyport admin UI cert daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

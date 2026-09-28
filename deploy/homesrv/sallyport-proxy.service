@@ -1,0 +1,13 @@
+[Unit]
+Description=sallyport proxy with the web UI (LAN only)
+After=network-online.target sallyport-auth.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/julia/sallyport
+ExecStart=/home/julia/sallyport/teleport-18.11.1/teleport start --config=/home/julia/sallyport/deploy/proxy.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

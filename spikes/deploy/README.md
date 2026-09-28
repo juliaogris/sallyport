@@ -55,7 +55,21 @@ service, the bench server and octocam run on `homesrv` as systemd user units
 `sallyport-auth`, `sallyport-app`, `sallyport-bench` and
 `sallyport-octocam`, under `/home/julia/sallyport`. Lingering is on, so
 they start at boot. Over ssh, set `XDG_RUNTIME_DIR=/run/user/$(id -u)`
-before `systemctl --user` or `journalctl --user`.
+before `systemctl --user` or `journalctl --user`. The configs and units
+are copied in `deploy/homesrv/`.
+
+**Admin web UI.** A stock 18.11.1 proxy, `sallyport-proxy`, serves
+Teleport's web UI at `https://teleport.julia.example.com:3080`. The DNS
+record points at homesrv's LAN address, 192.168.1.200, and is not proxied
+by Cloudflare, so the UI works only at home. The name is below
+`julia.example.com`, so passkeys registered for that `rp_id` work there.
+The cert is from Let's Encrypt, issued by `lego` with a DNS-01 challenge
+and the Cloudflare token in `~/sallyport/cf-token`. The
+`sallyport-cert.timer` renews it daily when 30 days or fewer are left,
+and the proxy reloads the files every 12 hours. The proxy joined with a
+one-time token, since revoked, and pins the auth CA with `ca_pin`. The
+fork `tctl` is at `~/sallyport/bin/tctl`; run it with
+`--config ~/sallyport/deploy/auth.yaml`.
 
 ## Known bugs
 
