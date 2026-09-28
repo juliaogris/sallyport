@@ -1,0 +1,14 @@
+[Unit]
+Description=sallyport app service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/julia/sallyport
+Environment=TELEPORT_TLS_ROUTING_CONN_UPGRADE=yes
+ExecStart=/home/julia/sallyport/teleport-18.11.1/teleport start --config=/home/julia/sallyport/deploy/app.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

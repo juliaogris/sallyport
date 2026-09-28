@@ -47,6 +47,28 @@ the keepalive when it starts, so restart it after changing auth's value.
   fall back to HTTP polling; not yet confirmed through the hub.
 - **Security review** of the web route: `security-review.md`.
 
+## Moved to homesrv, 2026-09-28
+
+Nothing runs on the Mac any more. Auth (the fork binary built on homesrv from
+public `v18.11.1` plus the four fork commits), the stock 18.11.1 app
+service, the bench server and octocam run on `homesrv` as systemd user units
+`sallyport-auth`, `sallyport-app`, `sallyport-bench` and
+`sallyport-octocam`, under `/home/julia/sallyport`. Lingering is on, so
+they start at boot. Over ssh, set `XDG_RUNTIME_DIR=/run/user/$(id -u)`
+before `systemctl --user` or `journalctl --user`.
+
+## Known bugs
+
+- **Dead auth streams block the callout.** The hub counts auth's
+  WebSockets in `Pool::open` and refuses new ones at 8 with "too many
+  streams". The count drops only when a stream's pump ends. When auth
+  stops without closing its WebSockets, as when the Mac slept or auth was
+  killed for the move, the pumps never end, so auth's reconnects get 503
+  until the hub is redeployed. Seen 2026-09-24 after an auth restart and
+  2026-09-28 after the move. Fix: once a new stream passes the challenge
+  at the limit, close the oldest waiting stream instead of refusing; and
+  ping waiting streams so dead ones close.
+
 ## Gotchas
 
 - `wrangler dev` does not reload `.dev.vars` on a code reload. Restart it
