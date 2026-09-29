@@ -28,13 +28,15 @@ CHECKS = {
     "cam": lambda r: r["cam_status"] == "200" and r["cam_gaps"] == "0",
     "octocam": lambda r: r["octocam_status"] == "200" and r["octocam_gaps"] == "0",
 }
+# Each timing counts only in runs where its check passed, so fast error
+# answers do not pull the percentiles down.
 TIMINGS = [
-    ("dl_ttfb_s", "download ttfb s"),
-    ("dl_total_s", "download 10 MB s"),
-    ("lat_p50_ms", "small p50 ms"),
-    ("lat_max_ms", "small max ms"),
-    ("snap_s", "snapshot s"),
-    ("octo_s", "octo s"),
+    ("dl_ttfb_s", "download ttfb s", "download"),
+    ("dl_total_s", "download 10 MB s", "download"),
+    ("lat_p50_ms", "small p50 ms", "latency"),
+    ("lat_max_ms", "small max ms", "latency"),
+    ("snap_s", "snapshot s", "snapshot"),
+    ("octo_s", "octo s", "octo"),
 ]
 
 
@@ -76,8 +78,8 @@ def main():
                 n = sum(ok(r) for r in applicable)
                 parts.append(f"{name} {100 * n / len(applicable):.1f}%")
         print("  ok:     " + ", ".join(parts))
-        for key, label in TIMINGS:
-            vals = [float(r[key]) for r in rs if r[key] != ""]
+        for key, label, check in TIMINGS:
+            vals = [float(r[key]) for r in rs if r[key] != "" and CHECKS[check](r)]
             if vals:
                 print(f"  {label:17} p50 {pct(vals, 50):8.3f}  p95 {pct(vals, 95):8.3f}  n {len(vals)}")
         for s in ("cam", "octocam"):
