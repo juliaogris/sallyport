@@ -115,6 +115,9 @@ fn strip_sp_cookies(value: &str) -> Option<String> {
 /// with the hop-by-hop headers dropped and the body streamed as it arrives.
 fn build_response(response: http::Response<hyper::body::Incoming>) -> std::result::Result<Response, String> {
     let (parts, incoming) = response.into_parts();
+    if parts.status.is_server_error() {
+        console_error!("appproxy: upstream {} {:?}", parts.status, parts.headers.get(http::header::SERVER));
+    }
     let headers = Headers::new();
     for (name, value) in parts.headers.iter() {
         if HOP_BY_HOP.contains(&name.as_str()) {

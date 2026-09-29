@@ -610,8 +610,20 @@ impl Session {
             }
             msg::CHANNEL_EOF => {
                 let channel_num = map_err!(ChannelId::decode(r))?;
-                if let Some(chan) = self.channels.get(&channel_num) {
-                    chan.send(ChannelMsg::Eof).await.unwrap_or(())
+                // sallyport: never wait on the reader here either. A full
+                // queue closes the channel, as for data.
+                let full = match self.channels.get(&channel_num) {
+                    Some(chan) => matches!(
+                        chan.try_send(ChannelMsg::Eof),
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                    ),
+                    None => false,
+                };
+                if full {
+                    warn!("channel {channel_num:?}: reader too slow at eof, closing");
+                    self.channels.remove(&channel_num);
+                    self.close(channel_num)?;
+                    return Ok(());
                 }
                 debug!("handler.channel_eof {:?}", channel_num);
                 handler.channel_eof(channel_num, self).await
@@ -690,9 +702,10 @@ impl Session {
                 if let Some(chan) = self.channels.get(&channel_num) {
                     chan.window_size().update(new_size).await;
 
-                    chan.send(ChannelMsg::WindowAdjusted { new_size })
-                        .await
-                        .unwrap_or(())
+                    // sallyport: the update above already wakes writers, so
+                    // this message only informs the reader. Drop it when the
+                    // queue is full instead of blocking the session loop.
+                    let _ = chan.try_send(ChannelMsg::WindowAdjusted { new_size });
                 }
                 debug!("handler.window_adjusted {:?}", channel_num);
                 handler.window_adjusted(channel_num, new_size, self).await

@@ -174,6 +174,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         }
     };
     let Some(tunnel) = cx.tunnel.lock().unwrap().clone() else {
+        console_error!("web: {app}: app service offline, no tunnel");
         return Response::error("app service offline", 503);
     };
     let tls = Arc::new(crate::appproxy::tls_from_pem(cx.env, &spec.tls_cert, &spec.tls_priv)?);

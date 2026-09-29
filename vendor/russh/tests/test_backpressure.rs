@@ -62,6 +62,48 @@ async fn slow_reader_is_closed_and_others_flow() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// The server writes on a channel whose reader it never polls, so every
+/// window adjust from the client queues a `WindowAdjusted` message there.
+/// Upstream blocked the session loop once that queue filled.
+#[tokio::test]
+async fn unread_writer_channel_does_not_stall() -> Result<(), anyhow::Error> {
+    let addr = addr();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    tokio::spawn(Server::run_writer(addr, got_tx));
+    while TcpStream::connect(addr).is_err() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // A small client window makes the client send many window adjusts.
+    let config = Arc::new(client::Config { window_size: 4 * CHUNK as u32, ..Default::default() });
+    let key = Arc::new(PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap());
+    let mut session = client::connect(config, addr, Client).await?;
+    let hash = session.best_supported_rsa_hash().await.unwrap().flatten();
+    assert!(session.authenticate_publickey("user", PrivateKeyWithHashAlg::new(key, hash)).await?.success());
+
+    let mut writer_side = session.channel_open_session().await?;
+    let fast = session.channel_open_session().await?;
+
+    let mut received = 0usize;
+    let want = CHANNEL_BUFFER_SIZE * 8 * CHUNK;
+    let read = timeout(Duration::from_secs(10), async {
+        while received < want {
+            match writer_side.wait().await {
+                Some(ChannelMsg::Data { data }) => received += data.len(),
+                Some(_) => {}
+                None => break,
+            }
+        }
+    })
+    .await;
+    assert!(read.is_ok(), "stalled after {received} of {want} bytes");
+
+    fast.data(&b"hello"[..]).await?;
+    let got = timeout(Duration::from_secs(5), got_rx.recv()).await?;
+    assert_eq!(got.as_deref(), Some(&b"hello"[..]));
+    Ok(())
+}
+
 /// Finds an unused local address to bind the server to.
 fn addr() -> SocketAddr {
     TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap()
@@ -73,6 +115,8 @@ struct Server {
     got: mpsc::UnboundedSender<Vec<u8>>,
     /// Holds the unread channel open.
     held: Arc<Mutex<Vec<Channel<Msg>>>>,
+    /// When true, the first channel writes data instead of being held.
+    write_first: bool,
 }
 
 impl Server {
@@ -82,7 +126,20 @@ impl Server {
             channel_buffer_size: CHANNEL_BUFFER_SIZE,
             ..Default::default()
         });
-        let mut sh = Server { opened: Default::default(), got, held: Default::default() };
+        let mut sh = Server { opened: Default::default(), got, held: Default::default(), write_first: false };
+        sh.run_on_address(config, addr).await.unwrap();
+    }
+}
+
+impl Server {
+    /// Like `run`, but the first channel is a writer that never reads.
+    async fn run_writer(addr: SocketAddr, got: mpsc::UnboundedSender<Vec<u8>>) {
+        let config = Arc::new(server::Config {
+            keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
+            channel_buffer_size: CHANNEL_BUFFER_SIZE,
+            ..Default::default()
+        });
+        let mut sh = Server { opened: Default::default(), got, held: Default::default(), write_first: true };
         sh.run_on_address(config, addr).await.unwrap();
     }
 }
@@ -104,7 +161,22 @@ impl russh::server::Handler for Server {
 
     async fn channel_open_session(&mut self, mut channel: Channel<Msg>, _session: &mut Session) -> Result<bool, Self::Error> {
         if self.opened.fetch_add(1, Ordering::Relaxed) == 0 {
-            self.held.lock().unwrap().push(channel);
+            if self.write_first {
+                // Write without ever calling `wait`, so nothing drains
+                // this channel's queue.
+                tokio::spawn(async move {
+                    let data = vec![7u8; CHUNK];
+                    for _ in 0..CHANNEL_BUFFER_SIZE * 8 {
+                        if channel.data(&data[..]).await.is_err() {
+                            break;
+                        }
+                    }
+                    std::future::pending::<()>().await;
+                    drop(channel);
+                });
+            } else {
+                self.held.lock().unwrap().push(channel);
+            }
             return Ok(true);
         }
         let got = self.got.clone();
