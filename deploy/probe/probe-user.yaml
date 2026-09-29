@@ -1,0 +1,9 @@
+# The probe user in each cluster. It has no password or passkey, and signs
+# in only with the certs the renew script gets from `tctl auth sign`.
+kind: user
+version: v2
+metadata:
+  name: probe
+spec:
+  roles:
+  - probe

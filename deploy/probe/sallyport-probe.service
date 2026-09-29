@@ -1,0 +1,10 @@
+[Unit]
+Description=sallyport probe of the julia, rust and go clusters
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/julia/sallyport-probe/bin/probe.py
+# A slow run makes the timer skip the next minute instead of piling up.
+TimeoutStartSec=110
