@@ -127,7 +127,12 @@ fn build_response(response: http::Response<hyper::body::Incoming>) -> std::resul
         }
         headers.append(name.as_str(), value).map_err(|e| format!("response header {name}: {e}"))?;
     }
-    let body = Response::from_stream(body_stream(incoming)).map_err(|e| format!("response body: {e}"))?;
+    let mut body = Response::from_stream(body_stream(incoming)).map_err(|e| format!("response body: {e}"))?;
+    // The runtime compresses a body to match `Content-Encoding` by
+    // default, so an app's gzipped body would be compressed twice.
+    if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
+        body = body.with_encode_body(EncodeBody::Manual);
+    }
     Ok(body.with_headers(headers).with_status(parts.status.as_u16()))
 }
 
