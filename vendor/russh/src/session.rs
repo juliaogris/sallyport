@@ -111,11 +111,13 @@ impl ChannelFlushResult {
             ChannelFlushResult::Complete { wrote, .. } => *wrote,
         }
     }
-    pub(crate) fn complete(wrote: usize, channel: &ChannelParams) -> Self {
+    // sallyport: the flags are cleared here, so that later flushes of an
+    // empty queue do not send the EOF again.
+    pub(crate) fn complete(wrote: usize, channel: &mut ChannelParams) -> Self {
         ChannelFlushResult::Complete {
             wrote,
-            pending_eof: channel.pending_eof,
-            pending_close: channel.pending_close,
+            pending_eof: std::mem::take(&mut channel.pending_eof),
+            pending_close: std::mem::take(&mut channel.pending_close),
         }
     }
 }
@@ -349,9 +351,13 @@ impl Encrypted {
         Ok(pending_size)
     }
 
+    // sallyport: this sends a pending EOF or close like `flush_pending`.
+    // Before, it dropped them, and a channel whose queue emptied at the end
+    // of a key exchange never sent its EOF.
     pub fn flush_all_pending(&mut self) -> Result<(), crate::Error> {
-        for channel in self.channels.values_mut() {
-            Self::flush_channel(&mut self.write, channel)?;
+        let channels: Vec<ChannelId> = self.channels.keys().copied().collect();
+        for channel in channels {
+            self.flush_pending(channel)?;
         }
         Ok(())
     }
@@ -433,7 +439,9 @@ impl Encrypted {
     ) -> Result<(), crate::Error> {
         if let Some(channel) = self.channels.get_mut(&channel) {
             assert!(channel.confirmed);
-            if !channel.pending_data.is_empty() && is_rekeying {
+            // sallyport: queue during a key exchange even when the queue
+            // is empty. Upstream's `&&` wrote the data out mid-exchange.
+            if is_rekeying || !channel.pending_data.is_empty() {
                 channel.pending_data.push_back((buf0, None, 0));
                 return Ok(());
             }
@@ -456,7 +464,9 @@ impl Encrypted {
     ) -> Result<(), crate::Error> {
         if let Some(channel) = self.channels.get_mut(&channel) {
             assert!(channel.confirmed);
-            if !channel.pending_data.is_empty() && is_rekeying {
+            // sallyport: queue during a key exchange even when the queue
+            // is empty. Upstream's `&&` wrote the data out mid-exchange.
+            if is_rekeying || !channel.pending_data.is_empty() {
                 channel.pending_data.push_back((buf0, Some(ext), 0));
                 return Ok(());
             }

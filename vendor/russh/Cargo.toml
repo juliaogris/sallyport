@@ -43,6 +43,10 @@ path = "tests/test_rekey_strict_kex.rs"
 name = "teleport_hooks"
 path = "tests/teleport_hooks.rs"
 
+[[test]]
+name = "test_rekey_channel_data"
+path = "tests/test_rekey_channel_data.rs"
+
 [dependencies.aes]
 version = "0.8"
 

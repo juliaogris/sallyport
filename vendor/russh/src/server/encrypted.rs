@@ -696,9 +696,10 @@ impl Session {
                         return Ok(());
                     }
                 }
-                if let Some(ref mut enc) = self.common.encrypted {
-                    enc.flush_pending(channel_num)?;
-                }
+                // sallyport: a window adjust that the client sent before it
+                // saw our KEXINIT can arrive during the key exchange. Its
+                // data stays queued on the channel until the exchange is done.
+                self.flush_pending(channel_num)?;
                 if let Some(chan) = self.channels.get(&channel_num) {
                     chan.window_size().update(new_size).await;
 

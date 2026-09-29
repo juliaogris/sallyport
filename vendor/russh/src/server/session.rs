@@ -773,6 +773,15 @@ impl Session {
 
     /// Flush the session, i.e. encrypt the pending buffer.
     pub fn flush(&mut self) -> Result<(), Error> {
+        // sallyport: RFC 4253 section 7.1 allows only key exchange messages
+        // between KEXINIT and NEWKEYS, and a Go client drops the connection
+        // on anything else. Packets that the handlers write during a key
+        // exchange, such as window adjusts and request replies, stay in
+        // `enc.write` until the exchange is done. A disconnect still goes
+        // out.
+        if self.kex.active() && !self.common.disconnected {
+            return Ok(());
+        }
         if let Some(ref mut enc) = self.common.encrypted {
             if enc.flush(
                 &self.common.config.as_ref().limits,
@@ -789,6 +798,10 @@ impl Session {
     }
 
     pub fn flush_pending(&mut self, channel: ChannelId) -> Result<usize, Error> {
+        // sallyport: the end of the key exchange flushes every channel.
+        if self.kex.active() {
+            return Ok(0);
+        }
         if let Some(ref mut enc) = self.common.encrypted {
             enc.flush_pending(channel)
         } else {

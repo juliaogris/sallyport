@@ -7,10 +7,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -109,6 +113,17 @@ func main() {
 			}
 		}
 
+	case "rekey-echo":
+		channels, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			log.Fatalf("channels: %v", err)
+		}
+		size, err := strconv.Atoi(os.Args[4])
+		if err != nil {
+			log.Fatalf("size: %v", err)
+		}
+		rekeyEcho(client, channels, size)
+
 	default:
 		log.Fatalf("unknown scenario %q", scenario)
 	}
@@ -165,4 +180,64 @@ func hostKeyPlain(addr string) {
 	}
 	defer client.Close()
 	fmt.Printf("host-key-type=%s\n", keyType)
+}
+
+// rekeyEcho opens the given number of teleport-echo channels at once. On
+// each it writes size random bytes, sends EOF and reads the echo back to
+// EOF. The connection fails if the server sends a non-kex message during
+// one of its key exchanges.
+func rekeyEcho(client *ssh.Client, channels, size int) {
+	errs := make(chan error, channels)
+	var wg sync.WaitGroup
+	for i := range channels {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- echoOne(client, int64(i), size)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			log.Fatalf("echo: %v (connection: %v)", err, client.Wait())
+		}
+	}
+	fmt.Printf("echo=ok channels=%d size=%d\n", channels, size)
+}
+
+func echoOne(client *ssh.Client, seed int64, size int) error {
+	ch, reqs, err := client.OpenChannel("teleport-echo", nil)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer ch.Close()
+	go ssh.DiscardRequests(reqs)
+
+	want := make([]byte, size)
+	rand.New(rand.NewSource(seed)).Read(want)
+	writeErr := make(chan error, 1)
+	go func() {
+		// Several writes, so that the server's window adjusts arrive
+		// while data is in flight both ways.
+		for off := 0; off < size; off += 100_000 {
+			end := min(off+100_000, size)
+			if _, err := ch.Write(want[off:end]); err != nil {
+				writeErr <- fmt.Errorf("write: %w", err)
+				return
+			}
+		}
+		writeErr <- ch.CloseWrite()
+	}()
+	got, err := io.ReadAll(ch)
+	if err != nil {
+		return fmt.Errorf("read after %d bytes: %w", len(got), err)
+	}
+	if err := <-writeErr; err != nil {
+		return err
+	}
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("channel %d: got %d bytes, want %d, or they differ", seed, len(got), size)
+	}
+	return nil
 }
