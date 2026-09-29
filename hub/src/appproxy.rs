@@ -127,13 +127,20 @@ fn build_response(response: http::Response<hyper::body::Incoming>) -> std::resul
         }
         headers.append(name.as_str(), value).map_err(|e| format!("response header {name}: {e}"))?;
     }
+    // The runtime refuses a body on these statuses, and workers-rs panics
+    // on that refusal, which restarts the Durable Object.
+    let status = parts.status.as_u16();
+    if matches!(status, 101 | 204 | 205 | 304) {
+        let res = Response::empty().map_err(|e| format!("response: {e}"))?;
+        return Ok(res.with_headers(headers).with_status(status));
+    }
     let mut body = Response::from_stream(body_stream(incoming)).map_err(|e| format!("response body: {e}"))?;
     // The runtime compresses a body to match `Content-Encoding` by
     // default, so an app's gzipped body would be compressed twice.
     if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
         body = body.with_encode_body(EncodeBody::Manual);
     }
-    Ok(body.with_headers(headers).with_status(parts.status.as_u16()))
+    Ok(body.with_headers(headers).with_status(status))
 }
 
 /// Turns a hyper `Incoming` body into the byte stream `Response::from_stream`
