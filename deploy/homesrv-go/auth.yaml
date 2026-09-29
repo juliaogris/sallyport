@@ -1,0 +1,28 @@
+# Auth for the go test cluster on homesrv, calling out to the hub on go.example.com.
+version: v3
+teleport:
+  nodename: sallyport-go-auth
+  data_dir: /home/julia/sallyport-go/data/auth
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: true
+  cluster_name: sallyport-go
+  listen_addr: 127.0.0.1:3226
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  callout_to: wss://go.example.com/tunnel/auth
+  callout_key_file: /home/julia/sallyport-go/callout.pem
+  # A hub deploy drops the agent's tunnel, and the agent only notices at its
+  # next keepalive. The default is 5 minutes, up to 15 with retries.
+  keep_alive_interval: 30s
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      rp_id: go.example.com
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false

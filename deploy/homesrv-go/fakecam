@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Serve a fake MJPEG camera on localhost, at /stream and /snapshot.
+
+The test clusters need a camera stream that does not depend on the printer.
+This makes one noise JPEG of about 50 KB when it starts, and sends it as
+/snapshot, or as /stream at 10 frames per second with the multipart content
+type that mjpg-streamer uses. The listening socket is bound to the loopback
+address, so nothing off this machine can reach it.
+
+    fakecam [port]
+"""
+
+import http.server
+import io
+import os
+import sys
+import time
+
+from PIL import Image
+
+ADDRESS = "127.0.0.1"
+PORT = 18181
+FPS = 10
+FRAME_BYTES = 50_000
+BOUNDARY = "fakecamframe"
+
+
+def make_frame():
+    """Return a JPEG of about FRAME_BYTES bytes."""
+    # Random noise compresses badly, so the size follows the pixel count.
+    side = 64
+    while True:
+        img = Image.frombytes("RGB", (side, side), os.urandom(side * side * 3))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=75)
+        if buf.tell() >= FRAME_BYTES:
+            return buf.getvalue()
+        side += 16
+
+
+FRAME = make_frame()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/snapshot":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(FRAME)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(FRAME)
+        elif path in ("/", "/stream"):
+            self.stream()
+        else:
+            self.send_error(404)
+
+    def stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        head = (
+            f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n"
+            f"Content-Length: {len(FRAME)}\r\n\r\n"
+        ).encode()
+        interval = 1 / FPS
+        next_at = time.monotonic()
+        try:
+            while True:
+                self.wfile.write(head + FRAME + b"\r\n")
+                self.wfile.flush()
+                next_at += interval
+                delay = next_at - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    next_at = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, format, *args):
+        sys.stderr.write("%s %s\n" % (self.address_string(), format % args))
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
+    server = http.server.ThreadingHTTPServer((ADDRESS, port), Handler)
+    server.daemon_threads = True
+    print(f"fakecam on {ADDRESS}:{port}, {len(FRAME)} byte frames at {FPS} fps", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

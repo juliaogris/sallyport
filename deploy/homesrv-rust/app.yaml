@@ -1,0 +1,30 @@
+# The app service for the rust test cluster on homesrv, reaching the hub on
+# rust.example.com.
+version: v3
+teleport:
+  nodename: sallyport-rust-app
+  data_dir: /home/julia/sallyport-rust/data/app
+  proxy_server: rust.example.com:443
+  join_params:
+    method: token
+    token_name: joined-already
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: false
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # A local static server with index.html and a 10 MB file.
+  - name: bench
+    uri: http://127.0.0.1:18180
+    public_addr: bench-rust.example.com
+  # A fake MJPEG camera, so the test does not depend on the printer.
+  - name: cam
+    uri: http://127.0.0.1:18181
+    public_addr: cam-rust.example.com

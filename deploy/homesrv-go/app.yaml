@@ -1,0 +1,30 @@
+# The app service for the go test cluster on homesrv, reaching the hub on
+# go.example.com.
+version: v3
+teleport:
+  nodename: sallyport-go-app
+  data_dir: /home/julia/sallyport-go/data/app
+  proxy_server: go.example.com:443
+  join_params:
+    method: token
+    token_name: joined-already
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: false
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # A local static server with index.html and a 10 MB file.
+  - name: bench
+    uri: http://127.0.0.1:18280
+    public_addr: bench-go.example.com
+  # A fake MJPEG camera, so the test does not depend on the printer.
+  - name: cam
+    uri: http://127.0.0.1:18281
+    public_addr: cam-go.example.com
