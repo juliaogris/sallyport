@@ -28,3 +28,11 @@ app_service:
   - name: cam
     uri: http://127.0.0.1:18181
     public_addr: cam-rust.example.com
+  # The same OctoPrint and webcam as the julia cluster. octocam shares
+  # julia's relay on 127.0.0.1:18081.
+  - name: octo
+    uri: http://octo.lan
+    public_addr: octo-rust.example.com
+  - name: octocam
+    uri: http://127.0.0.1:18081
+    public_addr: octocam-rust.example.com
