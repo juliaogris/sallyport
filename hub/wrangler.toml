@@ -57,3 +57,53 @@ APPS = "bench,octo,octocam:/stream"
 [[env.edge.durable_objects.bindings]]
 name = "HUB"
 class_name = "Hub"
+
+# Two test clusters on homesrv that compare hubs, with nothing else different:
+# `wrangler deploy --env rust` and `--env go`. Each env is its own Worker,
+# with its own Durable Object namespace and secrets. Both run the Rust hub
+# until the Go hub exists.
+[env.rust]
+routes = [
+  { pattern = "rust.example.com", custom_domain = true },
+  { pattern = "bench-rust.example.com", custom_domain = true },
+  { pattern = "cam-rust.example.com", custom_domain = true },
+]
+
+[env.rust.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[env.rust.vars]
+CLUSTER_NAME = "sallyport-rust"
+PUBLIC_ADDR = "rust.example.com:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "rust.example.com"
+DOMAIN = "example.com"
+OWNER = "rust"
+APPS = "bench,cam:/stream"
+
+[[env.rust.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[env.go]
+routes = [
+  { pattern = "go.example.com", custom_domain = true },
+  { pattern = "bench-go.example.com", custom_domain = true },
+  { pattern = "cam-go.example.com", custom_domain = true },
+]
+
+[env.go.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[env.go.vars]
+CLUSTER_NAME = "sallyport-go"
+PUBLIC_ADDR = "go.example.com:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "go.example.com"
+DOMAIN = "example.com"
+OWNER = "go"
+APPS = "bench,cam:/stream"
+
+[[env.go.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
