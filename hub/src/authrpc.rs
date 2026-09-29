@@ -523,34 +523,41 @@ fn percent_decode(s: &str) -> String {
 /// One HTTP/2 connection to auth with the hub TLS identity, reused across
 /// calls. A call that fails at the transport opens a new connection from
 /// the pool and is retried once. A gRPC error status is not retried.
+///
+/// The lock is held while a connection opens, so callers that arrive
+/// together share one connection instead of each taking a pool stream.
 #[derive(Clone, Default)]
 pub struct HubAuth {
-    send: Arc<std::sync::Mutex<Option<SendRequest<Bytes>>>>,
+    /// The connection and its generation, which counts connections opened.
+    send: Arc<futures::lock::Mutex<(u64, Option<SendRequest<Bytes>>)>>,
 }
 
 impl HubAuth {
-    async fn conn(&self, env: &Env, pool: &crate::authpipe::Pool, fresh: bool) -> std::result::Result<SendRequest<Bytes>, String> {
-        if !fresh {
-            let cached = self.send.lock().unwrap().clone();
-            if let Some(send) = cached {
-                if send.clone().ready().await.is_ok() {
-                    return Ok(send);
-                }
+    /// Returns the cached connection and its generation if it still works.
+    /// When `broken` names the cached generation, that connection failed,
+    /// so a new one is opened. A caller whose broken connection another
+    /// caller already replaced gets the replacement.
+    async fn conn(&self, env: &Env, pool: &crate::authpipe::Pool, broken: Option<u64>) -> std::result::Result<(u64, SendRequest<Bytes>), String> {
+        let mut slot = self.send.lock().await;
+        if let Some(send) = slot.1.clone() {
+            if broken != Some(slot.0) && send.clone().ready().await.is_ok() {
+                return Ok((slot.0, send));
             }
         }
         let tls = Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
         let send = connect(pool.take().ok_or("no auth pipe stream")?, tls).await?;
-        *self.send.lock().unwrap() = Some(send.clone());
-        Ok(send)
+        slot.0 += 1;
+        slot.1 = Some(send.clone());
+        Ok((slot.0, send))
     }
 
     /// Makes one unary call with the hub identity.
     pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(&self, env: &Env, pool: &crate::authpipe::Pool, path: &str, req: &Req) -> std::result::Result<Resp, String> {
-        let send = self.conn(env, pool, false).await?;
+        let (generation, send) = self.conn(env, pool, None).await?;
         match unary(&send, path, req).await {
             Err(err) if !err.contains("grpc-status") => {
                 console_log!("authrpc: {err}, reconnecting");
-                let send = self.conn(env, pool, true).await?;
+                let (_, send) = self.conn(env, pool, Some(generation)).await?;
                 unary(&send, path, req).await
             }
             res => res,
