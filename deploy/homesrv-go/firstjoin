@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Joins the app service of one test cluster once, through a temporary stock
+# proxy on loopback, because the hub does not answer /webapi/host/credentials.
+set -euo pipefail
+x=$1
+port=$2
+auth=$3
+cd "$HOME/sallyport-$x"
+tctl=(~/sallyport/bin/tctl --config=deploy/auth.yaml)
+tp=~/sallyport/teleport-18.11.1/teleport
+ptok=$("${tctl[@]}" tokens add --type=proxy --ttl=10m --format=text 2>/dev/null)
+atok=$("${tctl[@]}" tokens add --type=app --ttl=10m --format=text 2>/dev/null)
+pin=$("${tctl[@]}" status 2>/dev/null | grep -o 'sha256:[a-f0-9]*')
+mkdir -p join
+cat > join/proxy.yaml <<YAML
+version: v3
+teleport:
+  nodename: sallyport-$x-joinproxy
+  data_dir: $HOME/sallyport-$x/join/proxy-data
+  auth_server: 127.0.0.1:$auth
+  join_params:
+    method: token
+    token_name: $ptok
+  ca_pin: "$pin"
+  log:
+    output: stderr
+    severity: INFO
+auth_service:
+  enabled: false
+ssh_service:
+  enabled: false
+proxy_service:
+  enabled: true
+  web_listen_addr: 127.0.0.1:$port
+  public_addr: 127.0.0.1:$port
+YAML
+sed -e "s#proxy_server: .*#proxy_server: 127.0.0.1:$port#" -e "s#token_name: .*#token_name: $atok#" deploy/app.yaml > join/app.yaml
+"$tp" start --config=join/proxy.yaml > logs/joinproxy.log 2>&1 &
+proxy_pid=$!
+for _ in $(seq 1 30); do
+  curl -sk -o /dev/null "https://127.0.0.1:$port/webapi/find" && break
+  sleep 1
+done
+rm -rf data/app
+timeout 40 "$tp" start --insecure --config=join/app.yaml > logs/firstjoin.log 2>&1 || true
+kill "$proxy_pid"
+wait "$proxy_pid" || true
+"${tctl[@]}" tokens rm "$ptok" > /dev/null 2>&1 || true
+"${tctl[@]}" tokens rm "$atok" > /dev/null 2>&1 || true
+tr -d '\000' < logs/firstjoin.log | grep -aE 'Successfully obtained credentials|Successfully registered|ERRO' | head -5 | cut -c1-200
