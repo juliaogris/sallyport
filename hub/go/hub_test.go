@@ -58,6 +58,59 @@ func TestProtoRoundTrip(t *testing.T) {
 	if got := passwordlessChallengeRequest(); string(got) != "\x22\x00\x32\x02\x08\x02" {
 		t.Errorf("passwordless request = %x", got)
 	}
+	if got := manageDevicesChallengeRequest(); string(got) != "\x1a\x00\x32\x02\x08\x04" {
+		t.Errorf("manage devices request = %x", got)
+	}
+}
+
+func TestPasskeyRequests(t *testing.T) {
+	existing := mfaAuthenticateResponse(credentialAssertion("public-key", []byte("id"), []byte("cd"), []byte("ad"), []byte("sig"), nil))
+	f, err := decode(passkeyRegisterChallengeRequest(existing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	webauthn := f.msg(4).msg(3)
+	if f.int(2) != deviceTypeWebAuthn || f.int(3) != deviceUsagePasswordless || string(webauthn.bytes(2)) != "id" || string(webauthn.msg(3).bytes(3)) != "sig" {
+		t.Errorf("register challenge request %v", f)
+	}
+
+	cred := credentialCreation("public-key", []byte("id"), []byte("cd"), []byte("att"))
+	f, err = decode(addMFADeviceSyncRequest("laptop", cred))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.str(2) != "laptop" || f.int(4) != deviceUsagePasswordless || !f.has(5) || string(f.msg(3).msg(3).msg(3).bytes(2)) != "att" {
+		t.Errorf("add device request %v", f)
+	}
+
+	f, err = decode(deleteMFADeviceSyncRequest("laptop", existing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.str(2) != "laptop" || string(f.msg(3).msg(3).bytes(2)) != "id" {
+		t.Errorf("delete device request %v", f)
+	}
+}
+
+func TestPasskeysOf(t *testing.T) {
+	device := pb(nil).msg(4, pb(nil).str(1, "laptop")).msg(6, pb(nil).int(1, 1788609600))
+	f, err := decode(pb(nil).msg(1, device).msg(1, pb(nil).msg(4, pb(nil).str(1, "phone"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []passkey{{Name: "laptop", AddedAt: "2026-09-05T12:00:00Z"}, {Name: "phone", AddedAt: "1970-01-01T00:00:00Z"}}
+	got := passkeysOf(f)
+	if len(got) != len(want) {
+		t.Fatalf("passkeysOf = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("passkeysOf[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+	if got := passkeysOf(nil); len(got) != 0 || got == nil {
+		t.Errorf("passkeysOf(nil) = %#v, want an empty list", got)
+	}
 }
 
 func TestCookies(t *testing.T) {
