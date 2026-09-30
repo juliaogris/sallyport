@@ -7,11 +7,6 @@ license = "AGPL-3.0-or-later"
 [lib]
 crate-type = ["cdylib"]
 
-[features]
-# The /spike/* endpoints. `wrangler dev` builds with them, the edge build
-# does not.
-spikes = []
-
 [dependencies]
 worker = "0.8.6"
 futures = "0.3"

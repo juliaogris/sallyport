@@ -93,15 +93,8 @@ impl DurableObject for Hub {
                 crate::web::Host::Login => {}
             }
         }
-        match req.path().as_str() {
-            authpipe::PATH => return authpipe::accept(&self.env, &self.auth_pipe),
-            #[cfg(feature = "spikes")]
-            crate::s4::PATH => return crate::s4::handle(&req, &self.env, &self.app_tunnel).await,
-            #[cfg(feature = "spikes")]
-            crate::s5::PATH => return crate::s5::handle(&self.env, &self.auth_pipe).await,
-            #[cfg(feature = "spikes")]
-            p if p.starts_with(crate::s5login::LOGIN) => return crate::s5login::handle(req, &self.env, &self.auth_pipe).await,
-            _ => {}
+        if req.path() == authpipe::PATH {
+            return authpipe::accept(&self.env, &self.auth_pipe);
         }
         let protocols = req
             .headers()

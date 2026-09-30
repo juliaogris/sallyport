@@ -4,7 +4,7 @@ compatibility_date = "2026-09-01"
 
 [build]
 # ring's C code needs a clang with a wasm32 target; Apple clang has none.
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release . --features spikes"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release"
 
 [[durable_objects.bindings]]
 name = "HUB"
@@ -18,19 +18,12 @@ new_sqlite_classes = ["Hub"]
 CLUSTER_NAME = "sallyport"
 PUBLIC_ADDR = "localhost:8787"
 SERVER_VERSION = "18.11.1"
-# S4 spike: the Host header for /spike/s4. The endpoint is off unless
-# DEV_S4 is "1" in .dev.vars; never set it in a deployment.
-S4_APP_HOST = "bench-julia.example.com"
-# S5 spike: the host auth's callout dials, which auth signs in the challenge.
+# The host auth's callout dials, which auth signs in the auth pipe
+# challenge. It must match the URL auth is configured with.
 CALLOUT_HOST = "localhost:8787"
-# S5 spike: the app session /spike/s5 creates. Off unless DEV_S5 is "1".
-S5_USER = "s4user"
-S5_APP_NAME = "bench"
-S5_APP_HOST = "bench-julia.example.com"
 
 # The deployment on Cloudflare: `wrangler deploy --env edge`. Secrets are
-# set per env with `wrangler secret put --env edge`. DEV_S4 and DEV_S5 are
-# never set here, and the edge build leaves out the spike endpoints.
+# set per env with `wrangler secret put --env edge`.
 [env.edge]
 routes = [
   { pattern = "julia.example.com", custom_domain = true },
@@ -39,7 +32,6 @@ routes = [
   { pattern = "octocam-julia.example.com", custom_domain = true },
 ]
 
-# The same build without the `spikes` feature, so /spike/* answers 404.
 [env.edge.build]
 command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release"
 
@@ -60,8 +52,9 @@ class_name = "Hub"
 
 # Two test clusters on homesrv that compare hubs, with nothing else different:
 # `wrangler deploy --env rust` and `--env go`. Each env is its own Worker,
-# with its own Durable Object namespace and secrets. Both run the Rust hub
-# until the Go hub exists.
+# with its own Durable Object namespace and secrets. Both build the Rust
+# hub here. `--env go` from this directory replaces the Go hub deployed
+# from `hub/go/wrangler.toml`.
 [env.rust]
 routes = [
   { pattern = "rust.example.com", custom_domain = true },
