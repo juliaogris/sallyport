@@ -1,7 +1,6 @@
 package conformance
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -63,6 +62,9 @@ type FakeAuth struct {
 	// manageChallenges are the manage-devices challenges issued and not
 	// yet answered, each with its user. An answer uses one up.
 	manageChallenges map[string]string
+	// registering are the users with a register challenge issued and not
+	// yet finished. A finish needs one and uses it up.
+	registering map[string]struct{}
 	// LoginChallenge is the challenge in every login challenge.
 	LoginChallenge []byte
 	// RegisterChallenge is the challenge in every register challenge.
@@ -125,6 +127,7 @@ func NewFakeAuth(p *PKI) (*FakeAuth, error) {
 		sockets:           make(map[*websocket.Conn]bool),
 		devices:           map[string][]Device{Alice: {{Name: AliceDevice, CredID: AliceCredID, AddedAt: AliceDeviceAdded}}},
 		manageChallenges:  map[string]string{},
+		registering:       map[string]struct{}{},
 		LoginChallenge:    randomBytes(32),
 		RegisterChallenge: randomBytes(32),
 	}
@@ -432,6 +435,9 @@ func credential(credID string) pbMsg {
 // challenge is read from the clientDataJSON, which the tests fill in as a
 // browser would. Only the challenge and the credential ID are checked.
 // The caller holds a.mu.
+//
+// Auth keeps a login challenge apart from the user's own challenges, so an
+// answer to one fails as a missing session, not as a wrong scope.
 func (a *FakeAuth) verifyAssertion(user string, resp pbFields) (int, string) {
 	webauthn := resp.msg(3)
 	var clientData struct {
@@ -439,11 +445,8 @@ func (a *FakeAuth) verifyAssertion(user string, resp pbFields) (int, string) {
 	}
 	json.Unmarshal(webauthn.msg(3).bytes(1), &clientData)
 	challenge, _ := base64.RawURLEncoding.DecodeString(clientData.Challenge)
-	if bytes.Equal(challenge, a.LoginChallenge) {
-		return codePermissionDenied, `required scope "CHALLENGE_SCOPE_MANAGE_DEVICES" is not satisfied by the given webauthn session with scope "CHALLENGE_SCOPE_PASSWORDLESS_LOGIN"`
-	}
 	if a.manageChallenges[string(challenge)] != user {
-		return codePermissionDenied, "invalid or used webauthn response"
+		return codePermissionDenied, fmt.Sprintf("MFA response validation failed: session data for user %q not found", user)
 	}
 	delete(a.manageChallenges, string(challenge))
 	credID := string(webauthn.bytes(2))
@@ -452,7 +455,7 @@ func (a *FakeAuth) verifyAssertion(user string, resp pbFields) (int, string) {
 			return 0, ""
 		}
 	}
-	return codePermissionDenied, fmt.Sprintf("unknown credential %q", credID)
+	return codePermissionDenied, fmt.Sprintf("MFA response validation failed: unknown credential %q", credID)
 }
 
 // createRegisterChallenge answers an invite's register challenge, or one
@@ -477,6 +480,7 @@ func (a *FakeAuth) createRegisterChallenge(client string, req pbFields) (pbMsg, 
 	default:
 		return nil, codeInvalidArgument, "token or existing MFA response required"
 	}
+	a.registering[user] = struct{}{}
 	opts := pbMsg(nil).
 		bytes(1, a.RegisterChallenge).
 		msg(2, pbMsg(nil).str(1, RPID).str(2, "sallyport")).
@@ -505,7 +509,8 @@ func (a *FakeAuth) getMFADevices(client string) (pbMsg, int, string) {
 }
 
 // addMFADeviceSync adds a passkey for the user in the client certificate,
-// with the checks auth makes on the name and the credential ID.
+// with the checks auth makes on the name and the credential ID, in auth's
+// order. A register challenge must have been issued and not finished.
 func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -513,11 +518,14 @@ func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, st
 		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
 	}
 	name := req.str(2)
-	if name == "" {
-		return nil, codeInvalidArgument, "device name required"
-	}
 	if len(name) > 30 {
 		return nil, codeInvalidArgument, "device name must be 30 characters or less"
+	}
+	if _, ok := a.registering[client]; !ok {
+		return nil, codeNotFound, fmt.Sprintf("session data for user %q not found", client)
+	}
+	if name == "" {
+		return nil, codeInvalidArgument, "device name required"
 	}
 	credID := string(req.msg(3).msg(3).bytes(2))
 	if credID == "" {
@@ -533,6 +541,7 @@ func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, st
 	}
 	d := Device{Name: name, CredID: credID, AddedAt: time.Now().Truncate(time.Second)}
 	a.devices[client] = append(a.devices[client], d)
+	delete(a.registering, client)
 	return pbMsg(nil).msg(1, d.encode()), 0, ""
 }
 

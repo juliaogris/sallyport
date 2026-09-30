@@ -94,7 +94,16 @@ func TestPasskeys(t *testing.T) {
 		require.True(t, strings.HasPrefix(c.Value, Alice+":"), "cookie %q", c.Value)
 	})
 
+	t.Run("finish without begin", func(t *testing.T) {
+		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential("tablet", "cred-alice-3"), session)
+		body := readBody(t, resp)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "body %s", body)
+		require.Equal(t, `session data for user "alice" not found`, string(body))
+		require.Len(t, s.auth.Devices(Alice), 2)
+	})
+
 	t.Run("used name", func(t *testing.T) {
+		s.passkeyBegin(t, session)
 		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential("laptop", "cred-alice-3"), session)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
@@ -103,6 +112,7 @@ func TestPasskeys(t *testing.T) {
 	})
 
 	t.Run("name too long", func(t *testing.T) {
+		s.passkeyBegin(t, session)
 		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential(strings.Repeat("x", 31), "cred-alice-3"), session)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "body %s", body)
@@ -114,7 +124,7 @@ func TestPasskeys(t *testing.T) {
 		resp := s.post(t, LoginHost, "/webapi/passkeys/begin", origin(LoginHost), answer, session)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
-		require.Contains(t, string(body), "CHALLENGE_SCOPE_MANAGE_DEVICES")
+		require.Contains(t, string(body), "MFA response validation failed")
 	})
 
 	t.Run("answer is used up", func(t *testing.T) {
@@ -324,14 +334,21 @@ func passkeyDelete(name, answer string) string {
 	return string(v)
 }
 
+// passkeyBegin starts adding a passkey for Alice, confirmed with her first
+// passkey.
+func (s *stack) passkeyBegin(t *testing.T, session *http.Cookie) {
+	t.Helper()
+	resp := s.post(t, LoginHost, "/webapi/passkeys/begin", origin(LoginHost), s.passkeyAnswer(t, session, AliceCredID), session)
+	body := readBody(t, resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
+}
+
 // passkeyAdd adds a passkey called name with credID for Alice, confirmed
 // with her first passkey.
 func (s *stack) passkeyAdd(t *testing.T, session *http.Cookie, name, credID string) {
 	t.Helper()
-	resp := s.post(t, LoginHost, "/webapi/passkeys/begin", origin(LoginHost), s.passkeyAnswer(t, session, AliceCredID), session)
-	readBody(t, resp)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp = s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential(name, credID), session)
+	s.passkeyBegin(t, session)
+	resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential(name, credID), session)
 	body := readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 }
