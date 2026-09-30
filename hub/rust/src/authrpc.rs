@@ -363,7 +363,7 @@ pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result
 /// Runs `fut` until it finishes or [`CALL_DEADLINE`] passes. On the
 /// deadline, it drops `fut` and returns an error that names `what`.
 async fn with_deadline<T, E: From<String>>(what: &str, fut: impl Future<Output = std::result::Result<T, E>>) -> std::result::Result<T, E> {
-    match select(pin!(fut), pin!(Delay::from(CALL_DEADLINE))).await {
+    match select(pin!(fut), pin!(crate::sockets::sleep(CALL_DEADLINE))).await {
         Either::Left((res, _)) => res,
         Either::Right(_) => Err(format!("{what}: no answer within {CALL_DEADLINE:?}").into()),
     }

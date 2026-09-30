@@ -199,7 +199,7 @@ impl russh::server::Handler for AgentHandler {
                 // Drop a transport channel whose dial request never comes.
                 let pending = self.transports.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    worker::Delay::from(DIAL_DEADLINE).await;
+                    crate::sockets::sleep(DIAL_DEADLINE).await;
                     let stale = pending.lock().unwrap().remove(&id);
                     if let Some(ch) = stale {
                         console_log!("ssh: transport channel never dialed, closing");
@@ -319,7 +319,7 @@ async fn test_dial(handle: Handle, server_id: String) {
 /// Announces this hub every [`DISCOVERY_EVERY`] until the connection closes.
 async fn discovery_loop(handle: Handle, slot: Arc<Mutex<Option<Channel<Msg>>>>, proxy_name: String) {
     while announce(handle.clone(), slot.clone(), proxy_name.clone()).await {
-        worker::Delay::from(DISCOVERY_EVERY).await;
+        crate::sockets::sleep(DISCOVERY_EVERY).await;
     }
     console_log!("ssh: discovery loop ended");
 }

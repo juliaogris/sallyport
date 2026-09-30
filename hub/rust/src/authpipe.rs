@@ -88,7 +88,7 @@ impl Pool {
 
     /// Takes the oldest open stream, waiting up to [`TAKE_WAIT`] for one.
     pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
-        self.take_until(Delay::from(TAKE_WAIT))
+        self.take_until(crate::sockets::sleep(TAKE_WAIT))
             .await
             .ok_or_else(|| format!("no auth pipe stream within {TAKE_WAIT:?}"))
     }
@@ -142,7 +142,10 @@ pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
     let pool = pool.clone();
     pool.open.fetch_add(1, Ordering::Relaxed);
     wasm_bindgen_futures::spawn_local(async move {
-        serve(ws, key, host, &pool).await;
+        serve(ws.clone(), key, host, &pool).await;
+        // `serve` added the WebSocket to the restart list when it started
+        // listening, before the challenge.
+        crate::sockets::remove(&ws);
         pool.open.fetch_sub(1, Ordering::Relaxed);
     });
     Response::from_websocket(pair.client)
@@ -162,7 +165,7 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
         return;
     }
 
-    let reply = match select(events.next(), Box::pin(Delay::from(CHALLENGE_DEADLINE))).await {
+    let reply = match select(events.next(), Box::pin(crate::sockets::sleep(CHALLENGE_DEADLINE))).await {
         Either::Left((Some(Ok(WebsocketEvent::Message(msg))), _)) => msg.bytes(),
         Either::Right(_) => {
             console_log!("tunnel/auth: challenge failed, no reply within {CHALLENGE_DEADLINE:?}");

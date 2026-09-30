@@ -40,7 +40,8 @@ pub struct Events {
     error: Closure<dyn FnMut(web_sys::ErrorEvent)>,
 }
 
-/// Returns the events of `ws`. The stream ends after the close event.
+/// Returns the events of `ws`, and adds `ws` and its listeners to the
+/// socket list in [`crate::sockets`]. The stream ends after the close event.
 pub fn events(ws: &WebSocket) -> Result<Events> {
     let ws: &web_sys::WebSocket = ws.as_ref();
     let (tx, rx) = unbounded();
@@ -71,6 +72,9 @@ pub fn events(ws: &WebSocket) -> Result<Events> {
     ws.add_event_listener_with_callback("message", message.as_ref().unchecked_ref())?;
     ws.add_event_listener_with_callback("close", close.as_ref().unchecked_ref())?;
     ws.add_event_listener_with_callback("error", error.as_ref().unchecked_ref())?;
+    crate::sockets::add_listener(ws, "message", message.as_ref().unchecked_ref());
+    crate::sockets::add_listener(ws, "close", close.as_ref().unchecked_ref());
+    crate::sockets::add_listener(ws, "error", error.as_ref().unchecked_ref());
     Ok(Events {
         ws: ws.clone(),
         rx,

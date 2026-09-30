@@ -54,10 +54,12 @@ pub struct Hub {
 
 impl DurableObject for Hub {
     fn new(_state: State, env: Env) -> Self {
-        // After a trap, the WebSockets of the previous Wasm instance are
-        // still open. Their peers redial once they close.
+        // After a trap, the WebSockets and timers of the previous Wasm
+        // instance are still live. The peers redial once their WebSockets
+        // close.
+        let timers = crate::sockets::clear_timers();
         let stale = crate::sockets::close_all();
-        console_log!("hub: durable object started, closed {stale} WebSockets of the previous instance");
+        console_log!("hub: durable object started, closed {stale} WebSockets and {timers} timers of the previous instance");
         if let Some(msg) = crate::sockets::take_last_panic() {
             console_error!("hub: the previous instance panicked: {msg}");
         }
@@ -143,7 +145,7 @@ impl DurableObject for Hub {
         let authed = shared.authed.clone();
         let deadline_ws = ws.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            worker::Delay::from(AUTH_DEADLINE).await;
+            crate::sockets::sleep(AUTH_DEADLINE).await;
             if !authed.load(Ordering::Relaxed) {
                 console_log!("tunnel: not authenticated after {AUTH_DEADLINE:?}, closing");
                 let _ = deadline_ws.close(Some(1008), Some("auth timeout"));
@@ -173,7 +175,7 @@ impl DurableObject for Hub {
 /// tail` shows whether the object is alive and what it holds.
 async fn heartbeat(connections: Rc<Cell<usize>>, passthroughs: Arc<AtomicUsize>, app_tunnel: TunnelSlot, auth_pipe: authpipe::Pool) {
     loop {
-        worker::Delay::from(HEARTBEAT_EVERY).await;
+        crate::sockets::sleep(HEARTBEAT_EVERY).await;
         let last = crate::ssh::LAST_DISCOVERY_MS.load(Ordering::Relaxed);
         let discovery = if last == 0 {
             "never".to_string()
