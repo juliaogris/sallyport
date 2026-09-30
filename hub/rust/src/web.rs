@@ -1136,31 +1136,42 @@ mod tests {
     #[test]
     fn cert_for_host_cases() {
         let addr: &[u64] = &[1, 3, 9999, 1, 6];
-        let name: &[u64] = &[1, 3, 9999, 1, 10];
+        let app_name: &[u64] = &[1, 3, 9999, 1, 10];
         let utf8 = |v: &str| rcgen::DnValue::Utf8String(v.into());
         let printable = |v: &str| rcgen::DnValue::PrintableString(v.try_into().unwrap());
+        let ia5 = |v: &str| rcgen::DnValue::Ia5String(v.try_into().unwrap());
         let bmp = |v: &str| rcgen::DnValue::BmpString(v.try_into().unwrap());
         let host = "bench-julia.example.com";
-        assert!(cert_for_host(
-            &app_cert(&[(name, utf8("bench")), (addr, printable(host))]),
-            host
-        ));
-        assert!(cert_for_host(&app_cert(&[(addr, utf8(host))]), host));
-        assert!(!cert_for_host(&app_cert(&[(name, utf8("bench"))]), host));
-        assert!(!cert_for_host(
-            &app_cert(&[(addr, printable("octo-julia.example.com"))]),
-            host
-        ));
-        assert!(!cert_for_host(
-            &app_cert(&[(addr, printable("bench-julia.example.com.evil"))]),
-            host
-        ));
-        assert!(!cert_for_host(&app_cert(&[(addr, bmp(host))]), host));
-        assert!(!cert_for_host(b"not a pem", host));
-        assert!(!cert_for_host(
-            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
-            host
-        ));
+        let cases: Vec<(&str, Vec<u8>, bool)> = vec![
+            (
+                "PrintableString after another attribute",
+                app_cert(&[(app_name, utf8("bench")), (addr, printable(host))]),
+                true,
+            ),
+            ("UTF8String", app_cert(&[(addr, utf8(host))]), true),
+            ("IA5String", app_cert(&[(addr, ia5(host))]), true),
+            ("no address", app_cert(&[(app_name, utf8("bench"))]), false),
+            (
+                "another app",
+                app_cert(&[(addr, printable("octo-julia.example.com"))]),
+                false,
+            ),
+            (
+                "host as a prefix",
+                app_cert(&[(addr, printable("bench-julia.example.com.evil"))]),
+                false,
+            ),
+            ("BMPString", app_cert(&[(addr, bmp(host))]), false),
+            ("not a PEM", b"not a pem".to_vec(), false),
+            (
+                "not a certificate",
+                b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec(),
+                false,
+            ),
+        ];
+        for (name, pem, want) in cases {
+            assert_eq!(cert_for_host(&pem, host), want, "{name}");
+        }
     }
 
     #[test]
