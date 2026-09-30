@@ -181,7 +181,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         console_error!("web: {app}: app service offline, no tunnel");
         return Response::error("app service offline", 503);
     };
-    let tls = Arc::new(crate::appproxy::tls_from_pem(cx.env, &spec.tls_cert, &spec.tls_priv)?);
+    let tls = Arc::new(authrpc::client_tls(cx.env, &spec.tls_cert, &spec.tls_priv)?);
     let cluster = cx.env.var("CLUSTER_NAME")?.to_string();
     crate::appproxy::forward(&tunnel, tls, &cluster, &host, req).await
 }

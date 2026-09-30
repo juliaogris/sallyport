@@ -11,13 +11,10 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use worker::*;
 
 use crate::app::dial_app;
 use crate::ssh::AppTunnel;
-use crate::tunnel::secret_bytes;
 
 /// Header names that describe one hop of the connection, per RFC 7230 6.1,
 /// plus the handful browsers and proxies add in practice. None of these are
@@ -32,7 +29,8 @@ const SP_COOKIE_PREFIX: &str = "__Host-sp_";
 /// Sends one HTTP request to the app service at `host` through the agent
 /// tunnel, and returns the app service's response.
 ///
-/// `tls` is the client identity to present, built with `tls_from_pem`.
+/// `tls` is the client identity to present, built with
+/// `crate::authrpc::client_tls`.
 /// `cluster` picks the SNI the app service expects. `req`'s body, if any,
 /// is read fully before the request goes upstream, but the response body
 /// streams back as it arrives.
@@ -167,29 +165,6 @@ fn body_stream(incoming: hyper::body::Incoming) -> impl futures::Stream<Item = s
             }
         }
     })
-}
-
-/// Builds a TLS client config toward the app service from a PEM cert chain
-/// and key, with roots from the `HOST_CA_TLS` secret. The app service picks
-/// the app and the session from the presented client certificate, so there
-/// is no ALPN to negotiate.
-pub fn tls_from_pem(env: &worker::Env, cert_pem: &[u8], key_pem: &[u8]) -> worker::Result<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in CertificateDer::pem_slice_iter(&secret_bytes(env, "HOST_CA_TLS")?) {
-        let cert = cert.map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
-        roots.add(cert).map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
-    }
-    let certs = CertificateDer::pem_slice_iter(cert_pem)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::RustError(format!("cert: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| Error::RustError(format!("key: {e}")))?;
-
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| Error::RustError(e.to_string()))?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)
-        .map_err(|e| Error::RustError(format!("app session identity: {e}")))
 }
 
 /// Adapts a tokio `AsyncRead + AsyncWrite` stream to hyper 1.x's own `Read`

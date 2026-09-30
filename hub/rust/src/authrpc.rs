@@ -337,8 +337,18 @@ pub fn tls_config(env: &Env, cert_secret: &str, key_secret: &str) -> Result<rust
         .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))
 }
 
-/// Builds a TLS client config toward auth from a PEM cert and key.
+/// Builds a TLS client config toward auth from a PEM cert and key, with
+/// ALPN `h2`.
 pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ClientConfig> {
+    let mut config = client_tls(env, cert_pem, key_pem)?;
+    config.alpn_protocols = vec![ALPN_H2.to_vec()];
+    Ok(config)
+}
+
+/// Builds a TLS client config that trusts the cluster host CA in the
+/// `HOST_CA_TLS` secret and presents a PEM cert chain and key, with no
+/// ALPN. Auth and the app service both have certificates from that CA.
+pub fn client_tls(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&secret_bytes(env, "HOST_CA_TLS")?) {
         let cert = cert.map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
@@ -350,14 +360,12 @@ pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::RustError(format!("cert: {e}")))?;
     let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| Error::RustError(format!("key: {e}")))?;
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .map_err(|e| Error::RustError(e.to_string()))?
         .with_root_certificates(roots)
         .with_client_auth_cert(certs, key)
-        .map_err(|e| Error::RustError(format!("client identity: {e}")))?;
-    config.alpn_protocols = vec![ALPN_H2.to_vec()];
-    Ok(config)
+        .map_err(|e| Error::RustError(format!("client identity: {e}")))
 }
 
 /// Runs `fut` until it finishes or [`CALL_DEADLINE`] passes. On the
