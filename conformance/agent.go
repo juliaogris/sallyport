@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -69,8 +70,8 @@ func (p *PKI) AgentIdentity(role string) (*Identity, error) {
 
 // DialTunnelWS opens the tunnel WebSocket with the subprotocols given.
 func (h *Hub) DialTunnelWS(ctx context.Context, subprotocols ...string) (*websocket.Conn, *http.Response, error) {
-	d := websocket.Dialer{NetDialContext: h.DialContext, Subprotocols: subprotocols, HandshakeTimeout: 20 * time.Second}
-	return d.DialContext(ctx, "ws://"+LoginHost+TunnelPath, nil)
+	d := websocket.Dialer{NetDialContext: h.DialContext, TLSClientConfig: EdgeTLS(), Subprotocols: subprotocols, HandshakeTimeout: 20 * time.Second}
+	return d.DialContext(ctx, "wss://"+LoginHost+TunnelPath, nil)
 }
 
 // DialTunnelTLS opens the tunnel WebSocket and runs TLS in it, checking
@@ -106,6 +107,7 @@ type Agent struct {
 
 	mu     sync.Mutex
 	closed bool
+	app    *connListener
 }
 
 // Dial is a transport channel the hub opened into the agent and the
@@ -204,12 +206,21 @@ func (a *Agent) serve(chans <-chan ssh.NewChannel) {
 						continue
 					}
 					r.Reply(true, nil)
+					go ssh.DiscardRequests(reqs)
+					a.mu.Lock()
+					app := a.app
+					a.mu.Unlock()
+					if app != nil {
+						if !app.put(chanConn{ch}) {
+							ch.Close()
+						}
+						return
+					}
 					select {
 					case a.Dials <- Dial{Payload: r.Payload, Channel: ch}:
 					default:
 						ch.Close()
 					}
-					go ssh.DiscardRequests(reqs)
 					return
 				}
 			}()
@@ -217,6 +228,30 @@ func (a *Agent) serve(chans <-chan ssh.NewChannel) {
 			nc.Reject(ssh.UnknownChannelType, "unknown channel type")
 		}
 	}
+}
+
+// ServeApp makes the agent serve handler on every dial the hub makes into
+// it, as the app service does: TLS with a certificate for the cluster's
+// app SNI, a client certificate from the cluster TLS CA required, then
+// HTTP/1.1. Dials no longer go to Dials.
+func (a *Agent) ServeApp(p *PKI, handler http.Handler) error {
+	sni := hex.EncodeToString([]byte(p.Cluster)) + "." + authSNI
+	cert, err := p.TLSLeaf(sni, sni)
+	if err != nil {
+		return err
+	}
+	ln := newConnListener()
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"http/1.1"},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    p.TLSCAPool,
+	}))
+	a.mu.Lock()
+	a.app = ln
+	a.mu.Unlock()
+	return nil
 }
 
 // Heartbeat opens the heartbeat channel and sends one ping. It returns
@@ -252,5 +287,17 @@ func (a *Agent) Close() error {
 		return nil
 	}
 	a.closed = true
+	if a.app != nil {
+		a.app.Close()
+	}
 	return a.Conn.Close()
 }
+
+// chanConn is a net.Conn over an SSH channel.
+type chanConn struct{ ssh.Channel }
+
+func (chanConn) LocalAddr() net.Addr              { return fakeAddr{} }
+func (chanConn) RemoteAddr() net.Addr             { return fakeAddr{} }
+func (chanConn) SetDeadline(time.Time) error      { return nil }
+func (chanConn) SetReadDeadline(time.Time) error  { return nil }
+func (chanConn) SetWriteDeadline(time.Time) error { return nil }
