@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use futures::StreamExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -29,6 +31,9 @@ const SESSION_COOKIE: &str = "__Host-sp_session";
 const APP_COOKIE: &str = "__Host-sp_app";
 const SUBJECT_COOKIE: &str = "__Host-sp_subject";
 const AUTH_PATH: &str = "/x-teleport-auth";
+/// The largest body the login host and the handoff read. A WebAuthn
+/// assertion or attestation is a few KiB.
+const MAX_BODY: usize = 64 * 1024;
 /// How [`authrpc::unary`] reports gRPC status `RESOURCE_EXHAUSTED`, which
 /// auth returns when a client address makes too many login or invite calls.
 const RATE_LIMITED: &str = "grpc-status \"8\"";
@@ -87,7 +92,9 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
         (Method::Get, "/web/login") => return Response::from_html(LOGIN_PAGE),
         (Method::Post, "/webapi/login/begin") => login_begin(cx).await,
         (Method::Post, "/webapi/login/finish") => {
-            let body = req.bytes().await?;
+            let Some(body) = read_body(&mut req).await? else {
+                return Response::error("request too large", 413);
+            };
             return login_finish(cx, body).await;
         }
         (Method::Post, "/web/logout") => {
@@ -105,7 +112,9 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
             match step {
                 "begin" => invite_begin(cx, &token).await,
                 "finish" => {
-                    let body = req.bytes().await?;
+                    let Some(body) = read_body(&mut req).await? else {
+                        return Response::error("request too large", 413);
+                    };
                     return invite_finish(cx, &token, body).await;
                 }
                 _ => return Response::error("not found", 404),
@@ -139,8 +148,13 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
                 if !same_origin(&req, &host)? {
                     return Response::error("bad origin", 403);
                 }
-                let body: Value = req.json().await?;
-                handoff(cx, &body).await
+                let Some(body) = read_body(&mut req).await? else {
+                    return Response::error("request too large", 413);
+                };
+                let Some(h) = parse_handoff(&body) else {
+                    return Response::error("bad handoff", 400);
+                };
+                handoff(cx, h).await
             }
             _ => Response::error("method not allowed", 405),
         };
@@ -189,13 +203,22 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
     crate::appproxy::forward(&tunnel, tls, &cluster, &host, req).await
 }
 
+/// The body the handoff page posts: the app session ID and its bearer
+/// token.
+#[derive(Deserialize)]
+struct Handoff {
+    sid: String,
+    subject: String,
+}
+
+/// Returns the handoff in `body`, or None when it is not JSON or either
+/// field is missing or empty.
+fn parse_handoff(body: &[u8]) -> Option<Handoff> {
+    serde_json::from_slice::<Handoff>(body).ok().filter(|h| !h.sid.is_empty() && !h.subject.is_empty())
+}
+
 /// Checks the handoff from the launcher and sets the app cookies.
-async fn handoff(cx: &Ctx<'_>, body: &Value) -> Result<Response> {
-    let sid = body["sid"].as_str().unwrap_or_default().to_string();
-    let subject = body["subject"].as_str().unwrap_or_default().to_string();
-    if sid.is_empty() || subject.is_empty() {
-        return Response::error("bad handoff", 400);
-    }
+async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff) -> Result<Response> {
     let got: std::result::Result<AppSessionResponse, String> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => {}
@@ -447,6 +470,28 @@ fn session_response(res: std::result::Result<(String, String), String>) -> Resul
     }
 }
 
+/// Reads the body of `req`. It returns None, without reading the rest,
+/// when the body is over [`MAX_BODY`].
+async fn read_body(req: &mut Request) -> Result<Option<Vec<u8>>> {
+    let length = req.headers().get("Content-Length")?;
+    if length.and_then(|l| l.trim().parse::<usize>().ok()).is_some_and(|l| l > MAX_BODY) {
+        return Ok(None);
+    }
+    if req.inner().body().is_none() {
+        return Ok(Some(Vec::new()));
+    }
+    let mut stream = req.stream()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > MAX_BODY {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
+}
+
 fn same_origin(req: &Request, host: &str) -> Result<bool> {
     Ok(req.headers().get("Origin")?.as_deref() == Some(format!("https://{host}").as_str()))
 }
@@ -601,6 +646,15 @@ mod tests {
             ("/\u{e9}", false),
         ] {
             assert_eq!(start_path_ok(path), want, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn parse_handoff_cases() {
+        let h = parse_handoff(br#"{"sid":"s","subject":"t"}"#).unwrap();
+        assert_eq!((h.sid.as_str(), h.subject.as_str()), ("s", "t"));
+        for body in [&b""[..], b"not json", br#"{"sid":"s"}"#, br#"{"sid":"","subject":"t"}"#, br#"{"sid":"s","subject":""}"#, br#"{"sid":1,"subject":"t"}"#] {
+            assert!(parse_handoff(body).is_none(), "{:?}", String::from_utf8_lossy(body));
         }
     }
 
