@@ -65,6 +65,75 @@ document.getElementById('go').onclick = async () => {
 };
 </script>`
 
+const passkeysPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport passkeys</title>
+<p><a href="/">Back</a></p><ul id="list"></ul>
+<p><input id="name" maxlength="30" size="24"> <button id="add">Add a passkey</button></p><pre id="out"></pre><script>
+const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const out = document.getElementById('out'), list = document.getElementById('list'), nameInput = document.getElementById('name');
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  return r.json();
+}
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  return r.json();
+}
+async function answer() {
+  const c = await post('/webapi/passkeys/challenge');
+  const cred = await navigator.credentials.get({ publicKey: {
+    challenge: dec(c.challenge), rpId: c.rpId, timeout: c.timeout || undefined,
+    userVerification: c.userVerification || 'required',
+    allowCredentials: c.allowCredentials.map(a => ({ type: a.type, id: dec(a.id) })),
+  } });
+  return {
+    id: cred.id, rawId: enc(cred.rawId), type: cred.type, extensions: cred.getClientExtensionResults(),
+    response: {
+      authenticatorData: enc(cred.response.authenticatorData), clientDataJSON: enc(cred.response.clientDataJSON),
+      signature: enc(cred.response.signature), userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : null,
+    },
+  };
+}
+async function load() {
+  const { passkeys } = await get('/webapi/passkeys');
+  list.replaceChildren(...passkeys.map(p => {
+    const li = document.createElement('li');
+    li.append(p.name + ', added ' + p.addedAt.slice(0, 10) + ' ');
+    const b = document.createElement('button');
+    b.textContent = 'Remove';
+    b.style.minWidth = '0';
+    b.onclick = () => remove(p.name);
+    li.append(b);
+    return li;
+  }));
+}
+async function run(f) {
+  try { out.textContent = ''; await f(); await load(); } catch (e) { out.textContent = 'error: ' + e; }
+}
+function remove(name) {
+  if (confirm('Remove ' + name + '?')) run(async () => { await post('/webapi/passkeys/delete', { name, assertion: await answer() }); });
+}
+document.getElementById('add').onclick = () => run(async () => {
+  const a = await answer();
+  const c = await post('/webapi/passkeys/begin', a);
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: dec(c.challenge), rp: c.rp,
+    user: { id: dec(c.user.id), name: c.user.name, displayName: c.user.displayName },
+    pubKeyCredParams: c.pubKeyCredParams, timeout: c.timeout || undefined,
+    excludeCredentials: c.excludeCredentials.map(a => ({ type: a.type, id: dec(a.id) })),
+    attestation: c.attestation || 'none', authenticatorSelection: c.authenticatorSelection,
+  } });
+  await post('/webapi/passkeys/finish', { name: nameInput.value, credential: {
+    type: cred.type, rawId: enc(cred.rawId),
+    response: { clientDataJSON: enc(cred.response.clientDataJSON), attestationObject: enc(cred.response.attestationObject) },
+  } });
+});
+nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
+load().catch(e => { out.textContent = 'error: ' + e; });
+</script>`
+
 const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');

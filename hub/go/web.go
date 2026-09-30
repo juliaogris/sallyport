@@ -71,6 +71,10 @@ func (h *hub) loginHostRequest(req *request) *response {
 		}
 	case req.method == "POST" && strings.HasPrefix(p, "/web/launch/"):
 		return h.launch(req, strings.TrimPrefix(p, "/web/launch/"))
+	case req.method == "GET" && p == "/web/passkeys":
+		return h.showPasskeys(req)
+	case p == "/webapi/passkeys" || strings.HasPrefix(p, "/webapi/passkeys/"):
+		return h.passkeyAPI(req, strings.TrimPrefix(strings.TrimPrefix(p, "/webapi/passkeys"), "/"))
 	default:
 		return textError("not found", 404)
 	}
@@ -208,7 +212,7 @@ func (h *hub) dashboard(req *request) *response {
 		fmt.Fprintf(&b, `<form method="post" action="/web/launch/%s"><button>%s</button></form>`, a.name, a.name)
 	}
 	return html(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">` + style + `<title>sallyport</title>
-<p>Logged in as ` + user + `.</p>` + b.String() + `<form method="post" action="/web/logout"><button>Log out</button></form>`)
+<p>Logged in as ` + user + `.</p>` + b.String() + `<p><a href="/web/passkeys">Passkeys</a></p><form method="post" action="/web/logout"><button>Log out</button></form>`)
 }
 
 func (h *hub) launch(req *request, name string) *response {
@@ -227,11 +231,7 @@ func (h *hub) launch(req *request, name string) *response {
 	}
 	publicAddr := name + "-" + h.cfg.owner + "." + h.cfg.domain
 	sid, bearer, err := func() (string, string, error) {
-		key := s.tlsPriv
-		if len(key) == 0 {
-			key = s.privKey
-		}
-		cert, err := h.userCert(s.tlsCert, key)
+		cert, err := h.sessionCert(s)
 		if err != nil {
 			return "", "", err
 		}
@@ -383,6 +383,16 @@ func sessionResponse(user, sid string, err error) *response {
 	}
 	logf("web: web session for %q", user)
 	return jsonResponse(map[string]bool{"ok": true}).add("set-cookie", setCookie(sessionCookie, user+":"+sid))
+}
+
+// sessionCert returns the web session's user certificate, for calls to
+// auth as the user.
+func (h *hub) sessionCert(s *webSession) (tls.Certificate, error) {
+	key := s.tlsPriv
+	if len(key) == 0 {
+		key = s.privKey
+	}
+	return h.userCert(s.tlsCert, key)
 }
 
 // userCert parses a user's PEM certificate and key from auth.

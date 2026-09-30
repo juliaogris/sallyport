@@ -23,7 +23,9 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   legacy HTTP API to auth, with
   `authmsg.go` and `proto.go` for the few protobuf fields the hub uses.
 - `web.go` and `pages.go` are the login host and the app host pages.
-  `appproxy.go` forwards app requests through the tunnel.
+  `passkeys.go` is the passkeys page and its JSON routes, which call auth
+  as the user to list, add and remove passkeys. `appproxy.go` forwards
+  app requests through the tunnel.
 - `devtools/` holds two test commands with their own module, for testing
   a hub that the real agent and auth do not use. See "Testing on the dev
   Worker".
@@ -31,7 +33,7 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
 ## Build and deploy
 
 ```
-./build.sh                          # build/hub.wasm, about 11.7 MB
+./build.sh                          # build/hub.wasm, about 11.8 MB
 npx wrangler@4 deploy               # the dev Worker, see below
 npx wrangler@4 deploy --env go      # go.example.com
 ```
@@ -86,7 +88,8 @@ Build them with `GOOS=linux GOARCH=amd64 go build ./agent ./callout` in
   with a real passkey yet.
 - **Size.** `build/hub.wasm` is 11.7 MB after `wasm-opt -Oz` (3.26 MB
   gzip). Wrangler uploads 11.4 MiB (3.2 MiB gzip), with a startup time
-  of 11 to 22 ms. The Rust hub is about 0.7 MB gzip.
+  of 11 to 22 ms. The Rust hub is about 0.7 MB gzip. The passkey routes
+  and page added 62 KB (20 KB gzip), to 11.79 MB (3.28 MB gzip).
 - **Memory.** The heartbeat logs linear memory, the Go heap after a GC,
   the memory Go has mapped (`sys`), goroutines and the js.Values Go
   holds. Linear memory starts at 38 MiB before any Go code runs, while
