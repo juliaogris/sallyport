@@ -3,18 +3,24 @@
 This is russh 0.54.5 from crates.io, patched so that its SSH server runs on
 `wasm32-unknown-unknown` in a Cloudflare Durable Object and can speak
 Teleport's reverse tunnel protocol. The crate name and version are unchanged
-so that `[patch.crates-io]` can point at this directory.
+so that `[patch.crates-io]` can point at this directory. The last section
+lists the changes to the vendored ssh-key crate in `../ssh-key`.
 
 ## Packaging
 
 - `Cargo.toml`: Removed the cargo-generated header, the example and bench
-  targets, and the dev-dependencies that only the examples used (`clap`,
-  `ratatui`, `shell-escape`, `termion`, `tokio-fd`, `russh-sftp`).
+  targets, the `autoexamples = false` and `autobenches = false` settings,
+  and the dev-dependencies that only the examples used (`clap`, `ratatui`,
+  `shell-escape`, `termion`, `tokio-fd`, `russh-sftp`).
 - `Cargo.toml`: Added an empty `[workspace]` table so that `cargo test` works
   in this directory when the parent repository has its own workspace.
 - `Cargo.toml`: Added the wasm-only dependencies `web-time`, `gloo-timers`
   (with `futures`) and `wasm-bindgen-futures`.
-- `Cargo.toml`: Added the `teleport_hooks` test target.
+- `Cargo.toml`: Added the `teleport_hooks` and `test_rekey_channel_data`
+  test targets.
+- `Cargo.toml`: Relaxed the `base64ct` requirement from `~1.6` to `1.6`, so
+  the lockfile can use 1.8.3. `base64ct` 1.6.0 rejects some valid OpenSSH
+  private keys with `InvalidLength`, depending on the key's encoded length.
 - `examples/`, `benches/`: Removed.
 - `LICENSE.txt`: Added from the upstream `v0.54.5` tag, because the published
   crate does not include it.
@@ -58,7 +64,8 @@ so that `[patch.crates-io]` can point at this directory.
 - `src/lib_inner.rs`: The `server` module is no longer gated off on `wasm32`.
 - `src/server/mod.rs`: `Server::run_on_socket`, `Server::run_on_address` and
   the `tokio::net` import are gated off on `wasm32`. `run_stream` is the wasm
-  entry point.
+  entry point. Two imports that only those functions use have
+  `#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]`.
 - `src/msg.rs`, `src/cert.rs`, `src/negotiation.rs`: Removed the
   `not(wasm32)` gates on server-only message constants,
   `PublicKeyOrCertificate::decode` and `server::Config`, and removed the
@@ -73,7 +80,9 @@ so that `[patch.crates-io]` can point at this directory.
 - `src/server/mod.rs`, `src/server/encrypted.rs`: New
   `Handler::channel_request_unknown(channel, typ, want_reply, data, session)`.
   `data` is the bytes after the want-reply byte. The reply is sent only if the
-  client asked for one. The default returns `false`.
+  client asked for one. The default returns `false`. The "unknown channel
+  request" log line is `debug!` instead of `warn!`, because the hub gets
+  one for every heartbeat ping.
 - `src/server/mod.rs`, `src/server/encrypted.rs`: New
   `Handler::global_request_unknown(typ, want_reply, data, session)`. The reply
   is sent only if the client asked for one. Before this patch, an unknown
@@ -116,6 +125,50 @@ so that `[patch.crates-io]` can point at this directory.
   length except the 256 KiB transport packet limit, so a channel queue of
   256 messages could hold about 64 MiB. It now holds at most
   `channel_buffer_size * maximum_packet_size` bytes.
+- `src/server/encrypted.rs`: `CHANNEL_DATA`, `CHANNEL_EXTENDED_DATA` and
+  `CHANNEL_EOF` are queued on the channel with `try_send` instead of
+  `send().await`. russh adjusts the window when data arrives, not when it is
+  read, so a reader that stopped reading blocked the session loop and every
+  other channel on the connection. A full queue now closes that one channel.
+  Its reader gets what is queued, and then `wait` returns `None` and the
+  `AsyncRead` readers (`make_reader`, `into_stream`) return an error, so a
+  reader does not take the lost data for a clean end of stream.
+- `src/channels/channel_ref.rs`, `src/channels/mod.rs`,
+  `src/channels/io/rx.rs`, `src/server/session.rs`, `src/client/mod.rs`:
+  `ChannelRef` and `ChannelReadHalf` share a `reader_too_slow` flag, which
+  the server sets before it closes a slow channel.
+- `src/server/encrypted.rs`: `ChannelMsg::WindowAdjusted` is queued with
+  `try_send` and dropped when the queue is full, because
+  `window_size().update` already wakes writers and the message only informs
+  the reader. Upstream's blocking send froze the whole connection when a
+  channel was written but never read, after the queue filled with window
+  adjusts.
+
+## Messages during a rekey
+
+RFC 4253 section 7.1 allows only key exchange messages between `KEXINIT`
+and `NEWKEYS`, and the Go client drops the connection with "unexpected
+message type 94 (expected one of [31])". russh rekeys after every 1 GiB it
+writes. Upstream only stopped taking new messages from `Handle` during a
+key exchange. A `CHANNEL_WINDOW_ADJUST` from the client still flushed the
+channel's queued data, a `CHANNEL_DATA` still sent a window adjust back,
+and handler replies and keepalives went out too.
+
+- `src/server/session.rs`: `Session::flush` keeps everything in `enc.write`
+  while a key exchange is active, except after a disconnect. If `enc.write`
+  passes 4 MiB during a key exchange, `flush` ends the connection with
+  `Error::Kex`, because a peer that never finishes the exchange could
+  otherwise grow it without limit with requests that want a reply.
+- `src/server/session.rs`: `Session::flush_pending` does nothing during a
+  key exchange, because the exchange ends with `flush_all_pending`.
+- `src/session.rs`: `Encrypted::data` and `extended_data` queue during a key
+  exchange even when the queue is empty, where upstream's `&&` wrote the
+  data out.
+- `src/session.rs`: `flush_all_pending` sends a pending EOF or close, which
+  it dropped before, and a flushed queue clears its pending EOF so that
+  later flushes do not send it again.
+- The client side has the same window adjust path but is not patched,
+  because the hub only runs the server.
 
 ## Host certificates
 
@@ -134,18 +187,26 @@ so that `[patch.crates-io]` can point at this directory.
 ## Tests
 
 - `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks, the
-  server-initiated channel and host certificates, driven by a Go client on golang.org/x/crypto/ssh,
-  because the russh client cannot open unknown channel types, send arbitrary
+  server-initiated channel and requests, the unconfirmed-channel checks,
+  the packet size and window checks, the key exchange limit and host
+  certificates. A Go client on golang.org/x/crypto/ssh drives them, because
+  the russh client cannot open unknown channel types, send arbitrary
   requests or answer custom channel requests. The Go client sends
-  out-of-order messages through x/crypto's unexported packet writer, which
+  out-of-order messages through x/crypto's unexported packet writers, which
   it reaches with `go:linkname`.
+- `tests/test_backpressure.rs`: Rewritten for the slow reader close on data
+  and on EOF and for `unread_writer_channel_does_not_stall`, because
+  upstream's version asserted the old connection-wide blocking.
+- `tests/test_rekey_channel_data.rs`: Echoes 2 MiB both ways on 8 channels
+  through the Go client with a 128 KiB rekey limit, about 126 rekeys.
+- `src/rt.rs`: A unit test for the wasm timer delay.
 
-- **ssh-key `UnixTime`** (`vendor/ssh-key/src/certificate/unix_time.rs`): accept `valid_before = u64::MAX`, which OpenSSH and Teleport use for "forever". The raw value is kept so a re-encoded certificate keeps its CA signature; only the `SystemTime` view saturates.
+## ssh-key
 
-- **`base64ct` requirement** (`Cargo.toml`): `~1.6` relaxed to `1.6`, so the lockfile can use 1.8.3. `base64ct` 1.6.0 rejects some valid OpenSSH private keys with `InvalidLength`, depending on the key's encoded length. A hub identity minted for `julia.example.com` hit it; 1.8.3 parses the same key.
-
-- **Slow channel readers** (`src/server/encrypted.rs`): incoming channel data is queued with `try_send` instead of `send().await`. russh adjusts the window when data arrives, not when it is read, so a reader that stopped reading blocked the session loop and every other channel on the connection. On 2026-09-24 this stalled the live hub: discovery and auth passthroughs stopped while octocam MJPEG streams were open. A full queue now closes that one channel. Its reader gets what is queued, and then `wait` returns `None` and the `AsyncRead` readers (`make_reader`, `into_stream`) return an error, so a reader does not take the lost data for a clean end of stream. `ChannelRef` and `ChannelReadHalf` share a `reader_too_slow` flag for this. `tests/test_backpressure.rs` is rewritten to test this, because upstream's version asserted the old connection-wide blocking. It covers the close on data and on EOF, and binds its listener once.
-
-- **Window adjust and EOF sends** (`src/server/encrypted.rs`): `ChannelMsg::WindowAdjusted` is queued with `try_send` and dropped when the queue is full, because `window_size().update` already wakes writers and the message only informs the reader. Upstream's blocking send froze the whole connection when a channel was written but never read, after the queue filled with window adjusts; a go-do spike run stopped at 27.75 of 32 MiB this way. `ChannelMsg::Eof` also uses `try_send`, and a full queue closes the channel as for data. `tests/test_backpressure.rs` has `unread_writer_channel_does_not_stall`, which fails on the old code.
-
-- **Messages during a rekey** (`src/server/session.rs`, `src/server/encrypted.rs`, `src/session.rs`): the server no longer sends channel data or any other non-kex message between its `KEXINIT` and the end of the key exchange. RFC 4253 section 7.1 does not allow them, and the Go client drops the connection with "unexpected message type 94 (expected one of [31])". russh rekeys after every 1 GiB it writes, and a go-do spike run with 8 downloads dropped this way at 2 GiB every time. Upstream only stopped taking new messages from `Handle` during a key exchange. A `CHANNEL_WINDOW_ADJUST` from the client still flushed the channel's queued data, a `CHANNEL_DATA` still sent a window adjust back, and handler replies and keepalives went out too. `Session::flush` now keeps everything in `enc.write` while a key exchange is active, except after a disconnect. If `enc.write` passes 4 MiB during a key exchange, `flush` ends the connection with `Error::Kex`, because a peer that never finishes the exchange could otherwise grow it without limit with requests that want a reply. `Session::flush_pending` does nothing during a key exchange, because the exchange ends with `flush_all_pending`. `Encrypted::data` and `extended_data` queue during a key exchange even when the queue is empty, where upstream's `&&` wrote the data out. `flush_all_pending` now sends a pending EOF or close, which it dropped before, and a flushed queue clears its pending EOF so that later flushes do not send it again. The client side has the same window adjust path but is not patched, because the hub only runs the server. `tests/test_rekey_channel_data.rs` echoes 2 MiB both ways on 8 channels through a Go client with a 128 KiB rekey limit, about 126 rekeys, and fails on the old code.
+- `Cargo.toml`: Added an empty `[workspace]` table so that `cargo test`
+  works in that directory, as for russh.
+- `src/certificate/unix_time.rs`: `UnixTime::new` accepts
+  `valid_before = u64::MAX`, which OpenSSH and Teleport use for "forever".
+  The raw value is kept so that a re-encoded certificate keeps its CA
+  signature. Only the `SystemTime` value saturates. Two unit tests cover
+  the raw value and the `SystemTime`.
