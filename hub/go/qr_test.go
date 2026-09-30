@@ -12,28 +12,36 @@ import (
 )
 
 // The passkeys page draws the QR code of a link with its own encoder. These
-// tests run that encoder under node and decode what it draws, and check
-// the decoder itself against qrencode.
+// tests run that encoder under node and decode what it draws. The decoder
+// is checked against codes from qrencode: those checked in under
+// testdata/qrencode on every run, and fresh ones when qrencode is
+// installed.
 
 // qrLevelM is the codeword layout of error correction level M by version:
 // total codewords, error correction codewords per block, and blocks.
 var qrLevelM = [][3]int{{26, 10, 1}, {44, 16, 1}, {70, 26, 1}, {100, 18, 2}, {134, 24, 2}, {172, 16, 4}}
 
+// qrLink is the text of a real link, 70 bytes.
+const qrLink = "https://go.example.com/web/add-passkey#0123456789abcdef0123456789abcdef"
+
 func TestPageQR(t *testing.T) {
-	token := "0123456789abcdef0123456789abcdef"
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed, so the encoder of the passkeys page is not tested")
+	}
 	cases := []struct {
 		name, text string
 		size       int
 	}{
 		{"short", "hello", 21},
-		{"go link", "https://go.example.com/web/add-passkey#" + token, 37},
-		{"edge link", "https://julia.example.com/web/add-passkey#" + token, 37},
+		{"go link", qrLink, 37},
+		{"edge link", strings.Replace(qrLink, "go.", "julia.", 1), 37},
 		{"four blocks", strings.Repeat("sallyport ", 10), 41},
 		{"longest", strings.Repeat("x", 106), 41},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			m, err := pageQR(t, c.text)
+			m, err := pageQR(t, node, c.text)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,13 +58,13 @@ func TestPageQR(t *testing.T) {
 		})
 	}
 	t.Run("too long", func(t *testing.T) {
-		_, err := pageQR(t, strings.Repeat("x", 107))
+		_, err := pageQR(t, node, strings.Repeat("x", 107))
 		if err == nil || !strings.Contains(err.Error(), "too long") {
 			t.Errorf("err = %v, want too long", err)
 		}
 	})
 	t.Run("flipped modules", func(t *testing.T) {
-		m, err := pageQR(t, "hello")
+		m, err := pageQR(t, node, "hello")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,51 +80,92 @@ func TestPageQR(t *testing.T) {
 	})
 }
 
-// TestDecodeQRAgainstQrencode checks the decoder on codes from qrencode,
-// which picks the mask with the lowest penalty, so the decoder sees masks
-// other than 0.
+// qrencodeTexts are the texts of the codes under testdata/qrencode, by file
+// name: one block, two blocks and four blocks.
+var qrencodeTexts = map[string]string{
+	"hello":  "hello",
+	"link":   qrLink,
+	"blocks": strings.Repeat("sallyport ", 10),
+}
+
+// TestDecodeQRFixtures checks the decoder on the codes from qrencode under
+// testdata/qrencode, which did not come from the encoder under test.
+// qrencode picks the mask with the lowest penalty, so the decoder sees
+// masks other than 0. Each file is the output of
+//
+//	qrencode -8 -l M -m 0 -t ASCII -o - TEXT
+//
+// with `##` as 1 and two spaces as 0.
+func TestDecodeQRFixtures(t *testing.T) {
+	for name, text := range qrencodeTexts {
+		t.Run(name, func(t *testing.T) {
+			b, err := os.ReadFile(filepath.Join("testdata", "qrencode", name+".txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err := parseModules(string(b))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decodeQR(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != text {
+				t.Errorf("decoded %q, want %q", got, text)
+			}
+		})
+	}
+}
+
+// TestDecodeQRAgainstQrencode checks the decoder on fresh codes from
+// qrencode, the same texts as the fixtures.
 func TestDecodeQRAgainstQrencode(t *testing.T) {
 	qrencode, err := exec.LookPath("qrencode")
 	if err != nil {
-		t.Skip("qrencode not installed")
+		t.Skip("qrencode is not installed, so only the codes under testdata/qrencode are decoded")
 	}
-	texts := []string{"hello", "https://go.example.com/web/add-passkey#0123456789abcdef0123456789abcdef", strings.Repeat("sallyport ", 10)}
-	for _, text := range texts {
-		out, err := exec.CommandContext(t.Context(), qrencode, "-8", "-l", "M", "-m", "0", "-t", "ASCII", "-o", "-", text).Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var m [][]int
-		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-			var row []int
-			for i := 0; i < len(line); i += 2 {
-				bit := 0
-				if line[i] == '#' {
-					bit = 1
-				}
-				row = append(row, bit)
+	for name, text := range qrencodeTexts {
+		t.Run(name, func(t *testing.T) {
+			out, err := exec.CommandContext(t.Context(), qrencode, "-8", "-l", "M", "-m", "0", "-t", "ASCII", "-o", "-", text).Output()
+			if err != nil {
+				t.Fatal(err)
 			}
-			m = append(m, row)
-		}
-		got, err := decodeQR(m)
-		if err != nil {
-			t.Errorf("%q: %v", text, err)
-			continue
-		}
-		if got != text {
-			t.Errorf("decoded %q, want %q", got, text)
-		}
+			m, err := parseModules(strings.ReplaceAll(strings.ReplaceAll(string(out), "##", "1"), "  ", "0"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decodeQR(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != text {
+				t.Errorf("decoded %q, want %q", got, text)
+			}
+		})
 	}
+}
+
+// parseModules reads a code as lines of 0 and 1, one character a module.
+func parseModules(text string) ([][]int, error) {
+	var m [][]int
+	for r, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		row := make([]int, len(line))
+		for c, ch := range []byte(line) {
+			if ch != '0' && ch != '1' {
+				return nil, fmt.Errorf("row %d has %q, want 0 or 1", r, ch)
+			}
+			row[c] = int(ch - '0')
+		}
+		m = append(m, row)
+	}
+	return m, nil
 }
 
 // pageQR runs the encoder of the passkeys page, its first script block,
 // under node for text and returns the modules it draws.
-func pageQR(t *testing.T, text string) ([][]int, error) {
+func pageQR(t *testing.T, node, text string) ([][]int, error) {
 	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed")
-	}
 	start := strings.Index(passkeysPage, "<script>")
 	end := strings.Index(passkeysPage, "</script>")
 	if start < 0 || end < start {
