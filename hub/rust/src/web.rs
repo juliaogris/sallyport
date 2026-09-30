@@ -205,16 +205,16 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
         (Method::Get, p) if p.starts_with("/web/invite/") => Response::from_html(INVITE_PAGE),
         (Method::Post, "/webapi/login/begin") => {
             if !begin_allowed(&req)? {
-                return Response::error("too many requests, try again in a minute", 429);
+                return too_many_requests();
             }
             json_or_error(login_begin(cx).await)
         }
         (Method::Post, "/webapi/login/finish") => {
             if !finish_allowed(&req)? {
-                return Response::error("too many requests, try again in a minute", 429);
+                return too_many_requests();
             }
             let Some(body) = read_body(&mut req).await? else {
-                return Response::error("request too large", 413);
+                return too_large();
             };
             session_response(login_finish(cx, body).await)
         }
@@ -237,16 +237,16 @@ async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response>
     match step {
         "begin" => {
             if !begin_allowed(req)? {
-                return Response::error("too many requests, try again in a minute", 429);
+                return too_many_requests();
             }
             json_or_error(invite_begin(cx, token).await)
         }
         "finish" => {
             if !finish_allowed(req)? {
-                return Response::error("too many requests, try again in a minute", 429);
+                return too_many_requests();
             }
             let Some(body) = read_body(req).await? else {
-                return Response::error("request too large", 413);
+                return too_large();
             };
             session_response(invite_finish(cx, token, body).await)
         }
@@ -262,7 +262,7 @@ fn json_or_error(res: std::result::Result<Value, CallError>) -> Result<Response>
         Ok(v) => Response::from_json(&v),
         Err(err) if err.is_rate_limited() => {
             console_error!("web: {err}");
-            Response::error("too many requests, try again in a minute", 429)
+            too_many_requests()
         }
         Err(err) => {
             console_error!("web: {err}");
@@ -284,7 +284,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
                     return Response::error("bad origin", 403);
                 }
                 let Some(body) = read_body(&mut req).await? else {
-                    return Response::error("request too large", 413);
+                    return too_large();
                 };
                 let Some(h) = parse_handoff(&body) else {
                     return Response::error("bad handoff", 400);
@@ -541,14 +541,10 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     let public_addr = format!("{app}-{owner}.{domain}");
     match create_app_session(cx, &user, &spec, app, &public_addr).await {
         Ok((sid, bearer)) => {
-            let mut res = Response::empty()?.with_status(303);
-            res.headers_mut().set(
-                "Location",
-                &format!(
-                    "https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}",
-                    b64(start.as_bytes())
-                ),
-            )?;
+            let mut res = redirect(&format!(
+                "https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}",
+                b64(start.as_bytes())
+            ))?;
             // The URL has the session ID and bearer token in its fragment.
             // Browsers leave fragments out of `Referer`, and `no-referrer`
             // keeps the rest of the URL from leaving the page too.
@@ -930,6 +926,16 @@ fn redirect(location: &str) -> Result<Response> {
     let mut res = Response::empty()?.with_status(303);
     res.headers_mut().set("Location", location)?;
     Ok(res)
+}
+
+/// Returns a 429 for a call that the hub or auth rate limited.
+fn too_many_requests() -> Result<Response> {
+    Response::error("too many requests, try again in a minute", 429)
+}
+
+/// Returns a 413 for a body over [`MAX_BODY`].
+fn too_large() -> Result<Response> {
+    Response::error("request too large", 413)
 }
 
 /// Returns `s` with `&`, `<`, `>`, `"` and `'` written as HTML character
