@@ -12,7 +12,7 @@ The cluster, hub, agent and bench app are the S3 and S4 setup. S5 adds:
 - `cluster/auth.yaml`: the S3 auth config plus `callout_to` and
   `callout_key_file`. Auth runs the branch build, on the same data dir.
 - An Ed25519 key for the challenge. The hub pins the raw public key.
-- `hub/.dev.vars`: `AUTH_CALLOUT_PUBKEY`, `S5_USER_CERT` and
+- `rust/hub/.dev.vars`: `AUTH_CALLOUT_PUBKEY`, `S5_USER_CERT` and
   `S5_USER_KEY` (the S4 `tctl auth sign` cert for `s4user`), and
   `DEV_S5=1`.
 

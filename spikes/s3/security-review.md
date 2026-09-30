@@ -7,7 +7,7 @@ Reviewer: security-auditor agent (Opus 5.5), read-only, on sallyport at
 
 - Nothing before auth: channel opens, channel requests, global requests
   and the passthrough are unreachable until `auth_openssh_certificate`
-  accepts (`vendor/russh/src/server/encrypted.rs:135`).
+  accepts (`rust/vendor/russh/src/server/encrypted.rs:135`).
 - russh checks the cert validity window, its own signature and proof of
   possession before the handler; `signature_key() == host_ca.key_data()`
   is then sufficient.

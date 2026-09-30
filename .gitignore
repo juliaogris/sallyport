@@ -5,5 +5,5 @@ target/
 node_modules/
 .local/
 .dev.vars
-hub/.dev.vars
-hub/build/
+rust/hub/.dev.vars
+rust/hub/build/

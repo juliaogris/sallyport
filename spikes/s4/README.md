@@ -31,7 +31,7 @@ appsessmint -user-identity s4user -proxy-identity hub-identity \
   -out s4-appsession
 ```
 
-`hub/.dev.vars` gets `S4_APP_CERT` and `S4_APP_KEY` (base64 of
+`rust/hub/.dev.vars` gets `S4_APP_CERT` and `S4_APP_KEY` (base64 of
 `app.crt` and `app.key`) and `DEV_S4=1`. `/spike/s4?path=<path>` then sends
 one `GET` through the tunnel and returns the status and the timing. The
 endpoint is off without `DEV_S4`.

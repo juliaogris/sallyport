@@ -1,7 +1,7 @@
 # Web route security review, 2026-09-24
 
-Reviewer: Claude (Opus 5.5), reading `hub/src/web.rs` and
-`hub/src/appproxy.rs` at `54981b3`. No live attacks were run. Findings and
+Reviewer: Claude (Opus 5.5), reading `rust/hub/src/web.rs` and
+`rust/hub/src/appproxy.rs` at `54981b3`. No live attacks were run. Findings and
 fix status below.
 
 ## Correctly enforced

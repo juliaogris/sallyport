@@ -63,7 +63,7 @@ About 13 call sites outside the client.
 
 ### Decision
 
-Vendor `russh` 0.54.5 into `vendor/russh` and patch it:
+Vendor `russh` 0.54.5 into `rust/vendor/russh` and patch it:
 
 1. A time shim: `web-time` `Instant` and JS-timer sleeps on wasm, tokio
    on native.
@@ -111,7 +111,7 @@ The hub returns 400 for it. Phase 1 has to handle both.
 
 ## russh patch, 2026-09-24
 
-`vendor/russh` is patched and committed; `vendor/russh/PATCHES.md` lists
+`rust/vendor/russh` is patched and committed; `rust/vendor/russh/PATCHES.md` lists
 every change. Native tests: 48 pass, including 4 new hook tests driven by
 a Go client on `golang.org/x/crypto/ssh`. It builds for wasm32 at
 457 KB gzipped. The wasm timer code has not yet run under workerd.
@@ -148,7 +148,7 @@ and the agent logs `Connected to Auth Server through tunnel.` and
 
 Teleport host certs have `valid_before = u64::MAX`, OpenSSH's "forever".
 The forked `ssh-key` caps timestamps at `i64::MAX` and rejects the cert.
-`vendor/ssh-key` keeps the raw value, so a re-encoded cert keeps its CA
+`rust/vendor/ssh-key` keeps the raw value, so a re-encoded cert keeps its CA
 signature, and only saturates the `SystemTime` view.
 
 ### 6. The agent dials with two identities
@@ -184,7 +184,7 @@ every ping. The plan listed discovery as cut; this reverses that.
 
 - **`ring` needs LLVM clang for wasm32.** Its C code is not built by
   Apple clang, so the link fails with undefined `ring_core_*` symbols.
-  `hub/wrangler.toml` sets `CC_wasm32_unknown_unknown` to Homebrew LLVM.
+  `rust/hub/wrangler.toml` sets `CC_wasm32_unknown_unknown` to Homebrew LLVM.
 - **Hub skeleton builds and runs** under `wrangler dev` over HTTPS with a
   `mkcert` cert: `/webapi/find` answers, and the Durable Object bridges
   the WebSocket to a rustls server with the hub TLS identity. Until the
@@ -198,8 +198,8 @@ every ping. The plan listed discovery as cut; this reverses that.
 - **Reference proxy ran in separate mode.** The agent then dialled
   `[::1]:3024`, so the cluster networking config is not `multiplex`.
   Set `proxy_listener_mode: multiplex` explicitly before the next run.
-- **`vendor/russh` is partial and uncommitted.** The patch agent was
+- **`rust/vendor/russh` is partial and uncommitted.** The patch agent was
   stopped mid-way. Re-check it against the patch list above before use.
 
-Next: finish the `russh` patch, wire `run_stream` into `hub/src/tunnel.rs`,
+Next: finish the `russh` patch, wire `run_stream` into `rust/hub/src/tunnel.rs`,
 point `cluster/app-tunnel.yaml` at the hub, and check the S3 exit criteria.

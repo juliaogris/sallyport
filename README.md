@@ -14,7 +14,7 @@ Feasibility and planning. No code yet. Spikes S1 to S5 come first, in that order
 
 ## Layout
 
-- `hub/` - the Worker and the Durable Object (Rust, `workers-rs`).
+- `rust/hub/` - the Worker and the Durable Object (Rust, `workers-rs`).
 - `authtun/` - Phase 0 scaffold: the auth pipe as a standalone Go
   program, retired once auth dial-out lands in Teleport.
 - `mint/` - one-shot Go tool that joins the hub as a proxy and writes its
@@ -31,5 +31,5 @@ hub itself.
 
 sallyport is licensed under the GNU Affero General Public License v3.0 or
 later, the license of Teleport, which it adapts. See `LICENSE`. The
-vendored crates in `vendor/` keep their own licenses: `russh` is
+vendored crates in `rust/vendor/` keep their own licenses: `russh` is
 Apache-2.0 and `ssh-key` is Apache-2.0 or MIT.
