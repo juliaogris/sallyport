@@ -24,8 +24,13 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   `authmsg.go` and `proto.go` for the few protobuf fields the hub uses.
 - `web.go` and `pages.go` are the login host and the app host pages.
   `passkeys.go` is the passkeys page and its JSON routes, which call auth
-  as the user to list, add and remove passkeys. `appproxy.go` forwards
-  app requests through the tunnel.
+  as the user to list, add and remove passkeys, and the routes for adding
+  a passkey from another device: `/webapi/passkeys/link` makes a link
+  with a privilege token, and `/web/add-passkey/<token>` with its `begin`
+  and `finish` routes uses it without a session, as the invite does. The
+  passkeys page draws the QR code of the link with an encoder in its own
+  script block, which `qr_test.go` runs under node and decodes.
+  `appproxy.go` forwards app requests through the tunnel.
 - `devtools/` holds two test commands with their own module, for testing
   a hub that the real agent and auth do not use. See "Testing on the dev
   Worker".
@@ -86,10 +91,11 @@ Build them with `GOOS=linux GOARCH=amd64 go build ./agent ./callout` in
   entry, the tunnel, the auth pipe, gRPC and HTTP to auth, the browser
   pages and the app proxy. The passkey invite and login were not tried
   with a real passkey yet.
-- **Size.** `build/hub.wasm` is 11.7 MB after `wasm-opt -Oz` (3.26 MB
+- **Size.** `build/hub.wasm` is 11.84 MB after `wasm-opt -Oz` (3.29 MB
   gzip). Wrangler uploads 11.4 MiB (3.2 MiB gzip), with a startup time
   of 11 to 22 ms. The Rust hub is about 0.7 MB gzip. The passkey routes
-  and page added 62 KB (20 KB gzip), to 11.79 MB (3.28 MB gzip).
+  and page added 62 KB (20 KB gzip), and the link, the token routes and
+  the QR encoder in the page another 36 KB (2 KB gzip).
 - **Memory.** The heartbeat logs linear memory, the Go heap after a GC,
   the memory Go has mapped (`sys`), goroutines and the js.Values Go
   holds. Linear memory starts at 38 MiB before any Go code runs, while
