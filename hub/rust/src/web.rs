@@ -251,16 +251,26 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
 /// Returns the dashboard apps from `APPS`, a comma-separated list of
 /// `name` or `name:/start/path`. The start path is where a launch lands.
 fn app_list(env: &Env) -> Result<Vec<(String, String)>> {
-    Ok(env
-        .var("APPS")?
-        .to_string()
-        .split(',')
+    Ok(parse_apps(&env.var("APPS")?.to_string()))
+}
+
+/// Parses an `APPS` value. It drops an entry whose name fails
+/// [`valid_name`] or whose start path fails [`start_path_ok`].
+fn parse_apps(apps: &str) -> Vec<(String, String)> {
+    apps.split(',')
         .filter_map(|e| {
             let (name, path) = e.trim().split_once(':').unwrap_or((e.trim(), "/"));
-            let path_ok = path.starts_with('/') && !path.starts_with("//") && path.bytes().all(|b| b.is_ascii_graphic());
-            (valid_name(name) && path_ok).then(|| (name.to_string(), path.to_string()))
+            (valid_name(name) && start_path_ok(path)).then(|| (name.to_string(), path.to_string()))
         })
-        .collect())
+        .collect()
+}
+
+/// Returns true when `path` starts with one `/` and every byte is in 0x21
+/// to 0x7e except `\`. The URL parser removes tab, CR and LF, and reads
+/// `\` as `/`, so either could turn the path into `//host`.
+/// `HANDOFF_PAGE` applies the same rule to the start path it is sent.
+fn start_path_ok(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && path.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
 }
 
 async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
@@ -554,8 +564,50 @@ const HANDOFF_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="r
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
-try { const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/')); if (p.startsWith('/') && !p.startsWith('//') && !p.includes('\\')) path = p; } catch (e) {}
+// The start path must pass the same rule as start_path_ok. The page then
+// passes the resolved full URL to location.replace, because a path such as
+// "/.//host" resolves to the path "//host".
+try {
+  const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/'));
+  if (/^\/(?!\/)[\x21-\x5b\x5d-\x7e]*$/.test(p)) {
+    const u = new URL(p, location.origin);
+    if (u.origin === location.origin) path = u.href;
+  }
+} catch (e) {}
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
   .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));
 </script>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_path_ok_cases() {
+        for (path, want) in [
+            ("/", true),
+            ("/stream", true),
+            ("/a?b=1#c", true),
+            ("/%2F/x", true),
+            ("", false),
+            ("stream", false),
+            ("//evil.example", false),
+            ("/\t/evil.example", false),
+            ("/\n/evil.example", false),
+            ("/\r/evil.example", false),
+            ("/\\evil.example", false),
+            ("/ /x", false),
+            ("/\u{e9}", false),
+        ] {
+            assert_eq!(start_path_ok(path), want, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn parse_apps_cases() {
+        let got = parse_apps(" a , b:/x,c:x,d://x,E,f:/\t/x,g:/y:z ");
+        let want: Vec<(String, String)> = [("a", "/"), ("b", "/x"), ("g", "/y:z")].iter().map(|(n, p)| (n.to_string(), p.to_string())).collect();
+        assert_eq!(got, want);
+    }
+}
