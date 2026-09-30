@@ -418,7 +418,18 @@ fn parse_apps(apps: &str) -> Vec<(String, String)> {
 /// `\` as `/`, so either could turn the path into `//host`.
 /// `HANDOFF_PAGE` applies the same rule to the start path it is sent.
 fn start_path_ok(path: &str) -> bool {
-    path.starts_with('/') && !path.starts_with("//") && path.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && path.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
+        && !has_dot_segment(path)
+}
+
+/// Returns true when the path part of `path` has a `.` or `..` segment,
+/// also written `%2e`. A browser removes these, so `/.//host` becomes
+/// `//host`, which names another host.
+fn has_dot_segment(path: &str) -> bool {
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    path[..end].split('/').any(|seg| matches!(seg.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | ".."))
 }
 
 async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
@@ -835,15 +846,13 @@ const HANDOFF_PAGE: &str = concat!(
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
-// The start path must pass the same rule as start_path_ok. The page then
-// passes the resolved full URL to location.replace, because a path such as
-// "/.//host" resolves to the path "//host".
+// The start path must pass the same rule as start_path_ok, including no
+// "." or ".." segment, because a path such as "/.//host" resolves to the
+// path "//host".
 try {
   const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/'));
-  if (/^\/(?!\/)[\x21-\x5b\x5d-\x7e]*$/.test(p)) {
-    const u = new URL(p, location.origin);
-    if (u.origin === location.origin) path = u.href;
-  }
+  const segs = p.split(/[?#]/)[0].toLowerCase().replace(/%2e/g, '.').split('/');
+  if (/^\/(?!\/)[\x21-\x5b\x5d-\x7e]*$/.test(p) && !segs.some(s => s === '.' || s === '..')) path = p;
 } catch (e) {}
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
@@ -862,6 +871,12 @@ mod tests {
             ("/stream", true),
             ("/a?b=1#c", true),
             ("/%2F/x", true),
+            ("/a/./b", false),
+            ("/.//evil.example", false),
+            ("/a/%2E%2e/b", false),
+            ("/a/..", false),
+            ("/a/b?x=/../", true),
+            ("/a.b/.c", true),
             ("", false),
             ("stream", false),
             ("//evil.example", false),
