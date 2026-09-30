@@ -151,16 +151,16 @@ const glue = {
       { highWaterMark: 0 },
     );
   },
-  // Delivers the answer to one pull: n >= 0 bytes in buf, -1 for the end
-  // and -2 for an error.
-  chunk(sid, n) {
+  // Delivers the answer to one pull: n >= 0 bytes in buf, then the end if
+  // last is true, or -2 for an error.
+  chunk(sid, n, last) {
     const s = streams.get(sid);
     if (!s) return;
     streams.delete(sid);
     try {
-      if (n >= 0) s.ctl.enqueue(s.buf.slice(0, n));
-      else if (n === -1) s.ctl.close();
-      else s.ctl.error(new Error('upstream body error'));
+      if (n > 0) s.ctl.enqueue(s.buf.slice(0, n));
+      if (n === -2) s.ctl.error(new Error('upstream body error'));
+      else if (last) s.ctl.close();
     } catch {}
     s.resolve();
   },

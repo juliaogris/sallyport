@@ -165,7 +165,10 @@ func buildResponse(resp *http.Response, cc *http.ClientConn) *response {
 			res.add(lower, v)
 		}
 	}
-	body := closeBoth{resp.Body, cc}
+	var body io.ReadCloser = closeBoth{resp.Body, cc}
+	if resp.ContentLength >= 0 {
+		body = &exactBody{body, resp.ContentLength}
+	}
 	// The runtime refuses a body on these statuses.
 	switch resp.StatusCode {
 	case 101, 204, 205, 304:
@@ -179,6 +182,28 @@ func buildResponse(resp *http.Response, cc *http.ClientConn) *response {
 	}
 	res.stream = newBodyStream(body)
 	return res
+}
+
+// exactBody is a body of known length that reports the end with its last
+// bytes, since the runtime stops reading once it has them.
+type exactBody struct {
+	io.ReadCloser
+	left int64
+}
+
+func (b *exactBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.left -= int64(n)
+	if b.left == 0 && err == nil {
+		err = io.EOF
+	}
+	return n, err
 }
 
 // closeBoth is a response body that also closes its connection.

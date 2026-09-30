@@ -238,6 +238,12 @@ type wsAddr struct{}
 func (wsAddr) Network() string { return "websocket" }
 func (wsAddr) String() string  { return "websocket" }
 
+// streamIdle ends a response body that the runtime has not pulled from for
+// this long. When the browser goes away, the runtime stops pulling but does
+// not always cancel the stream, and the upstream connection would stay
+// open for good.
+const streamIdle = 30 * time.Second
+
 // bodyStream is a response body that JavaScript pulls from Go. Each chunk
 // goes through one persistent Uint8Array.
 type bodyStream struct {
@@ -287,36 +293,38 @@ func newBodyStream(r io.ReadCloser) *bodyStream {
 func (s *bodyStream) run() {
 	buf := make([]byte, outBytes)
 	defer s.end()
+	idle := time.NewTimer(streamIdle)
+	defer idle.Stop()
 	for {
 		select {
 		case <-s.pulls:
 		case <-s.gone:
+			return
+		case <-idle.C:
+			logf("appproxy: response body not read for %v, closing", streamIdle)
 			return
 		}
 		n, err := s.r.Read(buf)
 		for n == 0 && err == nil {
 			n, err = s.r.Read(buf)
 		}
+		if err != nil && err != io.EOF {
+			logf("appproxy: response body: %v", err)
+			glue.chunk.Invoke(s.id, -2, false)
+			return
+		}
+		// The last chunk carries the end with it. The runtime stops pulling
+		// once it has Content-Length bytes, so a separate end would never
+		// be asked for, and the upstream connection would stay open.
 		if n > 0 {
 			js.CopyBytesToJS(s.buf, buf[:n])
-			glue.chunk.Invoke(s.id, n)
-			if err == nil {
-				continue
-			}
-			// Answer the next pull with the end.
-			select {
-			case <-s.pulls:
-			case <-s.gone:
-				return
-			}
 		}
+		glue.chunk.Invoke(s.id, n, err == io.EOF)
 		if err == io.EOF {
-			glue.chunk.Invoke(s.id, -1)
-		} else {
-			logf("appproxy: response body: %v", err)
-			glue.chunk.Invoke(s.id, -2)
+			return
 		}
-		return
+		// Only the wait for the next pull counts, not a slow upstream.
+		idle.Reset(streamIdle)
 	}
 }
 
