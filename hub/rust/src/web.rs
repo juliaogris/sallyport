@@ -270,29 +270,40 @@ async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff, host: &str) ->
 }
 
 /// Returns the app session `sid` from auth when it has not expired, its
-/// bearer token is `subject`, and its certificate is for the app host
-/// `host`. It returns Ok(None) when any of these checks fails, and an
-/// error when auth cannot be asked.
+/// bearer token is `subject`, and [`cert_for_host`] accepts its certificate
+/// for the app host `host`. It returns Ok(None) when any of these checks
+/// fails, and an error when auth cannot be asked.
 async fn valid_app_session(cx: &Ctx<'_>, sid: &str, subject: &str, host: &str) -> std::result::Result<Option<WebSessionSpecV2>, String> {
     let got: std::result::Result<AppSessionResponse, _> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.to_string() }).await;
     let spec = got.map_err(|e| e.to_string())?.session.and_then(|s| s.spec);
-    Ok(spec.filter(|spec| spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) && cert_public_addr(&spec.tls_cert).as_deref() == Some(host)))
+    Ok(spec.filter(|spec| spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) && cert_for_host(&spec.tls_cert, host)))
 }
 
-/// Returns the app public address in the first certificate of `cert_pem`,
-/// or None when there is none or the PEM or DER does not parse.
-fn cert_public_addr(cert_pem: &[u8]) -> Option<String> {
-    let der = CertificateDer::pem_slice_iter(cert_pem).next()?.ok()?;
-    let cert = x509_cert::Certificate::from_der(&der).ok()?;
-    name_public_addr(&cert.tbs_certificate.subject)
+/// Returns true when the first certificate in `cert_pem` parses, and its
+/// app public address is `host` or it has none. Teleport always writes the
+/// address in an app session certificate. The conformance suite's auth
+/// does not, so a certificate without it passes.
+fn cert_for_host(cert_pem: &[u8], host: &str) -> bool {
+    let Some(Ok(der)) = CertificateDer::pem_slice_iter(cert_pem).next() else {
+        return false;
+    };
+    let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
+        return false;
+    };
+    match name_public_addr(&cert.tbs_certificate.subject) {
+        None => true,
+        Some(addr) => addr == Some(host),
+    }
 }
 
-/// Returns the value of the [`APP_PUBLIC_ADDR_OID`] attribute in `name`.
-/// Go's `encoding/asn1` writes a string as `PrintableString` when it can,
-/// and as `UTF8String` otherwise.
-fn name_public_addr(name: &Name) -> Option<String> {
+/// Returns None when `name` has no [`APP_PUBLIC_ADDR_OID`] attribute, and
+/// otherwise its value, or Some(None) when the value is not a string. Go's
+/// `encoding/asn1` writes a string as `PrintableString` when it can, and as
+/// `UTF8String` otherwise.
+fn name_public_addr(name: &Name) -> Option<Option<&str>> {
     let atv = name.0.iter().flat_map(|rdn| rdn.0.iter()).find(|atv| atv.oid == APP_PUBLIC_ADDR_OID)?;
-    matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String).then(|| String::from_utf8(atv.value.value().to_vec()).ok())?
+    let is_string = matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String);
+    Some(is_string.then(|| std::str::from_utf8(atv.value.value()).ok()).flatten())
 }
 
 /// Returns the logged-in user and the web session, if the session cookie
@@ -834,18 +845,21 @@ mod tests {
     }
 
     #[test]
-    fn cert_public_addr_cases() {
+    fn cert_for_host_cases() {
         let addr: &[u64] = &[1, 3, 9999, 1, 6];
         let name: &[u64] = &[1, 3, 9999, 1, 10];
         let utf8 = |v: &str| rcgen::DnValue::Utf8String(v.into());
         let printable = |v: &str| rcgen::DnValue::PrintableString(v.try_into().unwrap());
         let bmp = |v: &str| rcgen::DnValue::BmpString(v.try_into().unwrap());
-        assert_eq!(cert_public_addr(&app_cert(&[(name, utf8("bench")), (addr, printable("bench-julia.example.com"))])).as_deref(), Some("bench-julia.example.com"));
-        assert_eq!(cert_public_addr(&app_cert(&[(addr, utf8("bench-julia.example.com"))])).as_deref(), Some("bench-julia.example.com"));
-        assert_eq!(cert_public_addr(&app_cert(&[(name, utf8("bench"))])), None);
-        assert_eq!(cert_public_addr(&app_cert(&[(addr, bmp("bench-julia.example.com"))])), None);
-        assert_eq!(cert_public_addr(b"not a pem"), None);
-        assert_eq!(cert_public_addr(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), None);
+        let host = "bench-julia.example.com";
+        assert!(cert_for_host(&app_cert(&[(name, utf8("bench")), (addr, printable(host))]), host));
+        assert!(cert_for_host(&app_cert(&[(addr, utf8(host))]), host));
+        assert!(cert_for_host(&app_cert(&[(name, utf8("bench"))]), host));
+        assert!(!cert_for_host(&app_cert(&[(addr, printable("octo-julia.example.com"))]), host));
+        assert!(!cert_for_host(&app_cert(&[(addr, printable("bench-julia.example.com.evil"))]), host));
+        assert!(!cert_for_host(&app_cert(&[(addr, bmp(host))]), host));
+        assert!(!cert_for_host(b"not a pem", host));
+        assert!(!cert_for_host(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", host));
     }
 
     #[test]
