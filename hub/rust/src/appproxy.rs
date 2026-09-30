@@ -10,7 +10,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use futures::stream::LocalBoxStream;
+use futures::StreamExt;
+use http_body_util::{BodyExt, Either, Empty, StreamBody};
+use hyper::body::Frame;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use worker::*;
@@ -33,9 +36,8 @@ const SP_COOKIE_PREFIX: &str = "__Host-sp_";
 /// tunnel, and returns the app service's response.
 ///
 /// `tls` is the client identity to present, built with `tls_from_pem`.
-/// `cluster` picks the SNI the app service expects. `req`'s body, if any,
-/// is read fully before the request goes upstream, but the response body
-/// streams back as it arrives.
+/// `cluster` picks the SNI the app service expects. The request body and
+/// the response body both stream as they arrive.
 ///
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this returns a 502 response rather than an error.
@@ -71,7 +73,7 @@ async fn forward_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, clust
 /// Builds the request the hub sends upstream: `req`'s method and path, its
 /// headers with the hop-by-hop, `Host` and `cf-*` ones dropped, `Host` set
 /// to `host`, and the hub's own session cookies removed from `Cookie`.
-async fn build_request(req: &mut Request, host: &str) -> std::result::Result<http::Request<Full<Bytes>>, String> {
+async fn build_request(req: &mut Request, host: &str) -> std::result::Result<http::Request<RequestBody>, String> {
     let method = req.method();
     let url = req.url().map_err(|e| format!("request url: {e}"))?;
     let mut target = url.path().to_string();
@@ -97,12 +99,21 @@ async fn build_request(req: &mut Request, host: &str) -> std::result::Result<htt
     }
     builder = builder.header("host", host);
 
-    let body = match method {
-        Method::Get | Method::Head => Vec::new(),
-        _ => req.bytes().await.map_err(|e| format!("request body: {e}"))?,
+    // The body streams, so an upload is never held whole in Wasm memory.
+    // The browser's `Content-Length` is kept, and hyper sends that many
+    // bytes.
+    let body = if matches!(method, Method::Get | Method::Head) || req.inner().body().is_none() {
+        Either::Left(Empty::new())
+    } else {
+        let stream = req.stream().map_err(|e| format!("request body: {e}"))?;
+        Either::Right(StreamBody::new(stream.map(|chunk| chunk.map(|b| Frame::data(Bytes::from(b))).map_err(|e| std::io::Error::other(e.to_string()))).boxed_local()))
     };
-    builder.body(Full::new(Bytes::from(body))).map_err(|e| format!("build request: {e}"))
+    builder.body(body).map_err(|e| format!("build request: {e}"))
 }
+
+/// The body of a request to the app service: empty, or the browser's body
+/// as it arrives.
+type RequestBody = Either<Empty<Bytes>, StreamBody<LocalBoxStream<'static, std::result::Result<Frame<Bytes>, std::io::Error>>>>;
 
 /// Removes every cookie whose name starts with [`SP_COOKIE_PREFIX`] from a
 /// `Cookie` header value. Returns `None` when nothing is left to send.
