@@ -948,7 +948,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// The start of every page: the doctype, the charset, the viewport and
-/// `STYLE`. `concat!` takes only literals, so this is a macro.
+/// the style, with larger text and buttons so they are easy to tap on a
+/// phone. `concat!` takes only literals, so this is a macro.
 macro_rules! head {
     () => {
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>"#
@@ -971,7 +972,7 @@ async function post(url, body) {
     };
 }
 
-/// Larger text and buttons, so they are easy to tap on a phone.
+/// [`head!`] as a constant, for pages built with `format!`.
 const HEAD: &str = head!();
 
 const LOGIN_PAGE: &str = concat!(
