@@ -91,7 +91,8 @@ so that `[patch.crates-io]` can point at this directory.
 - `src/server/encrypted.rs`: The server now handles incoming
   `SSH_MSG_CHANNEL_SUCCESS` and `SSH_MSG_CHANNEL_FAILURE` by answering the
   oldest pending request on that channel. Pending requests are dropped when
-  the channel closes.
+  the peer closes the channel or when `Session::close` closes it, and
+  `request_custom` then returns `Error::Disconnect`.
 - `src/session.rs`, `src/server/encrypted.rs`: New
   `CommonSession::is_established_channel`, from upstream v0.63.3. The
   `CHANNEL_CLOSE`, `CHANNEL_EOF`, `CHANNEL_DATA`, `CHANNEL_EXTENDED_DATA`,

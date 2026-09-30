@@ -310,6 +310,71 @@ async fn messages_on_unconfirmed_channel_are_ignored() {
     assert_eq!(r.events, vec![]);
 }
 
+#[tokio::test]
+async fn request_custom_fails_when_peer_closes_first() {
+    let (result_tx, result_rx) = oneshot::channel();
+    let r = run("transport-close", move |handle| async move {
+        let channel = handle
+            .channel_open_custom("teleport-transport", vec![])
+            .await
+            .unwrap();
+        let reply = channel
+            .request_custom("teleport-transport-dial", true, vec![])
+            .await;
+        let _ = result_tx.send(reply);
+        handle
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                String::new(),
+                String::new(),
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+    assert_eq!(r.stdout, "request=teleport-transport-dial\n");
+    assert!(matches!(
+        result_rx.await.unwrap(),
+        Err(russh::Error::Disconnect)
+    ));
+}
+
+#[tokio::test]
+async fn request_custom_fails_when_server_closes_first() {
+    let (result_tx, result_rx) = oneshot::channel();
+    let r = run("transport-silent", move |handle| async move {
+        let channel = handle
+            .channel_open_custom("teleport-transport", vec![])
+            .await
+            .unwrap();
+        // The session handles the request before the close, because both
+        // go through the same queue. The timeout turns a reply that never
+        // comes into a test failure.
+        let (reply, _) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                channel.request_custom("teleport-transport-dial", true, vec![]),
+            ),
+            channel.close(),
+        );
+        let _ = result_tx.send(reply);
+        handle
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                String::new(),
+                String::new(),
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+    assert_eq!(r.stdout, "request=teleport-transport-dial\n");
+    assert!(matches!(
+        result_rx.await.unwrap(),
+        Ok(Err(russh::Error::Disconnect))
+    ));
+}
+
 /// Runs a scenario that sends one data packet of `size` bytes, bypassing Go's
 /// packet size and window checks, and returns what the Go client printed.
 async fn send_raw_data(scenario: &str, config: server::Config, size: usize) -> String {

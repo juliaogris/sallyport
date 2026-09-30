@@ -947,6 +947,13 @@ impl Session {
 
     /// Close a channel.
     pub fn close(&mut self, channel: ChannelId) -> Result<(), Error> {
+        // sallyport: a request still waiting for a reply on this channel
+        // gets `Error::Disconnect`. A peer that never replies then holds
+        // pending entries only until the channel closes. Entries whose
+        // caller stopped waiting stay until then, because replies are
+        // matched to requests by their order on the channel.
+        self.pending_channel_requests
+            .retain(|(id, _)| *id != channel);
         if let Some(ref mut enc) = self.common.encrypted {
             enc.close(channel)
         } else {

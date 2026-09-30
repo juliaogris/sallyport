@@ -102,6 +102,30 @@ func main() {
 		fmt.Printf("open-extra=%x\n", nc.ExtraData())
 		serveTransport(nc)
 
+	case "transport-close":
+		// Close the channel on the first request instead of replying.
+		ch, reqs, err := waitTransport(client).Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
+		}
+		req := <-reqs
+		fmt.Printf("request=%s\n", req.Type)
+		ch.Close()
+		go ssh.DiscardRequests(reqs)
+		// Wait for the server to end the connection.
+		client.Wait()
+
+	case "transport-silent":
+		// Never reply to a request.
+		_, reqs, err := waitTransport(client).Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
+		}
+		req := <-reqs
+		fmt.Printf("request=%s\n", req.Type)
+		go ssh.DiscardRequests(reqs)
+		client.Wait()
+
 	case "unconfirmed":
 		// Before confirming the server's channel, send requests and data
 		// on it. The server must ignore them.
