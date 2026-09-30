@@ -298,6 +298,7 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
         .iter()
         .map(|(a, _)| format!(r#"<form method="post" action="/web/launch/{a}"><button>{a}</button></form>"#))
         .collect();
+    let user = html_escape(&user);
     Response::from_html(format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">{STYLE}<title>sallyport</title>
 <p>Logged in as {user}.</p>{buttons}<form method="post" action="/web/logout"><button>Log out</button></form>"#
@@ -563,6 +564,23 @@ fn redirect(location: &str) -> Result<Response> {
     Ok(res)
 }
 
+/// Returns `s` with `&`, `<`, `>`, `"` and `'` written as HTML character
+/// references.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn b64(b: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(b)
 }
@@ -715,6 +733,12 @@ mod tests {
         assert_eq!(cert_public_addr(&app_cert(&[(addr, bmp("bench-julia.example.com"))])), None);
         assert_eq!(cert_public_addr(b"not a pem"), None);
         assert_eq!(cert_public_addr(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), None);
+    }
+
+    #[test]
+    fn html_escape_cases() {
+        assert_eq!(html_escape("alice"), "alice");
+        assert_eq!(html_escape(r#"<a href="x">'&'</a>"#), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
     }
 
     #[test]
