@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juliaogris/sallyport/conformance/testapp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +22,7 @@ func TestSlowReader(t *testing.T) {
 	host := appHost("bench")
 
 	// Read 1 MiB of a 256 MiB download, then stop reading.
-	stalled := s.get(t, host, "/big?n="+itoa(256<<20), cookies...)
+	stalled := s.get(t, host, "/t/bytes?n="+itoa(256<<20), cookies...)
 	defer stalled.Body.Close()
 	require.Equal(t, http.StatusOK, stalled.StatusCode)
 	_, err := io.CopyN(io.Discard, stalled.Body, 1<<20)
@@ -30,16 +31,16 @@ func TestSlowReader(t *testing.T) {
 
 	for i := range 10 {
 		start := time.Now()
-		resp := s.get(t, host, "/static", cookies...)
+		resp := s.get(t, host, "/t/static", cookies...)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Equal(t, staticBody, body)
+		require.Equal(t, testapp.StaticBody, body)
 		require.Less(t, time.Since(start), 3*time.Second, "request %d behind a stalled download", i)
 	}
 
 	// A second download completes while the first is still stalled.
 	start := time.Now()
-	resp := s.get(t, host, "/big?n="+itoa(16<<20), cookies...)
+	resp := s.get(t, host, "/t/bytes?n="+itoa(16<<20), cookies...)
 	n, err := io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	require.NoError(t, err)
@@ -68,7 +69,7 @@ func parallelDownloads(t *testing.T, s *stack) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/big?n="+itoa(size), nil)
+			req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/t/bytes?n="+itoa(size), nil)
 			for _, c := range cookies {
 				req.AddCookie(c)
 			}
@@ -101,7 +102,7 @@ func TestRekey(t *testing.T) {
 	cookies := s.appCookies(t, "bench")
 	const size = 2 << 30
 	start := time.Now()
-	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/big?n="+itoa(size), nil)
+	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/t/bytes?n="+itoa(size), nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -117,7 +118,7 @@ func TestRekey(t *testing.T) {
 	t.Logf("2 GiB in %v, %.1f MiB/s", took, float64(size>>20)/took.Seconds())
 
 	// The tunnel still works after the rekey.
-	resp2 := s.get(t, appHost("bench"), "/static", cookies...)
+	resp2 := s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp2)
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
 }

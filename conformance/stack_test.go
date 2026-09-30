@@ -1,11 +1,8 @@
 package conformance
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,12 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juliaogris/sallyport/conformance/testapp"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 )
 
 // stack is a hub of its own with a fake auth behind its callout and an App
-// agent that serves testApp.
+// agent that serves the test app.
 type stack struct {
 	hub   *Hub
 	auth  *FakeAuth
@@ -27,7 +25,7 @@ type stack struct {
 }
 
 // newStack starts a hub, keeps 4 callout streams open to it, and connects
-// an App agent that serves testApp, dialed with opts.
+// an App agent that serves the test app, dialed with opts.
 func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	t.Helper()
 	h := freshHub(t)
@@ -41,7 +39,7 @@ func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	a, err := h.DialAgent(t.Context(), pki, id, opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { a.Close() })
-	require.NoError(t, a.ServeApp(pki, testApp()))
+	require.NoError(t, a.ServeApp(pki, testapp.Handler("")))
 	_, ok, err := a.Heartbeat()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -152,92 +150,6 @@ func (s *stack) appCookies(t *testing.T, app string) []*http.Cookie {
 	t.Helper()
 	sid, bearer, _ := s.launch(t, s.login(t), app)
 	return s.handoff(t, app, sid, bearer)
-}
-
-// The bodies testApp serves.
-var (
-	staticBody = []byte("hello from the app\n")
-	gzipPlain  = []byte("hello, gzipped\n")
-)
-
-// testApp is the app behind the fake agent.
-func testApp() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/static", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Length", strconv.Itoa(len(staticBody)))
-		w.Write(staticBody)
-	})
-	mux.HandleFunc("/big", func(w http.ResponseWriter, r *http.Request) {
-		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
-		w.Header().Set("Content-Type", "application/octet-stream")
-		chunk := make([]byte, 64<<10)
-		for i := range chunk {
-			chunk[i] = byte(i)
-		}
-		for n > 0 {
-			k := min(n, len(chunk))
-			if _, err := w.Write(chunk[:k]); err != nil {
-				return
-			}
-			n -= k
-		}
-	})
-	mux.HandleFunc("/gzip", func(w http.ResponseWriter, r *http.Request) {
-		var b bytes.Buffer
-		zw := gzip.NewWriter(&b)
-		zw.Write(gzipPlain)
-		zw.Close()
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Content-Length", strconv.Itoa(b.Len()))
-		w.Write(b.Bytes())
-	})
-	for _, code := range []int{204, 205, 304} {
-		mux.HandleFunc(fmt.Sprintf("/status/%d", code), func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("ETag", `"v1"`)
-			w.WriteHeader(code)
-		})
-	}
-	// A 101 with no Upgrade in the request, which no hub can forward.
-	mux.HandleFunc("/status/101", func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := http.NewResponseController(w).Hijack()
-		if err != nil {
-			return
-		}
-		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-		buf.Flush()
-		conn.Close()
-	})
-	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		client := ""
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			client = r.TLS.PeerCertificates[0].Subject.CommonName
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(echo{
-			Method: r.Method, Host: r.Host, URI: r.RequestURI,
-			Header: r.Header, Body: string(body), Client: client,
-		})
-	})
-	mux.HandleFunc("/setcookie", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Set-Cookie", "__Host-sp_app=evil; Path=/; Secure")
-		w.Header().Add("Set-Cookie", "__Host-sp_subject=evil; Path=/; Secure")
-		w.Header().Add("Set-Cookie", "app=1; Path=/")
-		w.WriteHeader(http.StatusOK)
-	})
-	return mux
-}
-
-// echo is what testApp's /echo returns.
-type echo struct {
-	Method string
-	Host   string
-	URI    string
-	Header http.Header
-	Body   string
-	Client string
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

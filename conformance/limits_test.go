@@ -103,13 +103,13 @@ func TestDiscoveryInterval(t *testing.T) {
 func TestCalloutRecovery(t *testing.T) {
 	s := newStack(t)
 	cookies := s.appCookies(t, "bench")
-	resp := s.get(t, appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	s.auth.DropStreams()
 	time.Sleep(2 * time.Second)
-	resp = s.get(t, appHost("bench"), "/static", cookies...)
+	resp = s.get(t, appHost("bench"), "/t/static", cookies...)
 	body := readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "first request after the drop: %s", body)
 }
@@ -137,7 +137,7 @@ func TestLoginRateLimited(t *testing.T) {
 func TestApp101(t *testing.T) {
 	s := newStack(t)
 	cookies := s.appCookies(t, "bench")
-	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/status/101", nil)
+	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/t/status/101", nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -147,7 +147,7 @@ func TestApp101(t *testing.T) {
 	require.NoError(t, err, "no answer to the 101")
 	readBody(t, resp)
 	require.GreaterOrEqual(t, resp.StatusCode, 500)
-	resp = s.get(t, appHost("bench"), "/static", cookies...)
+	resp = s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
