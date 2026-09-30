@@ -50,14 +50,14 @@ const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// the response body both stream as they arrive.
 ///
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
-/// service's connection, this returns a 502 response rather than an error.
-pub async fn forward(tunnel: &crate::ssh::AppTunnel, tls: std::sync::Arc<rustls::ClientConfig>, cluster: &str, host: &str, req: worker::Request) -> worker::Result<worker::Response> {
-    let mut req = req;
+/// service's connection, this logs the error and returns a 502 "app
+/// unavailable" response.
+pub async fn forward(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str, host: &str, mut req: Request) -> Result<Response> {
     match forward_inner(tunnel, tls, cluster, host, &mut req).await {
         Ok(resp) => Ok(resp),
         Err(err) => {
             console_error!("appproxy: {err}");
-            Response::error(err, 502)
+            Response::error("app unavailable", 502)
         }
     }
 }
@@ -231,7 +231,7 @@ async fn end_when_idle(pulled: Weak<Cell<Option<u64>>>, conn: AbortHandle) {
 /// and key, with roots from the `HOST_CA_TLS` secret. The app service picks
 /// the app and the session from the presented client certificate, so there
 /// is no ALPN to negotiate.
-pub fn tls_from_pem(env: &worker::Env, cert_pem: &[u8], key_pem: &[u8]) -> worker::Result<rustls::ClientConfig> {
+pub fn tls_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&secret_bytes(env, "HOST_CA_TLS")?) {
         let cert = cert.map_err(|e| Error::RustError(format!("HOST_CA_TLS: {e}")))?;
