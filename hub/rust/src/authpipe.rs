@@ -364,7 +364,9 @@ mod tests {
         let other = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
         let mut tampered = reply.clone();
         tampered[NONCE] ^= 1;
-        let cases: &[(&str, &[u8], &str, [u8; NONCE], Vec<u8>)] = &[
+        // Each case is a name, the key, the host, the hub nonce and the reply.
+        type Case<'a> = (&'a str, &'a [u8], &'a str, [u8; NONCE], Vec<u8>);
+        let cases: &[Case] = &[
             ("wrong host", key, "evil.example", nonce, reply.clone()),
             ("signed for another host", key, HOST, nonce, sign(&pair, "evil.example", &nonce, &[2; NONCE])),
             ("swapped nonces", key, HOST, nonce, sign(&pair, HOST, &[2; NONCE], &nonce)),
