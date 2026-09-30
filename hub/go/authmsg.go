@@ -19,6 +19,8 @@ const (
 	deviceTypeWebAuthn = 3
 	// deviceUsagePasswordless is proto.DeviceUsage for a passkey.
 	deviceUsagePasswordless = 2
+	// mfaDeviceWebAuthn is the webauthn field of a types.MFADevice.
+	mfaDeviceWebAuthn = 10
 )
 
 // CreateAuthenticateChallengeRequest with passwordless set and the
@@ -80,10 +82,14 @@ type passkey struct {
 	AddedAt string `json:"addedAt"`
 }
 
-// passkeysOf reads the devices of a GetMFADevicesResponse.
+// passkeysOf reads the WebAuthn devices of a GetMFADevicesResponse. A
+// device of another kind, such as TOTP, is left out.
 func passkeysOf(resp fields) []passkey {
 	list := []passkey{}
 	for _, d := range resp.msgs(1) {
+		if !d.has(mfaDeviceWebAuthn) {
+			continue
+		}
 		added := time.Unix(d.msg(6).int(1), 0).UTC().Format(time.RFC3339)
 		list = append(list, passkey{Name: d.msg(4).str(1), AddedAt: added})
 	}

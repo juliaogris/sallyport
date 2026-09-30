@@ -93,8 +93,11 @@ func TestPasskeyRequests(t *testing.T) {
 }
 
 func TestPasskeysOf(t *testing.T) {
-	device := pb(nil).msg(4, pb(nil).str(1, "laptop")).msg(6, pb(nil).int(1, 1788609600))
-	f, err := decode(pb(nil).msg(1, device).msg(1, pb(nil).msg(4, pb(nil).str(1, "phone"))))
+	webauthn := pb(nil).bytes(1, []byte("cred"))
+	laptop := pb(nil).msg(4, pb(nil).str(1, "laptop")).msg(6, pb(nil).int(1, 1788609600)).msg(10, webauthn)
+	phone := pb(nil).msg(4, pb(nil).str(1, "phone")).msg(10, webauthn)
+	totp := pb(nil).msg(4, pb(nil).str(1, "otp")).msg(8, pb(nil).str(1, "key"))
+	f, err := decode(pb(nil).msg(1, laptop).msg(1, totp).msg(1, phone))
 	if err != nil {
 		t.Fatal(err)
 	}
