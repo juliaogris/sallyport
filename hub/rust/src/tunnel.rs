@@ -300,7 +300,7 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
                     }
                 }
                 Ok(WebsocketEvent::Close(close)) => {
-                    close_code = Some(close.code());
+                    close_code = Some(format!("{} reason {:?} clean {}", close.code(), close.reason(), close.was_clean()));
                     break;
                 }
                 Err(err) => {
@@ -320,7 +320,7 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
     let now = Date::now().as_millis();
     console_log!(
         "tunnel: websocket closed, code {}, after {} s, in {} msgs largest {} bytes, out {} msgs, last in {} ms before, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} ms",
-        close_code.map_or("none".to_string(), |c| c.to_string()),
+        close_code.unwrap_or_else(|| "none".to_string()),
         now.saturating_sub(started) / 1000,
         in_msgs.get(),
         in_largest.get(),
