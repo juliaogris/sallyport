@@ -432,6 +432,24 @@ async fn data_over_window_disconnects() {
     );
 }
 
+/// Runs the dup-confirm scenario with `mode`, keeping the server's channel
+/// open until the client is done.
+async fn dup_confirm(mode: &str) -> String {
+    run_with(ed25519_config(), &["dup-confirm", mode], |handle| async move {
+        if let Ok(mut ch) = handle.channel_open_custom("teleport-transport", vec![]).await {
+            while ch.wait().await.is_some() {}
+        }
+    })
+    .await
+    .stdout
+}
+
+#[tokio::test]
+async fn repeated_open_confirmation_disconnects() {
+    assert_eq!(dup_confirm("once").await, "after-confirm=true\n");
+    assert_eq!(dup_confirm("dup").await, "after-confirm=false\n");
+}
+
 #[tokio::test]
 async fn stalled_key_exchange_disconnects() {
     let r = run_with(ed25519_config(), &["kex-stall"], |_| async {}).await;

@@ -146,6 +146,33 @@ func main() {
 		writeRaw(client, channelEOFMsg{PeersID: id})
 		serveTransport(nc)
 
+	case "dup-confirm":
+		// Accept the server's channel, then, with "dup", confirm it a
+		// second time. The server must end the connection.
+		nc := waitTransport(client)
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
+		}
+		go ssh.DiscardRequests(reqs)
+		if os.Args[3] == "dup" {
+			writeRaw(client, channelOpenConfirmMsg{
+				PeersID:       remoteID(nc),
+				MyID:          localID(nc),
+				MyWindow:      1 << 20,
+				MaxPacketSize: 1 << 15,
+			})
+		}
+		// A request on a channel the client opens shows whether the
+		// connection is still open.
+		probe, preqs, err := client.OpenChannel("teleport-heartbeat", nil)
+		if err == nil {
+			go ssh.DiscardRequests(preqs)
+			_, err = probe.SendRequest("probe-true", true, nil)
+		}
+		fmt.Printf("after-confirm=%v\n", err == nil)
+		ch.Close()
+
 	case "oversize-data", "overwindow-data":
 		// Send one data packet of the given size on a channel. Go's own
 		// writes never exceed the server's packet size or window, so
@@ -222,6 +249,13 @@ type channelRequestMsg struct {
 type channelDataMsg struct {
 	PeersID uint32 `sshtype:"94"`
 	Data    []byte
+}
+
+type channelOpenConfirmMsg struct {
+	PeersID       uint32 `sshtype:"91"`
+	MyID          uint32
+	MyWindow      uint32
+	MaxPacketSize uint32
 }
 
 type channelEOFMsg struct {
@@ -301,6 +335,10 @@ func transportWritePacket(t unsafe.Pointer, p []byte) error
 // unexported channel struct. ch is an ssh.NewChannel or an ssh.Channel.
 func remoteID(ch any) uint32 {
 	return uint32(reflect.ValueOf(ch).Elem().FieldByName("remoteId").Uint())
+}
+
+func localID(ch any) uint32 {
+	return uint32(reflect.ValueOf(ch).Elem().FieldByName("localId").Uint())
 }
 
 // hostCert connects with the same host key check as a Teleport agent: a
