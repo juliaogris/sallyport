@@ -144,4 +144,16 @@ mod tests {
         let t = UnixTime::new(u64::MAX).unwrap();
         assert_eq!(u64::from(t), u64::MAX);
     }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn u64_max_system_time_saturates() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let t = UnixTime::new(u64::MAX).unwrap();
+        assert_eq!(
+            SystemTime::from(t),
+            UNIX_EPOCH + Duration::from_secs(MAX_SECS)
+        );
+    }
 }

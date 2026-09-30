@@ -28,7 +28,11 @@ func main() {
 	}
 	addr, scenario := os.Args[1], os.Args[2]
 	if scenario == "hostcert" {
-		hostCert(addr, os.Args[3])
+		hostCert(addr, os.Args[3], nil)
+		return
+	}
+	if scenario == "hostcert-gex" {
+		hostCert(addr, os.Args[3], []string{ssh.KeyExchangeDHGEXSHA256})
 		return
 	}
 	if scenario == "hostkey-plain" {
@@ -301,8 +305,9 @@ func remoteID(ch any) uint32 {
 
 // hostCert connects with the same host key check as a Teleport agent: a
 // CertChecker that trusts only the given CA and has no fallback for plain
-// host keys. HostKeyAlgorithms is left at its default.
-func hostCert(addr, caAuthorizedKey string) {
+// host keys. HostKeyAlgorithms is left at its default. If kexes is not nil,
+// the client offers only those key exchange algorithms.
+func hostCert(addr, caAuthorizedKey string, kexes []string) {
 	caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(caAuthorizedKey))
 	if err != nil {
 		log.Fatalf("parse CA key: %v", err)
@@ -314,7 +319,8 @@ func hostCert(addr, caAuthorizedKey string) {
 	}
 	var seen *ssh.Certificate
 	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User: "agent",
+		Config: ssh.Config{KeyExchanges: kexes},
+		User:   "agent",
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			if cert, ok := key.(*ssh.Certificate); ok {
 				seen = cert
@@ -370,7 +376,11 @@ func rekeyEcho(client *ssh.Client, channels, size int) {
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			log.Fatalf("echo: %v (connection: %v)", err, client.Wait())
+			// Log the channel error first. Wait returns only once the
+			// connection ends, so Close ends it.
+			log.Printf("echo: %v", err)
+			client.Close()
+			log.Fatalf("connection: %v", client.Wait())
 		}
 	}
 	fmt.Printf("echo=ok channels=%d size=%d\n", channels, size)

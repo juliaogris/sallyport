@@ -463,6 +463,36 @@ async fn host_certificate_passes_cert_checker() {
 }
 
 #[tokio::test]
+async fn host_certificate_passes_cert_checker_with_dh_gex() {
+    let (ca, config) = host_cert_config();
+    let ca_pub = ca.public_key().to_openssh().unwrap();
+    let r = run_with(config, &["hostcert-gex", &ca_pub], |_| async {}).await;
+    assert_eq!(
+        r.stdout,
+        "handshake=ok\ncert-principals=127.0.0.1,hub.sallyport\n"
+    );
+}
+
+#[tokio::test]
+async fn host_certificate_for_another_key_is_ignored() {
+    let (ca, mut config) = host_cert_config();
+    config.keys = vec![PrivateKey::random(
+        &mut OsRng,
+        ssh_key::Algorithm::Ecdsa {
+            curve: ssh_key::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap()];
+    let ca_pub = ca.public_key().to_openssh().unwrap();
+    let r = run_with(config, &["hostcert", &ca_pub], |_| async {}).await;
+    assert!(
+        r.stdout.starts_with("handshake=failed: ") && r.stdout.contains("host key"),
+        "stdout: {}",
+        r.stdout
+    );
+}
+
+#[tokio::test]
 async fn plain_host_key_fails_cert_checker() {
     let (ca, mut config) = host_cert_config();
     config.host_certificates.clear();
