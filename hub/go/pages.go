@@ -202,13 +202,16 @@ document.getElementById('add').onclick = () => run(async () => {
     response: { clientDataJSON: enc(cred.response.clientDataJSON), attestationObject: enc(cred.response.attestationObject) },
   } });
 });
+let hideOther;
 document.getElementById('link').onclick = () => run(async () => {
   const r = await post('/webapi/passkeys/link', await answer());
-  const a = document.getElementById('url');
+  const a = document.getElementById('url'), other = document.getElementById('other'), expires = new Date(r.expires);
   a.href = a.textContent = r.url;
   drawQR(document.getElementById('qr'), r.url);
-  document.getElementById('until').textContent = 'Valid until ' + new Date(r.expires).toLocaleTimeString() + '.';
-  document.getElementById('other').hidden = false;
+  document.getElementById('until').textContent = 'Valid until ' + expires.toLocaleTimeString() + '.';
+  other.hidden = false;
+  clearTimeout(hideOther);
+  hideOther = setTimeout(() => { other.hidden = true; }, expires - Date.now());
 });
 nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 load().catch(e => { out.textContent = 'error: ' + e; });
