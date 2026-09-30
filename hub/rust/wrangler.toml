@@ -63,6 +63,9 @@ class_name = "Hub"
 # with its own Durable Object namespace and secrets. Both run the Rust hub
 # until the Go hub exists.
 [env.rust]
+# The Rust hub with JavaScript WebSocket glue, to test whether the Rust
+# glue drops tunnels. See wsglue.mjs.
+main = "entry-glued.mjs"
 routes = [
   { pattern = "rust.example.com", custom_domain = true },
   { pattern = "bench-rust.example.com", custom_domain = true },
