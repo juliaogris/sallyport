@@ -4,7 +4,6 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -327,35 +326,15 @@ func (h *hub) inviteBegin(token string) (map[string]any, error) {
 
 func (h *hub) inviteFinish(token string, body []byte) *response {
 	user, sid, err := func() (string, string, error) {
-		var cred struct {
-			Type     *string `json:"type"`
-			RawID    string  `json:"rawId"`
-			Response struct {
-				ClientDataJSON    string `json:"clientDataJSON"`
-				AttestationObject string `json:"attestationObject"`
-			} `json:"response"`
-		}
-		if err := json.Unmarshal(body, &cred); err != nil {
+		var c credential
+		if err := json.Unmarshal(body, &c); err != nil {
 			return "", "", fmt.Errorf("credential: %w", err)
 		}
-		dec := base64.RawURLEncoding.DecodeString
-		rawID, err := dec(cred.RawID)
+		cred, err := c.proto()
 		if err != nil {
-			return "", "", err
+			return "", "", fmt.Errorf("credential: %w", err)
 		}
-		cd, err := dec(cred.Response.ClientDataJSON)
-		if err != nil {
-			return "", "", err
-		}
-		att, err := dec(cred.Response.AttestationObject)
-		if err != nil {
-			return "", "", err
-		}
-		typ := "public-key"
-		if cred.Type != nil {
-			typ = *cred.Type
-		}
-		resp, err := h.auth.call(changeUserAuthentication, changeUserAuthenticationRequest(token, typ, rawID, cd, att))
+		resp, err := h.auth.call(changeUserAuthentication, changeUserAuthenticationRequest(token, cred))
 		if err != nil {
 			return "", "", err
 		}

@@ -45,7 +45,7 @@ func TestParseApps(t *testing.T) {
 }
 
 func TestProtoRoundTrip(t *testing.T) {
-	msg := changeUserAuthenticationRequest("tok", "public-key", []byte{1, 2}, []byte("cd"), []byte("att"))
+	msg := changeUserAuthenticationRequest("tok", credentialCreation("public-key", []byte{1, 2}, []byte("cd"), []byte("att")))
 	f, err := decode(msg)
 	if err != nil {
 		t.Fatal(err)

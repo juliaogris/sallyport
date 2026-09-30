@@ -112,10 +112,9 @@ func createRegisterChallengeRequest(token string) []byte {
 	return pb(nil).str(1, token).int(2, deviceTypeWebAuthn).int(3, deviceUsagePasswordless)
 }
 
-// changeUserAuthenticationRequest registers a passkey with the attestation
-// from the browser.
-func changeUserAuthenticationRequest(token, credType string, rawID, clientData, attestation []byte) []byte {
-	cred := credentialCreation(credType, rawID, clientData, attestation)
+// changeUserAuthenticationRequest registers cred, a
+// CredentialCreationResponse, as the passkey of an invite's user.
+func changeUserAuthenticationRequest(token string, cred pb) []byte {
 	return pb(nil).str(1, token).msg(3, pb(nil).msg(3, cred)).str(4, "passkey")
 }
 
