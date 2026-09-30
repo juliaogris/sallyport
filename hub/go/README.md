@@ -17,8 +17,10 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   `net.Conn` over a Workers WebSocket and a response body stream.
 - `tunnel.go` is the reverse tunnel: TLS with `crypto/tls` and the SSH
   server with `golang.org/x/crypto/ssh`.
-- `authpipe.go` is the `/tunnel/auth` stream pool with the Ed25519
-  challenge. `authrpc.go` is gRPC and the legacy HTTP API to auth, with
+- `authpipe.go` is the `/tunnel/auth` WebSocket with the Ed25519
+  challenge, and `authpool.go` is the pool of verified streams, which
+  also builds natively for its tests. `authrpc.go` is gRPC and the
+  legacy HTTP API to auth, with
   `authmsg.go` and `proto.go` for the few protobuf fields the hub uses.
 - `web.go` and `pages.go` are the login host and the app host pages.
   `appproxy.go` forwards app requests through the tunnel.

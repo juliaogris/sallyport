@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
-	"sync"
 	"time"
 )
 
@@ -24,45 +23,7 @@ const (
 	authPipeDomain    = "sallyport/authpipe/v1"
 	nonceBytes        = 32
 	challengeDeadline = 10 * time.Second
-	// maxAuthStreams is the number of WebSockets the hub keeps, verified
-	// or not. Auth opens 8 by default.
-	maxAuthStreams = 8
 )
-
-// authPool holds the verified streams waiting for the hub, oldest first.
-type authPool struct {
-	mu    sync.Mutex
-	ready []*wsConn
-	open  int
-}
-
-// take returns the oldest open stream, or nil if there is none.
-func (p *authPool) take() *wsConn {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for len(p.ready) > 0 {
-		c := p.ready[0]
-		p.ready[0] = nil
-		p.ready = p.ready[1:]
-		if !c.isClosed() {
-			return c
-		}
-	}
-	return nil
-}
-
-// counts returns the number of open WebSockets from auth, waiting or in
-// use, and the number of verified streams waiting.
-func (p *authPool) counts() (open, ready int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, c := range p.ready {
-		if !c.isClosed() {
-			ready++
-		}
-	}
-	return p.open, ready
-}
 
 // acceptAuthPipe accepts one WebSocket from auth and runs the challenge on
 // it.
@@ -71,22 +32,15 @@ func (h *hub) acceptAuthPipe() *response {
 		logf("tunnel/auth: %v", err)
 		return textError(err.Error(), 500)
 	}
-	p := h.pool
-	p.mu.Lock()
-	if p.open >= maxAuthStreams {
-		p.mu.Unlock()
+	if !h.pool.accept() {
 		logf("tunnel/auth: stream limit reached")
 		return textError("too many streams", 503)
 	}
-	p.open++
-	p.mu.Unlock()
 	c := acceptWS()
 	logf("tunnel/auth: connection accepted")
 	go func() {
 		h.challenge(c)
-		p.mu.Lock()
-		p.open--
-		p.mu.Unlock()
+		h.pool.release()
 	}()
 	return &response{status: 101, ws: c}
 }
@@ -126,9 +80,9 @@ func (h *hub) challenge(c *wsConn) {
 		return
 	}
 	logf("tunnel/auth: stream ready")
-	h.pool.mu.Lock()
-	h.pool.ready = append(h.pool.ready, c)
-	h.pool.mu.Unlock()
+	if h.pool.push(c) {
+		logf("tunnel/auth: %d streams open, closed the oldest waiting one", maxAuthStreams)
+	}
 	c.waitClosed()
 	logf("tunnel/auth: stream closed")
 }
