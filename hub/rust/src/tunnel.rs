@@ -27,7 +27,7 @@ use crate::ssh::{AgentHandler, Shared};
 use worker::*;
 
 /// The WebSocket subprotocol a stock agent asks for on reverse tunnel
-/// connections (api/client/alpn.go).
+/// connections (api/client/alpn_conn_upgrade.go).
 const SUBPROTOCOL: &str = "alpn-ping";
 /// The ALPN value the agent offers inside the upgraded connection.
 const ALPN_REVERSE_TUNNEL: &[u8] = b"teleport-reversetunnel";
@@ -96,7 +96,10 @@ impl DurableObject for Hub {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let host = req.url()?.host_str().unwrap_or_default().to_string();
-        let special = matches!(req.path().as_str(), "/webapi/find" | "/webapi/ping" | "/webapi/connectionupgrade" | authpipe::PATH);
+        // The login host is also the agents' `PUBLIC_ADDR` and auth's
+        // `CALLOUT_HOST`, so the agent and auth reach these paths on it.
+        // They are not browser requests.
+        let peer_path = matches!(req.path().as_str(), "/webapi/connectionupgrade" | authpipe::PATH);
         if let Some(kind) = crate::web::classify(&self.env, &host) {
             let cx = crate::web::Ctx {
                 env: &self.env,
@@ -106,7 +109,7 @@ impl DurableObject for Hub {
             };
             match kind {
                 crate::web::Host::App(app) => return crate::web::app_host_request(req, &cx, &app).await,
-                crate::web::Host::Login if !special => return crate::web::login_host_request(req, &cx).await,
+                crate::web::Host::Login if !peer_path => return crate::web::login_host_request(req, &cx).await,
                 crate::web::Host::Login => {}
             }
         }
@@ -341,8 +344,8 @@ async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>, ssh: Arc<russ
 /// host-CA-signed certificate, which is the only form the agent accepts.
 /// Also returns the proxy name, the host UUID in the cert's first principal.
 fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
-    let key = String::from_utf8(secret_bytes(env, "HUB_SSH_KEY")?).map_err(|e| Error::RustError(e.to_string()))?;
-    let cert = String::from_utf8(secret_bytes(env, "HUB_SSH_CERT")?).map_err(|e| Error::RustError(e.to_string()))?;
+    let key = secret_string(env, "HUB_SSH_KEY")?;
+    let cert = secret_string(env, "HUB_SSH_CERT")?;
     let key = PrivateKey::from_openssh(rewrap_openssh(&key)).map_err(|e| Error::RustError(format!("HUB_SSH_KEY: {e}")))?;
     let cert = Certificate::from_openssh(cert.trim()).map_err(|e| Error::RustError(format!("HUB_SSH_CERT: {e}")))?;
     let cluster = env.var("CLUSTER_NAME")?.to_string();
@@ -359,7 +362,8 @@ fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
         inactivity_timeout: None,
         keepalive_interval: None,
         // A delay on each rejected attempt, so failing auth is not a free
-        // CPU loop. The handler also drops the connection after 3 attempts.
+        // CPU loop. The handler also drops the connection after
+        // `MAX_AUTH_FAILURES` attempts.
         auth_rejection_time: Duration::from_secs(1),
         // The patched russh closes a channel whose reader falls this many
         // messages behind, up to 32 KiB each, so one slow browser cannot
@@ -387,7 +391,7 @@ fn rewrap_openssh(pem: &str) -> String {
 }
 
 fn host_ca(env: &Env) -> Result<PublicKey> {
-    let line = String::from_utf8(secret_bytes(env, "HOST_CA_SSH")?).map_err(|e| Error::RustError(e.to_string()))?;
+    let line = secret_string(env, "HOST_CA_SSH")?;
     PublicKey::from_openssh(line.trim()).map_err(|e| Error::RustError(format!("HOST_CA_SSH: {e}")))
 }
 
@@ -413,6 +417,11 @@ fn server_tls_config(env: &Env) -> Result<rustls::ServerConfig> {
     .map_err(|e| Error::RustError(format!("tls identity: {e}")))?;
     config.alpn_protocols = vec![ALPN_REVERSE_TUNNEL.to_vec()];
     Ok(config)
+}
+
+/// Reads a base64-encoded secret that is UTF-8 text.
+fn secret_string(env: &Env, name: &str) -> Result<String> {
+    String::from_utf8(secret_bytes(env, name)?).map_err(|e| Error::RustError(format!("{name}: {e}")))
 }
 
 /// Connections that have not proved who they are, oldest first. Each one
@@ -515,5 +524,23 @@ mod tests {
         let (_b, _b_rx, _) = pending.admit(1);
         drop(a);
         assert_eq!(pending.waiting(), 1);
+    }
+
+    #[test]
+    fn rewrap_openssh_wraps_at_70_columns() {
+        let body: String = (0..150).map(|i| char::from(b'A' + (i % 26) as u8)).collect();
+        let wrap = |width: usize, eol: &str| {
+            let mut pem = format!("-----BEGIN OPENSSH PRIVATE KEY-----{eol}");
+            for chunk in body.as_bytes().chunks(width) {
+                pem.push_str(std::str::from_utf8(chunk).unwrap());
+                pem.push_str(eol);
+            }
+            pem.push_str(&format!("-----END OPENSSH PRIVATE KEY-----{eol}"));
+            pem
+        };
+        let want = wrap(70, "\n");
+        assert_eq!(rewrap_openssh(&wrap(64, "\n")), want);
+        assert_eq!(rewrap_openssh(&want), want);
+        assert_eq!(rewrap_openssh(&wrap(64, "\r\n")), want);
     }
 }

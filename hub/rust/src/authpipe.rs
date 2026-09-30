@@ -2,7 +2,7 @@
 //!
 //! The hub sends a 32-byte nonce. Auth replies with its own nonce and an
 //! Ed25519 signature over `"sallyport/authpipe/v1" || host || hub nonce ||
-//! auth nonce`, where host is the host of the URL auth dialled. The hub
+//! auth nonce`, where host is the host of the URL auth dialed. The hub
 //! checks the signature against the pinned key in `AUTH_CALLOUT_PUBKEY` and
 //! the host against `CALLOUT_HOST`. A verified WebSocket waits in the pool
 //! until the hub takes it. Auth hands the stream to its listener on the
@@ -80,7 +80,8 @@ impl Pool {
     }
 
     /// Takes the oldest open stream. If there is none, it waits for auth to
-    /// open one until `deadline` resolves, and then returns None.
+    /// open one until `deadline` resolves, then returns whatever is waiting,
+    /// or None.
     pub async fn take_until(&self, deadline: impl Future<Output = ()>) -> Option<DuplexStream> {
         let mut deadline = pin!(deadline);
         loop {
