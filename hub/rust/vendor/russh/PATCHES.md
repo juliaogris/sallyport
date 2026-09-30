@@ -28,7 +28,9 @@ so that `[patch.crates-io]` can point at this directory.
   and `std::time::SystemTime::now`. On `wasm32` they use `web_time` and a JS
   `setTimeout` timer that runs in a `spawn_local` task and signals over a
   `futures` oneshot, so the sleep future stays `Send`. `Sleep::reset` keeps
-  one JS timer per sleep.
+  one JS timer per sleep. The timer delay is at most `i32::MAX` ms, because
+  gloo-timers passes it to JS as an `i32` and a negative delay fires at
+  once. A longer sleep re-arms when the timer fires.
 - `src/lib_inner.rs`: Declared `mod rt`. `Error::Elapsed` now wraps
   `crate::rt::Elapsed`, which is tokio's type on native targets.
 - `src/server/session.rs`: The keepalive and inactivity timers use

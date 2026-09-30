@@ -9,6 +9,40 @@ pub(crate) use native::*;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use wasm::*;
 
+/// Returns the `setTimeout` delay for `duration` in milliseconds, rounded up
+/// so the timer never fires before the deadline and poll does not spin on
+/// zero-length timers. gloo-timers passes the value to JS as an `i32`, and a
+/// negative delay fires at once, so the delay is at most `i32::MAX`. A
+/// longer sleep re-arms when the timer fires.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn timer_millis(duration: std::time::Duration) -> u32 {
+    let millis = duration.as_nanos().div_ceil(1_000_000);
+    u32::try_from(millis.min(i32::MAX as u128)).unwrap_or(i32::MAX as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::timer_millis;
+
+    #[test]
+    fn timer_millis_rounds_up_and_fits_i32() {
+        assert_eq!(timer_millis(Duration::ZERO), 0);
+        assert_eq!(timer_millis(Duration::from_nanos(1)), 1);
+        assert_eq!(timer_millis(Duration::from_millis(1500)), 1500);
+        assert_eq!(
+            timer_millis(Duration::from_millis(i32::MAX as u64)),
+            i32::MAX as u32
+        );
+        assert_eq!(
+            timer_millis(Duration::from_millis(i32::MAX as u64 + 1)),
+            i32::MAX as u32
+        );
+        assert_eq!(timer_millis(Duration::MAX), i32::MAX as u32);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     pub use tokio::time::error::Elapsed;
@@ -106,10 +140,7 @@ mod wasm {
 
     fn arm(duration: Duration) -> oneshot::Receiver<()> {
         let (mut tx, rx) = oneshot::channel();
-        // Round up so the timer never fires before the deadline and poll does
-        // not spin on zero-length timers.
-        let millis = duration.as_nanos().div_ceil(1_000_000);
-        let millis = u32::try_from(millis).unwrap_or(u32::MAX);
+        let millis = super::timer_millis(duration);
         wasm_bindgen_futures::spawn_local(async move {
             let timer = gloo_timers::future::TimeoutFuture::new(millis);
             let cancelled = tx.cancellation();
