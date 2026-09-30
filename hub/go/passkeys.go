@@ -53,11 +53,20 @@ import (
 // A token that does not have auth's form is refused before auth is asked:
 // 403 "invalid token", which is also auth's answer for a token it does not
 // know or that has expired.
+//
+// A token adds one passkey. Auth keeps a privilege token until it expires,
+// so the hub records the ID of a token whose finish added a passkey, in
+// Durable Object storage, and answers 403 "invalid token" for it on begin
+// and finish from then on. A finish that auth refused does not use the
+// token up.
 
 // clientStatus maps the gRPC codes of auth's client errors to HTTP:
 // InvalidArgument, NotFound, AlreadyExists, PermissionDenied and
 // Unauthenticated.
 var clientStatus = map[string]int{"3": 400, "5": 404, "6": 409, "7": 403, "16": 401}
+
+// privilegeTokenTTL is how long auth keeps a privilege token.
+const privilegeTokenTTL = 5 * time.Minute
 
 // passkeyHandler answers one /webapi/passkeys route as the user of cert,
 // with the request body.
@@ -272,8 +281,8 @@ func (h *hub) passkeyDelete(cert tls.Certificate, body []byte) *response {
 }
 
 // passkeyLink makes a link for another device after a fresh challenge
-// answer. Auth keeps the privilege token in the link until it expires, and
-// a new link replaces it.
+// answer. The privilege token in the link adds one passkey. It expires
+// after privilegeTokenTTL, and a new link replaces it.
 func (h *hub) passkeyLink(cert tls.Certificate, body []byte) *response {
 	var a assertion
 	if err := json.Unmarshal(body, &a); err != nil {
@@ -322,6 +331,9 @@ func (h *hub) addPasskeyBegin(body []byte) *response {
 	if refused := in.parse(body); refused != nil {
 		return refused
 	}
+	if tokenUsed(in.Token) {
+		return passkeyError("invalid token", 403)
+	}
 	v, err := h.registerChallengeFor(in.Token)
 	if err != nil {
 		return authError(err)
@@ -330,7 +342,7 @@ func (h *hub) addPasskeyBegin(body []byte) *response {
 }
 
 // addPasskeyFinish adds the credential in body as a passkey of the user of
-// the token in body.
+// the token in body, and uses the token up.
 func (h *hub) addPasskeyFinish(body []byte) *response {
 	var in addPasskeyRequest
 	if refused := in.parse(body); refused != nil {
@@ -340,11 +352,30 @@ func (h *hub) addPasskeyFinish(body []byte) *response {
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	if tokenUsed(in.Token) {
+		return passkeyError("invalid token", 403)
+	}
 	_, err = h.auth.call(addMFADeviceSync, addMFADeviceWithTokenRequest(in.Token, in.Name, cred))
 	if err != nil {
 		return authError(err)
 	}
+	useToken(in.Token)
 	return jsonResponse(map[string]bool{"ok": true})
+}
+
+// tokenUsed reports whether the privilege token id has added a passkey.
+func tokenUsed(id string) bool {
+	return glue.tokenUsed.Invoke(id).Bool()
+}
+
+// useToken records in Durable Object storage that the privilege token id
+// added a passkey. The record is kept for privilegeTokenTTL, by when auth
+// has expired the token, and dropped after that.
+func useToken(id string) {
+	now := time.Now()
+	glue.tokenUse.Invoke(id, now.UnixMilli(), now.Add(privilegeTokenTTL).UnixMilli())
 }
 
 // authError answers a failed call to auth on a passkey route. A gRPC

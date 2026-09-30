@@ -94,8 +94,10 @@ let current = null;
 
 // program is one Go program: its instance, its open WebSockets and response
 // streams by the ID Go gave them, and the requests it has not answered.
+// owner is the Durable Object instance it runs for, whose storage it uses.
 class program {
-  constructor(env) {
+  constructor(owner, env) {
+    this.owner = owner;
     this.go = new globalThis.Go();
     this.inst = null;
     this.api = null;
@@ -257,6 +259,19 @@ class program {
         }
         return n + ' ' + bytes;
       },
+      // Reports whether the privilege token id has added a passkey.
+      tokenUsed(id) {
+        const rows = p.owner.ctx.storage.sql.exec('SELECT 1 FROM used_tokens WHERE id = ?', id).toArray();
+        return rows.length > 0;
+      },
+      // Records that the privilege token id added a passkey, to keep until
+      // expires, and forgets the tokens that expired before now. Both are
+      // Unix milliseconds.
+      tokenUse(id, now, expires) {
+        const sql = p.owner.ctx.storage.sql;
+        sql.exec('DELETE FROM used_tokens WHERE expires <= ?', now);
+        sql.exec('INSERT OR REPLACE INTO used_tokens (id, expires) VALUES (?, ?)', id, expires);
+      },
     };
   }
 }
@@ -266,8 +281,7 @@ class program {
 async function programFor(owner, env) {
   if (!current || current.owner !== owner || current.exited) {
     const old = current;
-    const next = new program(env);
-    next.owner = owner;
+    const next = new program(owner, env);
     current = next;
     if (old) {
       console.log('hub: stopping the go program of a previous instance');
@@ -283,6 +297,9 @@ export class Hub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     console.log('hub: durable object started');
+    // The privilege tokens that have added a passkey, so that a token is
+    // used once. Storage outlives a deploy, which restarts the Go program.
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS used_tokens (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)');
     this.program = programFor(this, env);
   }
 

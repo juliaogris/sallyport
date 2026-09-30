@@ -14,7 +14,7 @@ import (
 // glue holds the JavaScript functions of worker.mjs that Go calls. They are
 // read once, so a call creates no new js.Value for the function.
 var glue struct {
-	accept, send, close, stream, chunk, linearMem, jsValues js.Value
+	accept, send, close, stream, chunk, linearMem, jsValues, tokenUsed, tokenUse js.Value
 }
 
 var uint8Array = js.Global().Get("Uint8Array")
@@ -30,6 +30,7 @@ func main() {
 		"accept": &glue.accept, "send": &glue.send, "close": &glue.close,
 		"stream": &glue.stream, "chunk": &glue.chunk,
 		"linearMem": &glue.linearMem, "jsValues": &glue.jsValues,
+		"tokenUsed": &glue.tokenUsed, "tokenUse": &glue.tokenUse,
 	} {
 		*v = g.Get(name)
 	}

@@ -295,6 +295,20 @@ func TestPasskeyLink(t *testing.T) {
 		require.Contains(t, string(body), "Add a passkey")
 	})
 
+	// A finish that auth refuses does not use the token up.
+	t.Run("used name", func(t *testing.T) {
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
+		readBody(t, resp)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, AliceDevice, "cred-alice-4"))
+		body := readBody(t, resp)
+		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
+		require.Equal(t, `MFA device with name "`+AliceDevice+`" already exists`, string(body))
+		require.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
+		require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+		require.Len(t, s.auth.Devices(Alice), 1)
+	})
+
 	t.Run("add without a session", func(t *testing.T) {
 		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
 		body := readBody(t, resp)
@@ -331,36 +345,26 @@ func TestPasskeyLink(t *testing.T) {
 		require.True(t, strings.HasPrefix(c.Value, Alice+":"), "cookie %q", c.Value)
 	})
 
-	// Auth keeps a privilege token until it expires, so the same link adds
-	// a second passkey.
+	// Auth keeps a privilege token until it expires. The hub uses it once.
 	t.Run("second use of the token", func(t *testing.T) {
 		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
-		readBody(t, resp)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		body := readBody(t, resp)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
+		require.Equal(t, "invalid token", string(body))
 		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "tablet", "cred-alice-tablet"))
-		body := readBody(t, resp)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
-		require.Len(t, s.auth.Devices(Alice), 3)
-	})
-
-	t.Run("used name", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
-		readBody(t, resp)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "phone", "cred-alice-4"))
-		body := readBody(t, resp)
-		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
-		require.Equal(t, `MFA device with name "phone" already exists`, string(body))
-		require.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
-		require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+		body = readBody(t, resp)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
+		require.Equal(t, "invalid token", string(body))
+		require.Len(t, s.auth.Devices(Alice), 2)
 	})
 
 	t.Run("new link replaces the token", func(t *testing.T) {
-		old := token
 		url, _ := s.passkeyLink(t, session)
+		unused := tokenOf(url)
+		url, _ = s.passkeyLink(t, session)
 		token = tokenOf(url)
-		require.NotEqual(t, old, token)
-		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(old))
+		require.NotEqual(t, unused, token)
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(unused))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
 		require.Equal(t, "invalid token", string(body))
@@ -376,7 +380,7 @@ func TestPasskeyLink(t *testing.T) {
 		body = readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
 		require.Equal(t, "invalid token", string(body))
-		require.Len(t, s.auth.Devices(Alice), 3)
+		require.Len(t, s.auth.Devices(Alice), 2)
 	})
 
 	t.Run("malformed token", func(t *testing.T) {
