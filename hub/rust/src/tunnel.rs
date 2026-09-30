@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +37,16 @@ const AUTH_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 16;
 /// Messages queued per SSH channel before the channel is closed.
 const CHANNEL_BUFFER: usize = 256;
+/// WebSocket messages and bytes through all pumps since the last heartbeat,
+/// so that the heartbeat shows the message rate a tunnel carries.
+static WS_IN_MSGS: AtomicU64 = AtomicU64::new(0);
+static WS_IN_BYTES: AtomicU64 = AtomicU64::new(0);
+static WS_OUT_MSGS: AtomicU64 = AtomicU64::new(0);
+static WS_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
+/// The longest and the total time, in ms, that inbound writes into the pipe
+/// waited for room since the last heartbeat.
+static PIPE_WAIT_MAX_MS: AtomicU64 = AtomicU64::new(0);
+static PIPE_WAIT_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
 /// How often the hub logs its counters.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
@@ -171,8 +181,14 @@ impl DurableObject for Hub {
 /// Logs the hub's counters every [`HEARTBEAT_EVERY`], so that `wrangler
 /// tail` shows whether the object is alive and what it holds.
 async fn heartbeat(connections: Rc<Cell<usize>>, passthroughs: Arc<AtomicUsize>, app_tunnel: TunnelSlot, auth_pipe: authpipe::Pool) {
+    let mut prev = Date::now().as_millis();
     loop {
         worker::Delay::from(HEARTBEAT_EVERY).await;
+        // A heartbeat that fires late shows that the event loop was busy.
+        let now = Date::now().as_millis();
+        let late = now.saturating_sub(prev).saturating_sub(HEARTBEAT_EVERY.as_millis() as u64);
+        prev = now;
+        let (queue_max, queue_wait_max) = crate::wsevents::take_stats();
         let last = crate::ssh::LAST_DISCOVERY_MS.load(Ordering::Relaxed);
         let discovery = if last == 0 {
             "never".to_string()
@@ -180,13 +196,19 @@ async fn heartbeat(connections: Rc<Cell<usize>>, passthroughs: Arc<AtomicUsize>,
             format!("{}s ago", Date::now().as_millis().saturating_sub(last) / 1000)
         };
         console_log!(
-            "hub: heartbeat, {} tunnels, app tunnel {}, auth streams {} open {} ready, {} passthroughs, discovery {discovery}, memory {} MiB",
+            "hub: heartbeat, {} tunnels, app tunnel {}, auth streams {} open {} ready, {} passthroughs, discovery {discovery}, memory {} MiB, websocket in {} msgs {} bytes, out {} msgs {} bytes, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} total {} ms, late {late} ms",
             connections.get(),
             if app_tunnel.lock().unwrap().is_some() { "up" } else { "down" },
             auth_pipe.open(),
             auth_pipe.ready(),
             passthroughs.load(Ordering::Relaxed),
             wasm_memory_mib(),
+            WS_IN_MSGS.swap(0, Ordering::Relaxed),
+            WS_IN_BYTES.swap(0, Ordering::Relaxed),
+            WS_OUT_MSGS.swap(0, Ordering::Relaxed),
+            WS_OUT_BYTES.swap(0, Ordering::Relaxed),
+            PIPE_WAIT_MAX_MS.swap(0, Ordering::Relaxed),
+            PIPE_WAIT_TOTAL_MS.swap(0, Ordering::Relaxed),
         );
     }
 }
@@ -223,8 +245,14 @@ pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexS
 
 async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream) {
     let (mut rd, mut wr) = tokio::io::split(pipe);
+    let started = Date::now().as_millis();
+    let out_msgs = Cell::new(0u64);
+    let in_msgs = Cell::new(0u64);
+    let in_largest = Cell::new(0usize);
+    let last_in = Cell::new(started);
+    let pipe_wait_max = Cell::new(0u64);
 
-    let outbound = async move {
+    let outbound = async {
         let mut buf = vec![0u8; PIPE_BYTES];
         loop {
             match rd.read(&mut buf).await {
@@ -238,26 +266,41 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
                         console_error!("tunnel: websocket send: {err}");
                         break;
                     }
+                    out_msgs.set(out_msgs.get() + 1);
+                    WS_OUT_MSGS.fetch_add(1, Ordering::Relaxed);
+                    WS_OUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
                 }
             }
         }
         let _ = ws.close(Some(1000), Some("pipe closed"));
     };
 
-    let inbound = async move {
+    let inbound = async {
+        let mut close_code = None;
         while let Some(event) = events.next().await {
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {
                     let Some(bytes) = msg.bytes() else {
                         continue;
                     };
-                    if let Err(err) = wr.write_all(&bytes).await {
+                    in_msgs.set(in_msgs.get() + 1);
+                    in_largest.set(in_largest.get().max(bytes.len()));
+                    WS_IN_MSGS.fetch_add(1, Ordering::Relaxed);
+                    WS_IN_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    let before = Date::now().as_millis();
+                    last_in.set(before);
+                    let written = wr.write_all(&bytes).await;
+                    let wait = Date::now().as_millis().saturating_sub(before);
+                    pipe_wait_max.set(pipe_wait_max.get().max(wait));
+                    PIPE_WAIT_MAX_MS.fetch_max(wait, Ordering::Relaxed);
+                    PIPE_WAIT_TOTAL_MS.fetch_add(wait, Ordering::Relaxed);
+                    if let Err(err) = written {
                         console_error!("tunnel: pipe write: {err}");
                         break;
                     }
                 }
                 Ok(WebsocketEvent::Close(close)) => {
-                    console_log!("tunnel: websocket closed, code {}", close.code());
+                    close_code = Some(close.code());
                     break;
                 }
                 Err(err) => {
@@ -266,10 +309,25 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
                 }
             }
         }
+        let (queue_max, queue_wait_max) = events.stats();
         let _ = wr.shutdown().await;
+        (close_code, queue_max, queue_wait_max)
     };
 
-    futures::join!(outbound, inbound);
+    let ((), (close_code, queue_max, queue_wait_max)) = futures::join!(outbound, inbound);
+    // Tunnel drops close with 1006. The counts show whether a drop follows a
+    // burst of messages, and the waits whether the hub fell behind.
+    let now = Date::now().as_millis();
+    console_log!(
+        "tunnel: websocket closed, code {}, after {} s, in {} msgs largest {} bytes, out {} msgs, last in {} ms before, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} ms",
+        close_code.map_or("none".to_string(), |c| c.to_string()),
+        now.saturating_sub(started) / 1000,
+        in_msgs.get(),
+        in_largest.get(),
+        out_msgs.get(),
+        now.saturating_sub(last_in.get()),
+        pipe_wait_max.get(),
+    );
 }
 
 /// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
