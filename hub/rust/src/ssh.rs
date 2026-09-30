@@ -475,10 +475,16 @@ async fn probe_dial(handle: Handle, server_id: String) {
             "server_id": server_id,
             "conn_type": "app",
         });
-        let res = ch
+        // Closes the channel when the dial ends, and also when the deadline
+        // drops this future before the agent answers.
+        let guard = crate::app::CloseOnDrop(Some(ch));
+        let res = guard
+            .0
+            .as_ref()
+            .expect("the guard holds the channel")
             .request_custom(REQ_DIAL, true, req.to_string().into_bytes())
             .await;
-        let _ = ch.close().await;
+        drop(guard);
         res.map_err(|e| format!("request failed: {e}"))
     };
     match select(pin!(dial), pin!(crate::sockets::sleep(DIAL_DEADLINE))).await {

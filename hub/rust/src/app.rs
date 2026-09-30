@@ -102,7 +102,7 @@ async fn dial_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster:
 type TlsStream = tokio_rustls::client::TlsStream<russh::ChannelStream<Msg>>;
 
 /// Closes the channel it holds when it is dropped.
-struct CloseOnDrop(Option<Channel<Msg>>);
+pub(crate) struct CloseOnDrop(pub(crate) Option<Channel<Msg>>);
 
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
