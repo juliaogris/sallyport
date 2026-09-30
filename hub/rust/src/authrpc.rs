@@ -434,14 +434,18 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
         let message = status_from.get("grpc-message").and_then(|v| v.to_str().ok()).unwrap_or("");
         return Err(format!("{path}: http {}, grpc-status {status:?}: {}", parts.status, percent_decode(message)));
     }
-    if data.len() < 5 || data[0] != 0 {
-        return Err(format!("{path}: bad gRPC frame"));
-    }
-    let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
-    if data.len() < 5 + len {
-        return Err(format!("{path}: short gRPC frame"));
-    }
-    Resp::decode(&data[5..5 + len]).map_err(|e| format!("{path}: {e}"))
+    let msg = unframe(&data).map_err(|e| format!("{path}: {e}"))?;
+    Resp::decode(msg).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Returns the message in the first gRPC frame of `data`: a zero
+/// compression flag, a 4-byte big-endian length, and the message.
+fn unframe(data: &[u8]) -> std::result::Result<&[u8], String> {
+    let Some((&[0, a, b, c, d], rest)) = data.split_first_chunk::<5>() else {
+        return Err("bad gRPC frame".into());
+    };
+    let len = u32::from_be_bytes([a, b, c, d]) as usize;
+    rest.get(..len).ok_or_else(|| "short gRPC frame".into())
 }
 
 /// Sends one JSON `POST` to auth's legacy HTTP API on its own stream,
@@ -500,11 +504,12 @@ fn dechunk(mut b: &[u8]) -> std::result::Result<Vec<u8>, String> {
         if size == 0 {
             return Ok(out);
         }
-        if b.len() < size + 2 {
+        // `size` comes from the peer, so `size + 2` can wrap on wasm32.
+        let (Some(chunk), Some(rest)) = (b.get(..size), size.checked_add(2).and_then(|end| b.get(end..))) else {
             return Err("short chunk".into());
-        }
-        out.extend_from_slice(&b[..size]);
-        b = &b[size + 2..];
+        };
+        out.extend_from_slice(chunk);
+        b = rest;
     }
 }
 
@@ -585,6 +590,67 @@ impl HubAuth {
                 unary(&send, path, req).await
             }
             res => res,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dechunk_joins_chunks() {
+        assert_eq!(dechunk(b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap(), b"abcde");
+    }
+
+    #[test]
+    fn dechunk_ignores_chunk_extensions() {
+        assert_eq!(dechunk(b"5;ext=1\r\nhello\r\n0\r\n\r\n").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn dechunk_rejects_bad_input() {
+        let cases: &[(&str, &[u8])] = &[
+            ("no CRLF after the size", b"3abc"),
+            ("size is not hex", b"zz\r\nabc\r\n0\r\n\r\n"),
+            ("size past the body", b"10\r\nabc\r\n0\r\n\r\n"),
+            ("no CRLF after the data", b"3\r\nabc"),
+            ("32-bit maximum size", b"ffffffff\r\nabc\r\n0\r\n\r\n"),
+            ("64-bit maximum size", b"ffffffffffffffff\r\nabc\r\n0\r\n\r\n"),
+        ];
+        for (name, input) in cases {
+            assert!(dechunk(input).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn percent_decode_decodes_escapes() {
+        assert_eq!(percent_decode("a%41b"), "aAb");
+        assert_eq!(percent_decode("100%25"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("trailing %4"), "trailing %4");
+        assert_eq!(percent_decode("%"), "%");
+    }
+
+    #[test]
+    fn unframe_returns_the_message() {
+        assert_eq!(unframe(&[0, 0, 0, 0, 2, 7, 8]).unwrap(), &[7, 8]);
+        assert_eq!(unframe(&[0, 0, 0, 0, 0]).unwrap(), &[] as &[u8]);
+        // Bytes after the first frame are not part of the message.
+        assert_eq!(unframe(&[0, 0, 0, 0, 1, 7, 8]).unwrap(), &[7]);
+    }
+
+    #[test]
+    fn unframe_rejects_bad_frames() {
+        let cases: &[(&str, &[u8])] = &[
+            ("empty", &[]),
+            ("short header", &[0, 0, 0, 1]),
+            ("compressed", &[1, 0, 0, 0, 1, 7]),
+            ("length past the end", &[0, 0, 0, 0, 3, 7, 8]),
+            ("maximum length", &[0, 0xff, 0xff, 0xff, 0xff, 7]),
+        ];
+        for (name, data) in cases {
+            assert!(unframe(data).is_err(), "{name}");
         }
     }
 }
