@@ -40,9 +40,11 @@ const MAX_STREAMS: usize = 8;
 /// hub above [`MAX_STREAMS`], because [`Pool::push`] closes waiting ones.
 const MAX_ACCEPTED: usize = 2 * MAX_STREAMS;
 /// WebSockets in the challenge. Auth opens all its streams at once, so this
-/// is [`MAX_STREAMS`]. Above it, a new socket closes the oldest one in the
-/// challenge, so sockets that never answer cannot keep auth out.
-const MAX_UNVERIFIED: usize = MAX_STREAMS;
+/// is twice [`MAX_STREAMS`], which leaves room for a few other sockets
+/// during auth's burst. Above it, a new socket closes the oldest socket of
+/// the client with the most in the challenge, so sockets that never answer
+/// cannot keep auth out.
+const MAX_UNVERIFIED: usize = 2 * MAX_STREAMS;
 /// How long [`Pool::take_wait`] waits for auth to open a stream when none
 /// is waiting.
 pub const TAKE_WAIT: Duration = Duration::from_secs(5);
