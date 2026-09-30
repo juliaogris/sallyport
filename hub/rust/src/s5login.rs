@@ -96,13 +96,13 @@ async fn finish(env: &Env, pool: &Pool, assertion: Vec<u8>) -> std::result::Resu
 
     let hub = authrpc::connect(pool.take().ok_or("no auth pipe stream")?, hub_tls).await?;
 
-    let got: AppSessionResponse = unary(&hub, GET_WEB_SESSION, &GetWebSessionRequest { user: user.clone(), session_id: web_id }).await?;
+    let got: SessionResponse = unary(&hub, GET_WEB_SESSION, &GetWebSessionRequest { user: user.clone(), session_id: web_id }).await?;
     let spec = got.session.and_then(|s| s.spec).ok_or("GetWebSession returned no spec")?;
     let key = if spec.tls_priv.is_empty() { spec.priv_key } else { spec.tls_priv };
     let user_tls = Arc::new(authrpc::tls_config_from_pem(env, &spec.tls_cert, &key).map_err(|e| e.to_string())?);
 
     let as_user = authrpc::connect(pool.take().ok_or("no second auth pipe stream")?, user_tls).await?;
-    let created: AppSessionResponse = unary(
+    let created: SessionResponse = unary(
         &as_user,
         CREATE_APP_SESSION,
         &CreateAppSessionRequest {
@@ -118,7 +118,7 @@ async fn finish(env: &Env, pool: &Pool, assertion: Vec<u8>) -> std::result::Resu
         .and_then(|s| s.metadata)
         .map(|m| m.name)
         .ok_or("CreateAppSession returned no session name")?;
-    let app: AppSessionResponse = unary(&hub, GET_APP_SESSION, &GetAppSessionRequest { session_id: app_id }).await?;
+    let app: SessionResponse = unary(&hub, GET_APP_SESSION, &GetAppSessionRequest { session_id: app_id }).await?;
     let app = app.session.and_then(|s| s.spec).ok_or("GetAppSession returned no spec")?;
     console_log!("s5 login: app session for {:?}", app.user);
 

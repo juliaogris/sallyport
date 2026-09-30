@@ -45,7 +45,7 @@ async fn run(env: &Env, pool: &Pool) -> std::result::Result<serde_json::Value, S
     let name: ClusterNameV2 = unary(&hub, GET_CLUSTER_NAME, &GetClusterNameRequest {}).await?;
 
     let user = authrpc::connect(pool.take().ok_or("no second auth pipe stream")?, user_tls).await?;
-    let created: AppSessionResponse = unary(
+    let created: SessionResponse = unary(
         &user,
         CREATE_APP_SESSION,
         &CreateAppSessionRequest {
@@ -62,7 +62,7 @@ async fn run(env: &Env, pool: &Pool) -> std::result::Result<serde_json::Value, S
         .map(|m| m.name)
         .ok_or("CreateAppSession returned no session name")?;
 
-    let got: AppSessionResponse = unary(&hub, GET_APP_SESSION, &GetAppSessionRequest { session_id: session_id.clone() }).await?;
+    let got: SessionResponse = unary(&hub, GET_APP_SESSION, &GetAppSessionRequest { session_id: session_id.clone() }).await?;
     let spec = got.session.and_then(|s| s.spec).ok_or("GetAppSession returned no spec")?;
     let done = Date::now().as_millis();
 

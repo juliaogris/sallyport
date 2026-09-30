@@ -111,6 +111,6 @@ fn head_end(head: &[u8]) -> Option<usize> {
 /// Builds the TLS client config: the app service's cert must chain to the
 /// cluster host CA, and the hub presents the user's app session cert.
 fn client_tls_config(env: &Env) -> Result<rustls::ClientConfig> {
-    crate::appproxy::tls_from_pem(env, &secret_bytes(env, "S4_APP_CERT")?, &secret_bytes(env, "S4_APP_KEY")?)
+    crate::authrpc::client_tls(env, &secret_bytes(env, "S4_APP_CERT")?, &secret_bytes(env, "S4_APP_KEY")?)
         .map_err(|e| Error::RustError(format!("app session identity: {e}")))
 }
