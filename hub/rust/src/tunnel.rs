@@ -281,13 +281,7 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
 /// in-memory pipe until either side closes. When it returns, the pipe end
 /// is dropped, so the far end reads EOF.
-pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
-    crate::sockets::add(ws);
-    pump_inner(ws, events, pipe).await;
-    crate::sockets::remove(ws);
-}
-
-async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream) {
+pub async fn pump(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream) {
     let (mut rd, mut wr) = tokio::io::split(pipe);
 
     let outbound = async move {

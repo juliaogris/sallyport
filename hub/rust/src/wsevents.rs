@@ -28,7 +28,8 @@ const MAX_QUEUED_BYTES: usize = 1024 * 1024;
 /// The close code for "message too big".
 const TOO_BIG: u16 = 1009;
 
-/// The events of one WebSocket. Dropping it removes its listeners.
+/// The events of one WebSocket. Dropping it removes its listeners, and
+/// removes the WebSocket from the socket list in [`crate::sockets`].
 pub struct Events {
     ws: web_sys::WebSocket,
     /// Each event with the message bytes it counts in `queued`.
@@ -133,5 +134,6 @@ impl Drop for Events {
         let _ = self
             .ws
             .remove_event_listener_with_callback("error", self.error.as_ref().unchecked_ref());
+        crate::sockets::remove(&self.ws);
     }
 }

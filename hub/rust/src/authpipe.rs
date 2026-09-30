@@ -185,10 +185,7 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
     }
     let pool = pool.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        serve(ws.clone(), key, host, &pool, ticket, evict_rx).await;
-        // `serve` added the WebSocket to the restart list when it started
-        // listening, before the challenge.
-        crate::sockets::remove(&ws);
+        serve(ws, key, host, &pool, ticket, evict_rx).await;
     });
     Response::from_websocket(pair.client)
 }

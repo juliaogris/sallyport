@@ -32,7 +32,6 @@ use worker::js_sys::{self, Array, Function, Map, Reflect, Set};
 use worker::wasm_bindgen::closure::Closure;
 use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::web_sys::{self, WorkerGlobalScope};
-use worker::WebSocket;
 
 /// A `Map` from each open WebSocket to an `Array` of its listeners, each a
 /// `[type, function]` pair.
@@ -79,13 +78,6 @@ fn listeners(map: &Map, ws: &web_sys::WebSocket) -> Array {
     list
 }
 
-/// Adds `ws` to the socket list.
-pub fn add(ws: &WebSocket) {
-    if let Some(map) = map() {
-        listeners(&map, ws.as_ref());
-    }
-}
-
 /// Adds `ws` to the socket list, if it is not there, and records that `f`
 /// listens for its `typ` events.
 pub fn add_listener(ws: &web_sys::WebSocket, typ: &str, f: &Function) {
@@ -95,10 +87,9 @@ pub fn add_listener(ws: &web_sys::WebSocket, typ: &str, f: &Function) {
 }
 
 /// Removes `ws` from the socket list.
-pub fn remove(ws: &WebSocket) {
+pub fn remove(ws: &web_sys::WebSocket) {
     if let Some(map) = map() {
-        let js: &web_sys::WebSocket = ws.as_ref();
-        map.delete(js);
+        map.delete(ws);
     }
 }
 
