@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -130,6 +131,9 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 		"--config", filepath.Join(dir, "wrangler.toml"),
 		"--ip", "127.0.0.1", "--port", fmt.Sprint(port),
 		"--inspector-port", "0",
+		// Over plain HTTP, wrangler dev rewrites Origin to http://, which no
+		// POST check accepts.
+		"--local-protocol", "https",
 		"--persist-to", filepath.Join(dir, "state"),
 		"--show-interactive-dev-session=false",
 		"--log-level", "log",
@@ -184,7 +188,7 @@ func (h *Hub) Stop() {
 
 // Get sends a GET for path with Host host.
 func (h *Hub) Get(host, path string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", "http://"+host+path, nil)
+	req, err := http.NewRequest("GET", "https://"+host+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -200,13 +204,17 @@ func (h *Hub) Do(req *http.Request) (*http.Response, error) {
 // Client returns an HTTP client that dials the hub for every host.
 func (h *Hub) Client() *http.Client {
 	return &http.Client{
-		Transport: &http.Transport{DialContext: h.DialContext},
+		Transport: &http.Transport{DialContext: h.DialContext, TLSClientConfig: EdgeTLS()},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 		Timeout: 30 * time.Second,
 	}
 }
+
+// EdgeTLS returns the TLS config toward wrangler dev, whose certificate is
+// self-signed. It stands in for Cloudflare's edge, so it is not checked.
+func EdgeTLS() *tls.Config { return &tls.Config{InsecureSkipVerify: true} }
 
 // DialContext dials the hub whatever the address.
 func (h *Hub) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {

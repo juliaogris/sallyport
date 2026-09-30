@@ -30,8 +30,8 @@ type CalloutOpts struct {
 // DialCalloutWS opens a WebSocket to /tunnel/auth without answering the
 // challenge. The response is set when the upgrade fails.
 func (h *Hub) DialCalloutWS(ctx context.Context) (*websocket.Conn, *http.Response, error) {
-	d := websocket.Dialer{NetDialContext: h.DialContext, HandshakeTimeout: 20 * time.Second}
-	return d.DialContext(ctx, "ws://"+LoginHost+CalloutPath, nil)
+	d := websocket.Dialer{NetDialContext: h.DialContext, TLSClientConfig: EdgeTLS(), HandshakeTimeout: 20 * time.Second}
+	return d.DialContext(ctx, "wss://"+LoginHost+CalloutPath, nil)
 }
 
 // DialCallout opens a stream to /tunnel/auth and answers the hub's

@@ -23,19 +23,28 @@ hub. `go test` alone needs the hub to be built already.
   a free port. The hub's own `wrangler.toml` is not used.
 - Requests go to `127.0.0.1:<port>` with the host in the Host header. The
   login host is `hub.test` and app hosts are `<app>-hub.test`.
+- `wrangler dev` serves HTTPS with a self-signed certificate, which the
+  tests do not check. Over plain HTTP it rewrites the Origin header to
+  `http://`, so no POST would pass the hub's Origin check.
 - A fake agent dials the tunnel with host certificates from the test CA. A
   fake callout answers the `/tunnel/auth` challenge with the test callout
   key.
+- `FakeAuth` keeps 4 callout streams open and serves auth on each stream
+  the hub uses: the unary gRPC calls on h2 and the passwordless login on
+  the legacy HTTP API. Alice has a passkey and Bob has an invite. WebAuthn
+  is not checked. A credential ID of `cred-alice` or `cred-bob` passes.
+- `Agent.ServeApp` makes the fake agent serve a test app on each dial the
+  hub makes into it, with TLS that requires the user's certificate.
 
-Most tests share one hub. A test that needs an empty callout pool starts
-its own hub with `freshHub`.
+Most tests share one hub. A test that needs an empty callout pool or its
+own fake auth starts its own hub with `freshHub` or `newStack`.
 
 With `-keep`, the temporary directory stays, with the `wrangler dev` log of
 each hub.
 
 ## What is not tested
 
-- Anything that needs auth: login, invites, launch, and the app proxy.
-  These need a fake auth gRPC server.
+- An `http://` Origin, because `wrangler dev` rewrites it.
+- A real browser's WebAuthn and a stock Teleport app service.
 - Durable Object restarts, CPU time and memory. `wrangler dev` does not
   enforce the Workers limits, so these need a live env.

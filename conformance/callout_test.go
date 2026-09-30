@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -135,4 +136,32 @@ func TestCalloutStreamLimit(t *testing.T) {
 		_, closeErr := WaitClosed(streams[i], 200*time.Millisecond)
 		require.NoError(t, closeErr, "stream %d closed", i)
 	}
+}
+
+// TestCalloutAcceptedLimit checks that the hub accepts 16 streams, verified
+// or not, and refuses the 17th with 503.
+func TestCalloutAcceptedLimit(t *testing.T) {
+	h := freshHub(t)
+	var streams []*websocket.Conn
+	defer func() {
+		for _, ws := range streams {
+			ws.Close()
+		}
+	}()
+	for range 16 {
+		ws, _, err := h.DialCalloutWS(t.Context())
+		require.NoError(t, err)
+		streams = append(streams, ws)
+	}
+
+	ws, resp, err := h.DialCalloutWS(t.Context())
+	if ws != nil {
+		streams = append(streams, ws)
+	}
+	require.Error(t, err, "17th stream accepted")
+	require.NotNil(t, resp, "no response for the 17th stream")
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "too many streams", string(body))
 }
