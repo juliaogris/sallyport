@@ -5,11 +5,15 @@
 //! stream. The response streams back to the browser as it arrives, instead
 //! of buffering the whole body in memory.
 
+use std::cell::Cell;
 use std::pin::Pin;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
+use futures::future::{abortable, AbortHandle};
 use futures::stream::LocalBoxStream;
 use futures::StreamExt;
 use http_body_util::{BodyExt, Either, Empty, StreamBody};
@@ -31,6 +35,12 @@ const HOP_BY_HOP: &[&str] = &["connection", "keep-alive", "proxy-connection", "t
 /// never needs to see them, so they are stripped from the `Cookie` header
 /// before the request goes upstream.
 const SP_COOKIE_PREFIX: &str = "__Host-sp_";
+
+/// How long a response body may wait for the runtime to pull the next
+/// chunk before the hub closes the app service connection. When the
+/// browser goes away, the runtime stops pulling but does not always cancel
+/// the stream, and the connection and its channel would stay open.
+const STREAM_IDLE: Duration = Duration::from_secs(30);
 
 /// Sends one HTTP request to the app service at `host` through the agent
 /// tunnel, and returns the app service's response.
@@ -58,16 +68,18 @@ async fn forward_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, clust
         .await
         .map_err(|e| format!("http1 handshake: {e}"))?;
     // The connection future drives the socket. Nothing here polls it again,
-    // so it must run on its own for `send` to make progress.
+    // so it must run on its own for `send` to make progress. Aborting it
+    // drops the TLS stream, which closes the channel.
+    let (conn, abort) = abortable(conn);
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(err) = conn.await {
+        if let Ok(Err(err)) = conn.await {
             console_log!("appproxy: connection ended: {err}");
         }
     });
 
     let request = build_request(req, host).await?;
     let response = send.send_request(request).await.map_err(|e| format!("app request: {e}"))?;
-    build_response(response)
+    build_response(response, abort)
 }
 
 /// Builds the request the hub sends upstream: `req`'s method and path, its
@@ -124,7 +136,9 @@ fn strip_sp_cookies(value: &str) -> Option<String> {
 
 /// Turns the app service's HTTP/1.1 response into a `worker::Response`,
 /// with the hop-by-hop headers dropped and the body streamed as it arrives.
-fn build_response(response: http::Response<hyper::body::Incoming>) -> std::result::Result<Response, String> {
+/// `conn` aborts the app service connection when the body is idle for
+/// [`STREAM_IDLE`].
+fn build_response(response: http::Response<hyper::body::Incoming>, conn: AbortHandle) -> std::result::Result<Response, String> {
     let (parts, incoming) = response.into_parts();
     if parts.status.is_server_error() {
         console_error!("appproxy: upstream {} {:?}", parts.status, parts.headers.get(http::header::SERVER));
@@ -148,7 +162,7 @@ fn build_response(response: http::Response<hyper::body::Incoming>) -> std::resul
         let res = Response::empty().map_err(|e| format!("response: {e}"))?;
         return Ok(res.with_headers(headers).with_status(status));
     }
-    let mut body = Response::from_stream(body_stream(incoming)).map_err(|e| format!("response body: {e}"))?;
+    let mut body = Response::from_stream(body_stream(incoming, conn)).map_err(|e| format!("response body: {e}"))?;
     // The runtime compresses a body to match `Content-Encoding` by
     // default, so an app's gzipped body would be compressed twice.
     if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
@@ -158,18 +172,29 @@ fn build_response(response: http::Response<hyper::body::Incoming>) -> std::resul
 }
 
 /// Turns a hyper `Incoming` body into the byte stream `Response::from_stream`
-/// wants, keeping only the data frames and skipping any trailers.
-fn body_stream(incoming: hyper::body::Incoming) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
-    futures::stream::unfold(incoming, |mut incoming| async move {
+/// wants, keeping only the data frames and skipping any trailers. When the
+/// runtime does not pull the next chunk for [`STREAM_IDLE`], it aborts
+/// `conn`.
+fn body_stream(incoming: hyper::body::Incoming, conn: AbortHandle) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
+    // The time the stream last handed a chunk to the runtime, or None while
+    // the stream waits on the app service. Only the wait for a pull counts,
+    // not a slow app service.
+    let pulled: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(None));
+    wasm_bindgen_futures::spawn_local(end_when_idle(Rc::downgrade(&pulled), conn));
+    futures::stream::unfold((incoming, pulled), |(mut incoming, pulled)| async move {
+        pulled.set(None);
         loop {
             match incoming.frame().await {
                 None => return None,
                 Some(Err(err)) => {
                     console_error!("appproxy: response body: {err}");
-                    return Some((Err(Error::RustError(err.to_string())), incoming));
+                    return Some((Err(Error::RustError(err.to_string())), (incoming, pulled)));
                 }
                 Some(Ok(frame)) => match frame.into_data() {
-                    Ok(data) => return Some((Ok(data.to_vec()), incoming)),
+                    Ok(data) => {
+                        pulled.set(Some(Date::now().as_millis()));
+                        return Some((Ok(data.to_vec()), (incoming, pulled)));
+                    }
                     // A trailers frame, which HTTP/1.1 responses rarely
                     // carry. Keep reading for the real end of the body.
                     Err(_) => continue,
@@ -177,6 +202,29 @@ fn body_stream(incoming: hyper::body::Incoming) -> impl futures::Stream<Item = s
             }
         }
     })
+}
+
+/// Aborts `conn` once `pulled` shows no pull for [`STREAM_IDLE`]. It returns
+/// when the body stream that owns `pulled` is dropped.
+async fn end_when_idle(pulled: Weak<Cell<Option<u64>>>, conn: AbortHandle) {
+    let idle_ms = STREAM_IDLE.as_millis() as u64;
+    let mut wait = STREAM_IDLE;
+    loop {
+        Delay::from(wait).await;
+        let Some(pulled) = pulled.upgrade() else {
+            return;
+        };
+        wait = STREAM_IDLE;
+        if let Some(at) = pulled.get() {
+            let waited = Date::now().as_millis().saturating_sub(at);
+            if waited >= idle_ms {
+                console_log!("appproxy: response body not read for {STREAM_IDLE:?}, closing");
+                conn.abort();
+                return;
+            }
+            wait = Duration::from_millis(idle_ms - waited);
+        }
+    }
 }
 
 /// Builds a TLS client config toward the app service from a PEM cert chain
