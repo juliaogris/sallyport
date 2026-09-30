@@ -32,12 +32,18 @@ pub const CREATE_APP_SESSION: &str = "/proto.AuthService/CreateAppSession";
 pub const GET_APP_SESSION: &str = "/proto.AuthService/GetAppSession";
 pub const CREATE_AUTHENTICATE_CHALLENGE: &str = "/proto.AuthService/CreateAuthenticateChallenge";
 pub const GET_WEB_SESSION: &str = "/proto.AuthService/GetWebSession";
+pub const CREATE_REGISTER_CHALLENGE: &str = "/proto.AuthService/CreateRegisterChallenge";
+pub const CHANGE_USER_AUTHENTICATION: &str = "/proto.AuthService/ChangeUserAuthentication";
 /// The legacy HTTP route for `AuthenticateWebUser`. A passwordless login has
 /// an empty user, so the path has an empty segment, as the Go proxy sends it.
 pub const AUTHENTICATE_WEB_USER_PASSWORDLESS: &str = "/v2/users//web/authenticate";
 
 /// `teleport.mfa.v1.ChallengeScope` value for a passwordless login.
 pub const SCOPE_PASSWORDLESS_LOGIN: i32 = 2;
+/// `proto.DeviceType` value for WebAuthn.
+pub const DEVICE_TYPE_WEBAUTHN: i32 = 3;
+/// `proto.DeviceUsage` value for a passkey.
+pub const DEVICE_USAGE_PASSWORDLESS: i32 = 2;
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CreateAuthenticateChallengeRequest {
@@ -202,13 +208,6 @@ impl WebSessionSpecV2 {
         self.expires.as_ref().is_some_and(|t| t.seconds > now)
     }
 }
-
-pub const CREATE_REGISTER_CHALLENGE: &str = "/proto.AuthService/CreateRegisterChallenge";
-pub const CHANGE_USER_AUTHENTICATION: &str = "/proto.AuthService/ChangeUserAuthentication";
-/// `proto.DeviceType` value for WebAuthn.
-pub const DEVICE_TYPE_WEBAUTHN: i32 = 3;
-/// `proto.DeviceUsage` value for a passkey.
-pub const DEVICE_USAGE_PASSWORDLESS: i32 = 2;
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CreateRegisterChallengeRequest {
