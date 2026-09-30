@@ -603,49 +603,65 @@ mod tests {
     fn reject_reason_rejects_bad_certificates() {
         let ca = key(1);
         let other_ca = key(3);
-        let cases: Vec<(Certificate, &str, &str)> = vec![
+        let cases: Vec<(Certificate, &str, &str, &str)> = vec![
             (
                 cert_of(CertType::User, &ca, Some(ROLE_APP), |_| {}),
+                CLUSTER,
                 USER,
                 "not a host certificate",
             ),
             (
                 cert(&ca, Some(ROLE_APP), |_| {}),
+                CLUSTER,
                 "other.example.com",
+                "not a certificate principal",
+            ),
+            (
+                cert(&ca, Some(ROLE_APP), |b| {
+                    b.all_principals_valid().unwrap();
+                }),
+                CLUSTER,
+                USER,
                 "not a certificate principal",
             ),
             (
                 cert(&ca, Some(ROLE_APP), |b| {
                     b.critical_option("force-command", "true").unwrap();
                 }),
+                CLUSTER,
                 USER,
                 "critical options",
             ),
             (
                 cert(&other_ca, Some(ROLE_APP), |_| {}),
+                CLUSTER,
                 USER,
                 "not signed by the cluster host CA",
             ),
             (
+                cert(&ca, Some(ROLE_APP), |_| {}),
+                "other.example",
+                USER,
+                "authority",
+            ),
+            (
                 cert(&ca, Some("Proxy"), |_| {}),
+                CLUSTER,
                 USER,
                 "role Some(\"Proxy\")",
             ),
-            (cert(&ca, Some("Node"), |_| {}), USER, "role Some(\"Node\")"),
-            (cert(&ca, None, |_| {}), USER, "role None"),
+            (
+                cert(&ca, Some("Node"), |_| {}),
+                CLUSTER,
+                USER,
+                "role Some(\"Node\")",
+            ),
+            (cert(&ca, None, |_| {}), CLUSTER, USER, "role None"),
         ];
-        for (cert, user, want) in cases {
-            let got = reject_reason(ca.public_key(), CLUSTER, user, &cert).unwrap_or_default();
+        for (cert, cluster, user, want) in cases {
+            let got = reject_reason(ca.public_key(), cluster, user, &cert).unwrap_or_default();
             assert!(got.contains(want), "got {got:?}, want {want:?}");
         }
-    }
-
-    #[test]
-    fn reject_reason_rejects_another_authority() {
-        let ca = key(1);
-        let cert = cert(&ca, Some(ROLE_APP), |_| {});
-        let got = reject_reason(ca.public_key(), "other.example", USER, &cert).unwrap_or_default();
-        assert!(got.starts_with("authority"), "got {got:?}");
     }
 
     #[test]
