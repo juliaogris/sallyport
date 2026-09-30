@@ -522,7 +522,8 @@ fn percent_decode(s: &str) -> String {
 
 /// One HTTP/2 connection to auth with the hub TLS identity, reused across
 /// calls. A call that fails at the transport opens a new connection from
-/// the pool and is retried once. A gRPC error status is not retried.
+/// the pool and is retried once. A gRPC error status is not retried. When
+/// the pool has no stream, opening a connection waits for auth to open one.
 ///
 /// The lock is held while a connection opens, so callers that arrive
 /// together share one connection instead of each taking a pool stream.
@@ -545,7 +546,7 @@ impl HubAuth {
             }
         }
         let tls = Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
-        let send = connect(pool.take().ok_or("no auth pipe stream")?, tls).await?;
+        let send = connect(pool.take_wait().await?, tls).await?;
         slot.0 += 1;
         slot.1 = Some(send.clone());
         Ok((slot.0, send))

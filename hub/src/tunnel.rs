@@ -53,7 +53,13 @@ pub struct Hub {
 
 impl DurableObject for Hub {
     fn new(_state: State, env: Env) -> Self {
-        console_log!("hub: durable object started");
+        // After a trap, the WebSockets of the previous Wasm instance are
+        // still open. Their peers redial once they close.
+        let stale = crate::sockets::close_all();
+        console_log!("hub: durable object started, closed {stale} WebSockets of the previous instance");
+        if let Some(msg) = crate::sockets::take_last_panic() {
+            console_error!("hub: the previous instance panicked: {msg}");
+        }
         let hub = Self {
             env,
             connections: Rc::new(Cell::new(0)),
@@ -174,20 +180,30 @@ async fn heartbeat(connections: Rc<Cell<usize>>, passthroughs: Arc<AtomicUsize>,
             format!("{}s ago", Date::now().as_millis().saturating_sub(last) / 1000)
         };
         console_log!(
-            "hub: heartbeat, {} tunnels, app tunnel {}, auth streams {} open {} ready, {} passthroughs, discovery {discovery}",
+            "hub: heartbeat, {} tunnels, app tunnel {}, auth streams {} open {} ready, {} passthroughs, discovery {discovery}, memory {} MiB",
             connections.get(),
             if app_tunnel.lock().unwrap().is_some() { "up" } else { "down" },
             auth_pipe.open(),
             auth_pipe.ready(),
             passthroughs.load(Ordering::Relaxed),
+            wasm_memory_mib(),
         );
     }
+}
+
+/// Returns the size of the Wasm linear memory. It grows and never shrinks,
+/// so it is the peak the instance has needed.
+fn wasm_memory_mib() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    return core::arch::wasm32::memory_size(0) * 64 / 1024;
+    #[cfg(not(target_arch = "wasm32"))]
+    return 0;
 }
 
 /// Copies bytes between the WebSocket and one end of an in-memory pipe
 /// until either side closes.
 async fn bridge(ws: WebSocket, pipe: DuplexStream) {
-    let events = match ws.events() {
+    let events = match crate::wsevents::events(&ws) {
         Ok(events) => events,
         Err(err) => {
             console_error!("tunnel: websocket events: {err}");
@@ -199,7 +215,13 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
 
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
 /// in-memory pipe until either side closes.
-pub async fn pump(ws: &WebSocket, mut events: EventStream<'_>, pipe: DuplexStream) {
+pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
+    crate::sockets::add(ws);
+    pump_inner(ws, events, pipe).await;
+    crate::sockets::remove(ws);
+}
+
+async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream) {
     let (mut rd, mut wr) = tokio::io::split(pipe);
 
     let outbound = async move {

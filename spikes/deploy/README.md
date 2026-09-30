@@ -73,15 +73,13 @@ fork `tctl` is at `~/sallyport/bin/tctl`; run it with
 
 ## Known bugs
 
-- **Dead auth streams block the callout.** The hub counts auth's
-  WebSockets in `Pool::open` and refuses new ones at 8 with "too many
-  streams". The count drops only when a stream's pump ends. When auth
-  stops without closing its WebSockets, as when the Mac slept or auth was
-  killed for the move, the pumps never end, so auth's reconnects get 503
-  until the hub is redeployed. Seen 2026-09-24 after an auth restart and
-  2026-09-28 after the move. Fix: once a new stream passes the challenge
-  at the limit, close the oldest waiting stream instead of refusing; and
-  ping waiting streams so dead ones close.
+- **A trap after a Wasm restart.** After a trap, workers-rs starts a new
+  Wasm instance. A response body from the old instance that is still
+  streaming calls into the old instance's memory on its next read, which
+  traps again with "memory access out of bounds". Each trap restarts the
+  instance once more. The new instance closes the old instance's
+  WebSockets, so auth and the agents redial within about a second each
+  time.
 
 ## Gotchas
 
@@ -93,6 +91,10 @@ fork `tctl` is at `~/sallyport/bin/tctl`; run it with
   `/v2/users//web/authenticate`, sent with TLS and no ALPN. Auth offers
   only `h2`, and `h2` goes to gRPC, which answers 415.
 - The app session TLS key is `TLSPriv`, field 15, not `Priv`.
+- Auth rate-limits `CreateAuthenticateChallenge` per client address to a
+  burst of 40 calls, then 20 a minute. Every login on a hub reaches auth from
+  the same stream, so they share one limit. The hub answers 429 when it
+  is reached.
 - The first deploy needed a `workers.dev` subdomain. Opening the Workers
   page in the dashboard once created it.
 - The app service log can contain null bytes after a restart, so use

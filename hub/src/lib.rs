@@ -14,9 +14,11 @@ mod s4;
 mod s5;
 #[cfg(feature = "spikes")]
 mod s5login;
+mod sockets;
 mod ssh;
 mod tunnel;
 mod web;
+mod wsevents;
 
 use worker::*;
 
@@ -27,7 +29,10 @@ const HUB_INSTANCE: &str = "hub";
 
 #[event(start)]
 fn start() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        sockets::set_last_panic(&info.to_string());
+    }));
 }
 
 #[event(fetch)]

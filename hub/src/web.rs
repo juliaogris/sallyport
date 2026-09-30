@@ -29,6 +29,9 @@ const SESSION_COOKIE: &str = "__Host-sp_session";
 const APP_COOKIE: &str = "__Host-sp_app";
 const SUBJECT_COOKIE: &str = "__Host-sp_subject";
 const AUTH_PATH: &str = "/x-teleport-auth";
+/// How [`authrpc::unary`] reports gRPC status `RESOURCE_EXHAUSTED`, which
+/// auth returns when a client address makes too many login or invite calls.
+const RATE_LIMITED: &str = "grpc-status \"8\"";
 
 /// What the hub needs to answer a browser request.
 pub struct Ctx<'a> {
@@ -113,6 +116,10 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
     };
     match res {
         Ok(v) => Response::from_json(&v),
+        Err(err) if err.contains(RATE_LIMITED) => {
+            console_error!("web: {err}");
+            Response::error("too many requests, try again in a minute", 429)
+        }
         Err(err) => {
             console_error!("web: {err}");
             Response::error("request failed", 502)
@@ -268,7 +275,7 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     let res = async {
         let key = if spec.tls_priv.is_empty() { &spec.priv_key } else { &spec.tls_priv };
         let tls = Arc::new(authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?);
-        let as_user = authrpc::connect(cx.pool.take().ok_or("no auth pipe stream")?, tls).await?;
+        let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
         let created: AppSessionResponse = unary(
             &as_user,
             CREATE_APP_SESSION,
@@ -328,7 +335,7 @@ async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> Result<Response> {
         let assertion: Value = serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
         let tls = authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
         let body = json!({ "username": "", "webauthn": assertion }).to_string().into_bytes();
-        let stream = cx.pool.take().ok_or("no auth pipe stream")?;
+        let stream = cx.pool.take_wait().await?;
         let (status, body) = authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
         if status != 200 {
             return Err(format!("AuthenticateWebUser: http {status}: {}", String::from_utf8_lossy(&body)));

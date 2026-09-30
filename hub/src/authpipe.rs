@@ -9,6 +9,8 @@
 //! hub's first message.
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +19,7 @@ use futures::future::{select, Either};
 use futures::StreamExt;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use tokio::io::DuplexStream;
+use tokio::sync::Notify;
 use worker::*;
 
 use crate::tunnel::{pump, secret_bytes, PIPE_BYTES};
@@ -26,10 +29,20 @@ const DOMAIN: &[u8] = b"sallyport/authpipe/v1";
 const NONCE: usize = 32;
 const SIGNATURE: usize = 64;
 const CHALLENGE_DEADLINE: Duration = Duration::from_secs(10);
-/// WebSockets the hub keeps, verified or not. Auth opens 8 by default.
+/// Open WebSockets from auth, waiting or in use, that the hub keeps. Auth
+/// opens 8 by default.
 const MAX_STREAMS: usize = 8;
+/// WebSockets the hub accepts, verified or not. Above [`MAX_STREAMS`], a
+/// newly verified stream closes the oldest waiting one. A waiting stream
+/// whose auth went away without closing it looks open, and without this it
+/// would hold its place forever.
+const MAX_ACCEPTED: usize = 2 * MAX_STREAMS;
+/// How long [`Pool::take_wait`] waits for auth to open a stream when none
+/// is waiting.
+pub const TAKE_WAIT: Duration = Duration::from_secs(5);
 
 /// One verified WebSocket from auth, as the hub end of an in-memory pipe.
+/// Dropping the pipe closes the WebSocket.
 struct Stream {
     pipe: DuplexStream,
     /// False once the WebSocket has closed.
@@ -42,6 +55,7 @@ struct Stream {
 pub struct Pool {
     ready: Arc<Mutex<VecDeque<Stream>>>,
     open: Arc<AtomicUsize>,
+    arrived: Arc<Notify>,
 }
 
 impl Pool {
@@ -54,6 +68,45 @@ impl Pool {
             }
         }
         None
+    }
+
+    /// Takes the oldest open stream. If there is none, it waits for auth to
+    /// open one until `deadline` resolves, and then returns None.
+    pub async fn take_until(&self, deadline: impl Future<Output = ()>) -> Option<DuplexStream> {
+        let mut deadline = pin!(deadline);
+        loop {
+            let mut arrived = pin!(self.arrived.notified());
+            arrived.as_mut().enable();
+            if let Some(s) = self.take() {
+                return Some(s);
+            }
+            if let Either::Right(_) = select(arrived, deadline.as_mut()).await {
+                return self.take();
+            }
+        }
+    }
+
+    /// Takes the oldest open stream, waiting up to [`TAKE_WAIT`] for one.
+    pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
+        self.take_until(Delay::from(TAKE_WAIT))
+            .await
+            .ok_or_else(|| format!("no auth pipe stream within {TAKE_WAIT:?}"))
+    }
+
+    /// Adds a verified stream. When more than [`MAX_STREAMS`] WebSockets are
+    /// open, it closes the oldest waiting stream, unless the new one is the
+    /// only one waiting. Returns true if it closed one.
+    fn push(&self, stream: Stream) -> bool {
+        let evicted = {
+            let mut ready = self.ready.lock().unwrap();
+            ready.retain(|s| s.alive.load(Ordering::Relaxed));
+            ready.push_back(stream);
+            (self.open() > MAX_STREAMS && ready.len() > 1).then(|| ready.pop_front()).flatten()
+        };
+        let closed = evicted.is_some();
+        drop(evicted);
+        self.arrived.notify_waiters();
+        closed
     }
 
     /// Returns the number of verified streams waiting.
@@ -69,7 +122,7 @@ impl Pool {
 
 /// Accepts one WebSocket from auth and runs the challenge on it.
 pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
-    if pool.open.load(Ordering::Relaxed) >= MAX_STREAMS {
+    if pool.open.load(Ordering::Relaxed) >= MAX_ACCEPTED {
         console_log!("tunnel/auth: stream limit reached");
         return Response::error("too many streams", 503);
     }
@@ -96,7 +149,7 @@ pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
 }
 
 async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
-    let mut events = match ws.events() {
+    let mut events = match crate::wsevents::events(&ws) {
         Ok(e) => e,
         Err(err) => {
             console_error!("tunnel/auth: websocket events: {err}");
@@ -138,11 +191,94 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
 
     let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
     let alive = Arc::new(AtomicBool::new(true));
-    pool.ready.lock().unwrap().push_back(Stream {
+    let closed = pool.push(Stream {
         pipe: hub_side,
         alive: alive.clone(),
     });
+    if closed {
+        console_log!("tunnel/auth: {MAX_STREAMS} streams open, closed the oldest waiting one");
+    }
     pump(&ws, events, pipe_side).await;
     alive.store(false, Ordering::Relaxed);
     console_log!("tunnel/auth: stream closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use futures::future::{pending, ready};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Adds a stream to `pool` as `accept` and `serve` would, and returns
+    /// its far end and its liveness flag.
+    fn add(pool: &Pool) -> (DuplexStream, Arc<AtomicBool>, bool) {
+        let (hub_side, far) = tokio::io::duplex(64);
+        let alive = Arc::new(AtomicBool::new(true));
+        pool.open.fetch_add(1, Ordering::Relaxed);
+        let closed = pool.push(Stream { pipe: hub_side, alive: alive.clone() });
+        (far, alive, closed)
+    }
+
+    #[test]
+    fn take_skips_dead_streams() {
+        let pool = Pool::default();
+        let (_a, a_alive, _) = add(&pool);
+        let (mut b, _, _) = add(&pool);
+        a_alive.store(false, Ordering::Relaxed);
+        assert_eq!(pool.ready(), 1);
+        let mut got = pool.take().expect("a live stream");
+        block_on(async {
+            got.write_all(b"x").await.unwrap();
+            let mut buf = [0u8; 1];
+            b.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"x");
+        });
+        assert!(pool.take().is_none());
+    }
+
+    #[test]
+    fn push_closes_oldest_waiting_stream_above_limit() {
+        let pool = Pool::default();
+        let mut fars = Vec::new();
+        for _ in 0..MAX_STREAMS {
+            let (far, _, closed) = add(&pool);
+            assert!(!closed);
+            fars.push(far);
+        }
+        let (_newest, _, closed) = add(&pool);
+        assert!(closed);
+        assert_eq!(pool.ready(), MAX_STREAMS);
+        // The oldest stream's hub end was dropped, so its far end reads EOF.
+        let mut buf = [0u8; 1];
+        assert_eq!(block_on(fars[0].read(&mut buf)).unwrap(), 0);
+    }
+
+    #[test]
+    fn push_keeps_the_only_waiting_stream() {
+        let pool = Pool::default();
+        pool.open.fetch_add(MAX_STREAMS, Ordering::Relaxed);
+        let (_far, _, closed) = add(&pool);
+        assert!(!closed);
+        assert_eq!(pool.ready(), 1);
+    }
+
+    #[test]
+    fn take_until_returns_none_at_deadline() {
+        let pool = Pool::default();
+        assert!(block_on(pool.take_until(ready(()))).is_none());
+    }
+
+    #[test]
+    fn take_until_waits_for_a_stream() {
+        let pool = Pool::default();
+        let waiter = pool.clone();
+        let (got, far) = block_on(async {
+            let take = waiter.take_until(pending());
+            let add = async { add(&pool).0 };
+            futures::join!(take, add)
+        });
+        assert!(got.is_some());
+        drop(far);
+    }
 }
