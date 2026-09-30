@@ -43,7 +43,6 @@ use futures::future::Future;
 use log::{debug, error, info, warn};
 use msg::{is_kex_msg, validate_client_msg_strict_kex};
 use russh_util::runtime::JoinHandle;
-use russh_util::time::Instant;
 use ssh_key::{Certificate, PrivateKey};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 #[cfg(not(target_arch = "wasm32"))]
@@ -1194,7 +1193,7 @@ async fn reply<H: Handler + Send>(
 
                     if let Some(ref mut enc) = session.common.encrypted {
                         // This is a rekey
-                        enc.last_rekey = Instant::now();
+                        enc.last_rekey = crate::rt::Instant::now();
                         session.common.packet_writer.buffer().bytes = 0;
                         enc.flush_all_pending()?;
 

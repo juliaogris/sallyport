@@ -42,6 +42,14 @@ so that `[patch.crates-io]` can point at this directory.
   `crate::rt::timeout`.
 - `src/keys/agent/server.rs`, `src/keys/agent/client.rs`: Replaced
   `tokio::time::sleep` with `crate::rt::sleep`.
+- `src/session.rs`, `src/server/mod.rs`, `src/client/mod.rs`: `last_rekey`
+  is a `crate::rt::Instant` instead of a `russh_util::time::Instant`, and
+  the rekey check uses `saturating_duration_since`. On `wasm32`,
+  `russh_util` reads the clock with `chrono::Utc::now`, and its
+  `duration_since` panics with "Duration is negative" when the clock goes
+  back. The Workers clock can go back between events. The panic trapped the
+  hub's Wasm instance, which dropped every tunnel and auth pipe stream,
+  several times an hour.
 
 ## Building the server on wasm
 

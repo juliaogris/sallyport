@@ -46,7 +46,6 @@ use futures::task::{Context, Poll};
 use futures::Future;
 use kex::ClientKex;
 use log::{debug, error, trace, warn};
-use russh_util::time::Instant;
 use ssh_encoding::Decode;
 use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey, PublicKey};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -1524,7 +1523,7 @@ async fn reply<H: Handler>(
 
                     if let Some(ref mut enc) = session.common.encrypted {
                         // This is a rekey
-                        enc.last_rekey = Instant::now();
+                        enc.last_rekey = crate::rt::Instant::now();
                         session.common.packet_writer.buffer().bytes = 0;
                         enc.flush_all_pending()?;
                         let mut pending = std::mem::take(&mut session.pending_reads);
