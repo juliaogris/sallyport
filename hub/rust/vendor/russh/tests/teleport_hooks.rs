@@ -51,7 +51,7 @@ enum Event {
 
 struct Handler {
     events: mpsc::UnboundedSender<Event>,
-    authed: Option<oneshot::Sender<server::Handle>>,
+    ready: Option<oneshot::Sender<server::Handle>>,
 }
 
 impl server::Handler for Handler {
@@ -59,13 +59,6 @@ impl server::Handler for Handler {
 
     async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
-    }
-
-    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
-        if let Some(tx) = self.authed.take() {
-            let _ = tx.send(session.handle());
-        }
-        Ok(())
     }
 
     async fn channel_open_unknown(
@@ -99,8 +92,16 @@ impl server::Handler for Handler {
         typ: &str,
         want_reply: bool,
         data: &[u8],
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<bool, Self::Error> {
+        // The Go client sends "ready" once it can take server-opened
+        // channels.
+        if typ == "ready" {
+            if let Some(tx) = self.ready.take() {
+                let _ = tx.send(session.handle());
+            }
+            return Ok(true);
+        }
         let _ = self.events.send(Event::GlobalRequest {
             typ: typ.to_owned(),
             want_reply,
@@ -123,7 +124,8 @@ fn ed25519_config() -> server::Config {
 }
 
 /// Runs one Go client scenario against one server session. `with_handle`
-/// runs on the server side once the client has authenticated.
+/// runs on the server side once the client sends the "ready" global
+/// request.
 async fn run<F, Fut>(scenario: &str, with_handle: F) -> Run
 where
     F: FnOnce(server::Handle) -> Fut + Send + 'static,
@@ -151,14 +153,14 @@ where
     let (stream, _) = listener.accept().await.unwrap();
     let config = Arc::new(config);
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-    let (authed_tx, authed_rx) = oneshot::channel();
+    let (ready_tx, ready_rx) = oneshot::channel();
     let handler = Handler {
         events: events_tx,
-        authed: Some(authed_tx),
+        ready: Some(ready_tx),
     };
     let session = server::run_stream(config, stream, handler).await.unwrap();
     let server_side = tokio::spawn(async move {
-        if let Ok(handle) = authed_rx.await {
+        if let Ok(handle) = ready_rx.await {
             with_handle(handle).await;
         }
     });
@@ -278,6 +280,33 @@ async fn server_opens_custom_channel_and_sends_custom_requests() {
          request=teleport-quiet:03\n"
     );
     assert_eq!(results_rx.await.unwrap(), (true, false, true));
+    assert_eq!(r.events, vec![]);
+}
+
+#[tokio::test]
+async fn messages_on_unconfirmed_channel_are_ignored() {
+    let (results_tx, results_rx) = oneshot::channel();
+    let r = run("unconfirmed", move |handle| async move {
+        let mut channel = handle
+            .channel_open_custom("teleport-transport", vec![])
+            .await
+            .unwrap();
+        let dial = channel
+            .request_custom("teleport-transport-dial", true, vec![])
+            .await
+            .unwrap();
+        channel.close().await.unwrap();
+        let mut early = Vec::new();
+        while let Some(msg) = channel.wait().await {
+            if let russh::ChannelMsg::Data { data } = msg {
+                early.extend_from_slice(&data);
+            }
+        }
+        let _ = results_tx.send((dial, early));
+    })
+    .await;
+    assert_eq!(r.stdout, "request=teleport-transport-dial:\n");
+    assert_eq!(results_rx.await.unwrap(), (true, vec![]));
     assert_eq!(r.events, vec![]);
 }
 

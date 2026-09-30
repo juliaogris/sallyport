@@ -92,6 +92,16 @@ so that `[patch.crates-io]` can point at this directory.
   `SSH_MSG_CHANNEL_SUCCESS` and `SSH_MSG_CHANNEL_FAILURE` by answering the
   oldest pending request on that channel. Pending requests are dropped when
   the channel closes.
+- `src/session.rs`, `src/server/encrypted.rs`: New
+  `CommonSession::is_established_channel`, from upstream v0.63.3. The
+  `CHANNEL_CLOSE`, `CHANNEL_EOF`, `CHANNEL_DATA`, `CHANNEL_EXTENDED_DATA`,
+  `CHANNEL_WINDOW_ADJUST` and `CHANNEL_REQUEST` arms ignore a message for a
+  channel that the peer has not confirmed. Without this, a peer that
+  answers the server's `CHANNEL_OPEN` with a `CHANNEL_REQUEST` reaches
+  `assert!(channel.confirmed)` in `Session::channel_failure`.
+- `src/server/encrypted.rs`: A `CHANNEL_OPEN_CONFIRMATION` or
+  `CHANNEL_OPEN_FAILURE` for a channel that is already confirmed ends the
+  connection with `Error::Inconsistent`, as x/crypto does.
 
 ## Host certificates
 
@@ -112,7 +122,9 @@ so that `[patch.crates-io]` can point at this directory.
 - `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks, the
   server-initiated channel and host certificates, driven by a Go client on golang.org/x/crypto/ssh,
   because the russh client cannot open unknown channel types, send arbitrary
-  requests or answer custom channel requests.
+  requests or answer custom channel requests. The Go client sends
+  out-of-order messages through x/crypto's unexported packet writer, which
+  it reaches with `go:linkname`.
 
 - **ssh-key `UnixTime`** (`vendor/ssh-key/src/certificate/unix_time.rs`): accept `valid_before = u64::MAX`, which OpenSSH and Teleport use for "forever". The raw value is kept so a re-encoded certificate keeps its CA signature; only the `SystemTime` view saturates.
 

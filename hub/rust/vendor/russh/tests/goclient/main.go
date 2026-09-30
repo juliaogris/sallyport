@@ -12,9 +12,11 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -96,22 +98,20 @@ func main() {
 		fmt.Printf("probe-false=%v\n", ok)
 
 	case "transport":
-		nc := <-client.HandleChannelOpen("teleport-transport")
-		if nc == nil {
-			log.Fatalf("connection closed before teleport-transport was opened")
-		}
+		nc := waitTransport(client)
 		fmt.Printf("open-extra=%x\n", nc.ExtraData())
-		ch, reqs, err := nc.Accept()
-		if err != nil {
-			log.Fatalf("accept: %v", err)
-		}
-		defer ch.Close()
-		for req := range reqs {
-			fmt.Printf("request=%s:%x\n", req.Type, req.Payload)
-			if err := req.Reply(req.Type == "teleport-transport-dial", nil); err != nil {
-				log.Fatalf("reply: %v", err)
-			}
-		}
+		serveTransport(nc)
+
+	case "unconfirmed":
+		// Before confirming the server's channel, send requests and data
+		// on it. The server must ignore them.
+		nc := waitTransport(client)
+		id := remoteID(nc)
+		writeRaw(client, channelRequestMsg{PeersID: id, Request: "early-reply", WantReply: true})
+		writeRaw(client, channelRequestMsg{PeersID: id, Request: "early-quiet"})
+		writeRaw(client, channelDataMsg{PeersID: id, Data: []byte("early")})
+		writeRaw(client, channelEOFMsg{PeersID: id})
+		serveTransport(nc)
 
 	case "rekey-echo":
 		channels, err := strconv.Atoi(os.Args[3])
@@ -127,6 +127,73 @@ func main() {
 	default:
 		log.Fatalf("unknown scenario %q", scenario)
 	}
+}
+
+// waitTransport registers for the server's teleport-transport channel, then
+// sends the "ready" global request that tells the server to open it, and
+// returns the channel when it arrives.
+func waitTransport(client *ssh.Client) ssh.NewChannel {
+	opens := client.HandleChannelOpen("teleport-transport")
+	if _, _, err := client.SendRequest("ready", true, nil); err != nil {
+		log.Fatalf("ready: %v", err)
+	}
+	nc := <-opens
+	if nc == nil {
+		log.Fatalf("connection closed before teleport-transport was opened")
+	}
+	return nc
+}
+
+// serveTransport accepts the channel and answers each request on it, with
+// success only for teleport-transport-dial, until the server closes it.
+func serveTransport(nc ssh.NewChannel) {
+	ch, reqs, err := nc.Accept()
+	if err != nil {
+		log.Fatalf("accept: %v", err)
+	}
+	defer ch.Close()
+	for req := range reqs {
+		fmt.Printf("request=%s:%x\n", req.Type, req.Payload)
+		if err := req.Reply(req.Type == "teleport-transport-dial", nil); err != nil {
+			log.Fatalf("reply: %v", err)
+		}
+	}
+}
+
+// The wire messages that writeRaw sends. ssh.Marshal encodes them.
+type channelRequestMsg struct {
+	PeersID   uint32 `sshtype:"98"`
+	Request   string
+	WantReply bool
+	Payload   []byte `ssh:"rest"`
+}
+
+type channelDataMsg struct {
+	PeersID uint32 `sshtype:"94"`
+	Data    []byte
+}
+
+type channelEOFMsg struct {
+	PeersID uint32 `sshtype:"96"`
+}
+
+// x/crypto/ssh has no API to send a message out of protocol order, so
+// writeRaw calls its unexported packet writer.
+//
+//go:linkname handshakeWritePacket golang.org/x/crypto/ssh.(*handshakeTransport).writePacket
+func handshakeWritePacket(t unsafe.Pointer, p []byte) error
+
+func writeRaw(client *ssh.Client, msg any) {
+	transport := reflect.ValueOf(client.Conn).Elem().FieldByName("transport").Elem()
+	if err := handshakeWritePacket(transport.UnsafePointer(), ssh.Marshal(msg)); err != nil {
+		log.Fatalf("write raw: %v", err)
+	}
+}
+
+// remoteID returns the server's ID for a channel, from x/crypto's
+// unexported channel struct. ch is an ssh.NewChannel or an ssh.Channel.
+func remoteID(ch any) uint32 {
+	return uint32(reflect.ValueOf(ch).Elem().FieldByName("remoteId").Uint())
 }
 
 // hostCert connects with the same host key check as a Teleport agent: a

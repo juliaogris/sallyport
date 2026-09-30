@@ -599,6 +599,15 @@ impl Session {
                 .map(|_| ()),
             msg::CHANNEL_CLOSE => {
                 let channel_num = map_err!(ChannelId::decode(r))?;
+                // sallyport: a channel this side opened is unconfirmed until
+                // the peer confirms it. This arm and the EOF, data, window
+                // adjust and request arms ignore messages for it until then.
+                // The handlers expect a confirmed channel, and
+                // `channel_success` and `channel_failure` panic on an
+                // unconfirmed one.
+                if !self.common.is_established_channel(channel_num) {
+                    return Ok(());
+                }
                 if let Some(ref mut enc) = self.common.encrypted {
                     enc.channels.remove(&channel_num);
                 }
@@ -610,6 +619,9 @@ impl Session {
             }
             msg::CHANNEL_EOF => {
                 let channel_num = map_err!(ChannelId::decode(r))?;
+                if !self.common.is_established_channel(channel_num) {
+                    return Ok(());
+                }
                 // sallyport: never wait on the reader here either. A full
                 // queue closes the channel, as for data.
                 let full = match self.channels.get(&channel_num) {
@@ -630,6 +642,9 @@ impl Session {
             }
             msg::CHANNEL_EXTENDED_DATA | msg::CHANNEL_DATA => {
                 let channel_num = map_err!(ChannelId::decode(r))?;
+                if !self.common.is_established_channel(channel_num) {
+                    return Ok(());
+                }
 
                 let ext = if msg == msg::CHANNEL_DATA {
                     None
@@ -687,6 +702,9 @@ impl Session {
             msg::CHANNEL_WINDOW_ADJUST => {
                 let channel_num = map_err!(ChannelId::decode(r))?;
                 let amount = map_err!(u32::decode(r))?;
+                if !self.common.is_established_channel(channel_num) {
+                    return Ok(());
+                }
                 let mut new_size = 0;
                 if let Some(ref mut enc) = self.common.encrypted {
                     if let Some(channel) = enc.channels.get_mut(&channel_num) {
@@ -719,6 +737,13 @@ impl Session {
 
                 if let Some(ref mut enc) = self.common.encrypted {
                     if let Some(parameters) = enc.channels.get_mut(&local_id) {
+                        // sallyport: a second confirmation would overwrite the
+                        // peer's channel ID, and its blocking send below could
+                        // wait on a full queue. Go's x/crypto also ends the
+                        // connection on a duplicate response.
+                        if parameters.confirmed {
+                            return Err(Error::Inconsistent.into());
+                        }
                         parameters.confirm(&msg);
                     } else {
                         // We've not requested this channel, close connection.
@@ -758,6 +783,9 @@ impl Session {
                     if let Some(channel) = enc.channels.get_mut(&channel_num) {
                         channel.wants_reply = wants_reply != 0;
                     }
+                }
+                if !self.common.is_established_channel(channel_num) {
+                    return Ok(());
                 }
                 match req_type.as_str() {
                     "pty-req" => {
@@ -1097,6 +1125,11 @@ impl Session {
                 trace!("Channel open failure description: {description}");
                 trace!("Channel open failure language tag: {language_tag}");
 
+                // sallyport: a failure for a confirmed channel is a duplicate
+                // response, as in the confirmation arm.
+                if self.common.is_established_channel(channel_num) {
+                    return Err(Error::Inconsistent.into());
+                }
                 if let Some(ref mut enc) = self.common.encrypted {
                     enc.channels.remove(&channel_num);
                 }

@@ -123,6 +123,16 @@ impl ChannelFlushResult {
 }
 
 impl<C> CommonSession<C> {
+    /// sallyport: returns true when the channel is open and the peer has
+    /// confirmed it. A channel this side opened is unconfirmed until the
+    /// peer's `CHANNEL_OPEN_CONFIRMATION`.
+    pub(crate) fn is_established_channel(&self, channel: ChannelId) -> bool {
+        self.encrypted
+            .as_ref()
+            .and_then(|enc| enc.channels.get(&channel))
+            .is_some_and(|channel| channel.confirmed)
+    }
+
     pub fn newkeys(&mut self, newkeys: NewKeys) {
         if let Some(ref mut enc) = self.encrypted {
             enc.exchange = Some(newkeys.exchange);
