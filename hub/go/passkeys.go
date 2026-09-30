@@ -322,13 +322,9 @@ func (h *hub) addPasskeyBegin(body []byte) *response {
 	if refused := in.parse(body); refused != nil {
 		return refused
 	}
-	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(in.Token))
+	v, err := h.registerChallengeFor(in.Token)
 	if err != nil {
 		return authError(err)
-	}
-	v := registerChallenge(resp)
-	if v == nil {
-		return authError(errors.New("no WebAuthn creation options"))
 	}
 	return jsonResponse(v)
 }

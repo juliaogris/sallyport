@@ -62,7 +62,7 @@ func (h *hub) loginHostRequest(req *request) *response {
 		case !ok:
 			return textError("not found", 404)
 		case step == "begin":
-			v, err = h.inviteBegin(token)
+			v, err = h.registerChallengeFor(token)
 		case step == "finish":
 			return h.inviteFinish(token, req.body)
 		default:
@@ -319,7 +319,9 @@ func (h *hub) loginFinish(assertion []byte) *response {
 	return sessionResponse(user, sid, err)
 }
 
-func (h *hub) inviteBegin(token string) (map[string]any, error) {
+// registerChallengeFor asks auth for WebAuthn creation options for the user
+// of token, an invite or a privilege token, as the pages read them.
+func (h *hub) registerChallengeFor(token string) (map[string]any, error) {
 	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(token))
 	if err != nil {
 		return nil, err
