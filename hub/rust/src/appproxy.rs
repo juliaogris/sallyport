@@ -153,10 +153,16 @@ fn build_response(response: http::Response<hyper::body::Incoming>, conn: AbortHa
         }
         headers.append(name.as_str(), value).map_err(|e| format!("response header {name}: {e}"))?;
     }
+    // The runtime accepts a 101 only with a WebSocket attached, and the hub
+    // does not forward WebSockets.
+    let status = parts.status.as_u16();
+    if status == 101 {
+        console_error!("appproxy: upstream 101 without a WebSocket");
+        return Response::error("app service error", 502).map_err(|e| format!("response: {e}"));
+    }
     // The runtime refuses a body on these statuses, and workers-rs panics
     // on that refusal, which restarts the Durable Object.
-    let status = parts.status.as_u16();
-    if matches!(status, 101 | 204 | 205 | 304) {
+    if matches!(status, 204 | 205 | 304) {
         let res = Response::empty().map_err(|e| format!("response: {e}"))?;
         return Ok(res.with_headers(headers).with_status(status));
     }
