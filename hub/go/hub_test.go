@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestClassify(t *testing.T) {
@@ -89,6 +90,58 @@ func TestPasskeyRequests(t *testing.T) {
 	}
 	if f.str(2) != "laptop" || string(f.msg(3).msg(3).bytes(2)) != "id" {
 		t.Errorf("delete device request %v", f)
+	}
+
+	f, err = decode(createPrivilegeTokenRequest(existing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(f.msg(1).msg(3).bytes(2)) != "id" {
+		t.Errorf("privilege token request %v", f)
+	}
+
+	f, err = decode(addMFADeviceWithTokenRequest("tok", "phone", cred))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.str(1) != "tok" || f.str(2) != "phone" || f.int(4) != deviceUsagePasswordless || f.has(5) || string(f.msg(3).msg(3).msg(3).bytes(2)) != "att" {
+		t.Errorf("add device with token request %v", f)
+	}
+}
+
+func TestPrivilegeTokenOf(t *testing.T) {
+	meta := pb(nil).str(1, "0123456789abcdef0123456789abcdef").msg(6, pb(nil).int(1, 1788609600))
+	f, err := decode(pb(nil).str(1, "user_token").msg(4, meta).msg(5, pb(nil).str(1, "alice")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := privilegeTokenOf(f)
+	if got == nil || got.id != "0123456789abcdef0123456789abcdef" || got.expires.Format(time.RFC3339) != "2026-09-05T12:00:00Z" {
+		t.Errorf("privilegeTokenOf = %+v", got)
+	}
+	if got := privilegeTokenOf(fields{}); got != nil {
+		t.Errorf("privilegeTokenOf(empty) = %+v, want nil", got)
+	}
+}
+
+func TestValidTokenID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"0123456789abcdef0123456789abcdef", true},
+		{"", false},
+		{"tok-bob", false},
+		{"0123456789abcdef0123456789abcde", false},
+		{"0123456789abcdef0123456789abcdef0", false},
+		{"0123456789ABCDEF0123456789ABCDEF", false},
+		{"0123456789abcdef0123456789abcdeg", false},
+		{"0123456789abcdef0123456789abcde/", false},
+	}
+	for _, c := range cases {
+		if got := validTokenID(c.id); got != c.want {
+			t.Errorf("validTokenID(%q) = %v, want %v", c.id, got, c.want)
+		}
 	}
 }
 

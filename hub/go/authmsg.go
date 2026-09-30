@@ -75,6 +75,49 @@ func deleteMFADeviceSyncRequest(name string, existing pb) []byte {
 	return pb(nil).str(2, name).msg(3, existing)
 }
 
+// createPrivilegeTokenRequest asks for a privilege token of the calling
+// user, confirmed with existing, an MFAAuthenticateResponse.
+func createPrivilegeTokenRequest(existing pb) []byte {
+	return pb(nil).msg(1, existing)
+}
+
+// addMFADeviceWithTokenRequest adds cred, a CredentialCreationResponse, as a
+// passkey called name for the user of a privilege token.
+func addMFADeviceWithTokenRequest(token, name string, cred pb) []byte {
+	return pb(nil).str(1, token).str(2, name).msg(3, pb(nil).msg(3, cred)).int(4, deviceUsagePasswordless)
+}
+
+// privilegeToken is what the hub reads of a types.UserTokenV3.
+type privilegeToken struct {
+	id      string
+	expires time.Time
+}
+
+// privilegeTokenOf reads a CreatePrivilegeToken response, or returns nil
+// when it has no token ID.
+func privilegeTokenOf(resp fields) *privilegeToken {
+	meta := resp.msg(4)
+	id := meta.str(1)
+	if id == "" {
+		return nil
+	}
+	return &privilegeToken{id: id, expires: time.Unix(meta.msg(6).int(1), 0).UTC()}
+}
+
+// validTokenID reports whether id has the form of a user token ID from
+// auth: 32 lower case hex characters.
+func validTokenID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, c := range []byte(id) {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // passkey is what the passkeys page shows of a types.MFADevice.
 type passkey struct {
 	Name string `json:"name"`

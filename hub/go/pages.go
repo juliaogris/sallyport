@@ -134,6 +134,39 @@ nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 load().catch(e => { out.textContent = 'error: ' + e; });
 </script>`
 
+const addPasskeyPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport add passkey</title>
+<p>Add a passkey for this device, then log in with it.</p>
+<p><input id="name" maxlength="30" size="24"> <button id="go">Add a passkey</button></p><pre id="out"></pre><script>
+const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const out = document.getElementById('out'), nameInput = document.getElementById('name');
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  return r.json();
+}
+const token = location.pathname.split('/').pop();
+document.getElementById('go').onclick = async () => {
+  try {
+    out.textContent = '';
+    const c = await post('/webapi/add-passkey/' + token + '/begin');
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: dec(c.challenge), rp: c.rp,
+      user: { id: dec(c.user.id), name: c.user.name, displayName: c.user.displayName },
+      pubKeyCredParams: c.pubKeyCredParams, timeout: c.timeout || undefined,
+      excludeCredentials: c.excludeCredentials.map(a => ({ type: a.type, id: dec(a.id) })),
+      attestation: c.attestation || 'none', authenticatorSelection: c.authenticatorSelection,
+    } });
+    await post('/webapi/add-passkey/' + token + '/finish', { name: nameInput.value, credential: {
+      type: cred.type, rawId: enc(cred.rawId),
+      response: { clientDataJSON: enc(cred.response.clientDataJSON), attestationObject: enc(cred.response.attestationObject) },
+    } });
+    location.href = '/web/login';
+  } catch (e) { out.textContent = 'error: ' + e; }
+};
+nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
+</script>`
+
 const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');

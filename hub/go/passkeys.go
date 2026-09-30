@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
 // Passkey management on the login host, for the logged-in user. Every call
@@ -29,11 +31,27 @@ import (
 //   - POST /webapi/passkeys/delete takes {"name": ..., "assertion": ...},
 //     a fresh answer to a challenge, and removes the passkey. The last
 //     passkey is not removed: 409 "cannot remove the last passkey".
+//   - POST /webapi/passkeys/link takes a fresh answer to a challenge and
+//     returns {"url": ..., "expires": ...}, a link for another device with
+//     a privilege token, and when the token expires in RFC 3339.
 //
 // The JSON routes answer 401 "not logged in" without a valid session, 503
 // "auth unavailable" when auth could not be asked for the session, and
 // {"ok": true} when a finish or delete worked. Errors from auth are mapped
 // by [authError].
+//
+// The other device opens the link, with no session, and its page uses the
+// token as the invite page does:
+//
+//   - GET /web/add-passkey/<token> is the page.
+//   - POST /webapi/add-passkey/<token>/begin returns WebAuthn creation
+//     options for the token's user.
+//   - POST /webapi/add-passkey/<token>/finish takes {"name": ...,
+//     "credential": ...} and adds the passkey.
+//
+// A token that does not have auth's form is refused before auth is asked:
+// 404 for the page, 403 "invalid token" for the POSTs, which is also
+// auth's answer for a token it does not know or that has expired.
 
 // clientStatus maps the gRPC codes of auth's client errors to HTTP:
 // InvalidArgument, NotFound, AlreadyExists, PermissionDenied and
@@ -157,6 +175,8 @@ func (h *hub) passkeyRoute(method, action string) passkeyHandler {
 		return h.passkeyFinish
 	case action == "delete":
 		return h.passkeyDelete
+	case action == "link":
+		return h.passkeyLink
 	}
 	return nil
 }
@@ -244,6 +264,86 @@ func (h *hub) passkeyDelete(cert tls.Certificate, body []byte) *response {
 		return passkeyError("cannot remove the last passkey", 409)
 	}
 	_, err = h.callAs(cert, deleteMFADeviceSync, deleteMFADeviceSyncRequest(in.Name, existing))
+	if err != nil {
+		return authError(err)
+	}
+	return jsonResponse(map[string]bool{"ok": true})
+}
+
+// passkeyLink makes a link for another device after a fresh challenge
+// answer. Auth keeps the privilege token in the link until it expires, and
+// a new link replaces it.
+func (h *hub) passkeyLink(cert tls.Certificate, body []byte) *response {
+	var a assertion
+	if err := json.Unmarshal(body, &a); err != nil {
+		return passkeyError("bad request", 400)
+	}
+	existing, err := a.proto()
+	if err != nil {
+		return passkeyError("bad request", 400)
+	}
+	resp, err := h.callAs(cert, createPrivilegeToken, createPrivilegeTokenRequest(existing))
+	if err != nil {
+		return authError(err)
+	}
+	token := privilegeTokenOf(resp)
+	if token == nil {
+		return authError(errors.New("no privilege token"))
+	}
+	url := "https://" + h.cfg.loginHost() + "/web/add-passkey/" + token.id
+	return jsonResponse(map[string]string{"url": url, "expires": token.expires.Format(time.RFC3339)})
+}
+
+// showAddPasskey serves the page for another device, or 404 for a token
+// that does not have auth's form.
+func (h *hub) showAddPasskey(token string) *response {
+	if !validTokenID(token) {
+		return textError("not found", 404)
+	}
+	return html(addPasskeyPage)
+}
+
+// addPasskeyAPI answers the /webapi/add-passkey routes. rest is the path
+// after /webapi/add-passkey/, the token and the step.
+func (h *hub) addPasskeyAPI(req *request, rest string) *response {
+	token, step, ok := strings.Cut(rest, "/")
+	if !ok || (step != "begin" && step != "finish") {
+		return passkeyError("not found", 404)
+	}
+	if !validTokenID(token) {
+		return passkeyError("invalid token", 403)
+	}
+	if step == "begin" {
+		return h.addPasskeyBegin(token)
+	}
+	return h.addPasskeyFinish(token, req.body)
+}
+
+func (h *hub) addPasskeyBegin(token string) *response {
+	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(token))
+	if err != nil {
+		return authError(err)
+	}
+	v := registerChallenge(resp)
+	if v == nil {
+		return authError(errors.New("no WebAuthn creation options"))
+	}
+	return jsonResponse(v)
+}
+
+func (h *hub) addPasskeyFinish(token string, body []byte) *response {
+	var in struct {
+		Name       string     `json:"name"`
+		Credential credential `json:"credential"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return passkeyError("bad request", 400)
+	}
+	cred, err := in.Credential.proto()
+	if err != nil {
+		return passkeyError("bad request", 400)
+	}
+	_, err = h.auth.call(addMFADeviceSync, addMFADeviceWithTokenRequest(token, in.Name, cred))
 	if err != nil {
 		return authError(err)
 	}
