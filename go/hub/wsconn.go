@@ -1,0 +1,343 @@
+//go:build js && wasm
+
+package main
+
+import (
+	"io"
+	"net"
+	"runtime"
+	"sync"
+	"syscall/js"
+	"time"
+)
+
+// Sizes of the transfer buffers each connection keeps for its whole life.
+// A larger write goes out in pieces, and worker.mjs pushes a larger message
+// in pieces.
+const (
+	outBytes = 64 << 10
+	inBytes  = 64 << 10
+	// A read buffer that grew past this is dropped once it is empty, so one
+	// burst does not pin its memory for the life of the connection.
+	keepReadBytes = 256 << 10
+)
+
+// wsConn is a net.Conn over a Workers WebSocket. Incoming bytes are queued
+// without limit: the peer's SSH or TLS flow control bounds them. Writes are
+// coalesced: a write is queued, and a goroutine sends everything queued
+// once the writers have yielded, so the TLS records of one SSH packet go
+// out as one message.
+type wsConn struct {
+	id      int
+	client  js.Value // the client end, for the 101 response
+	out, in js.Value // persistent Uint8Arrays
+	inBuf   []byte
+
+	mu     sync.Mutex
+	cond   *sync.Cond
+	rbuf   []byte
+	roff   int
+	pend   []byte
+	queued bool
+	closed bool
+	// code is the close code from the peer, or 0.
+	code  int
+	flush chan struct{}
+}
+
+// connTable maps connection IDs to connections for the JavaScript
+// callbacks.
+type connTable struct {
+	mu   sync.Mutex
+	next int
+	m    map[int]*wsConn
+}
+
+var conns = &connTable{m: make(map[int]*wsConn)}
+
+func (t *connTable) get(id int) *wsConn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.m[id]
+}
+
+func (t *connTable) remove(id int) {
+	t.mu.Lock()
+	delete(t.m, id)
+	t.mu.Unlock()
+}
+
+// acceptWS accepts a new WebSocket pair and returns its server end as a
+// connection. The response must carry c.client.
+func acceptWS() *wsConn {
+	conns.mu.Lock()
+	conns.next++
+	c := &wsConn{
+		id:    conns.next,
+		out:   uint8Array.New(outBytes),
+		in:    uint8Array.New(inBytes),
+		inBuf: make([]byte, inBytes),
+		flush: make(chan struct{}, 1),
+	}
+	c.cond = sync.NewCond(&c.mu)
+	conns.m[c.id] = c
+	conns.mu.Unlock()
+	c.client = glue.accept.Invoke(c.id, c.in)
+	go c.flusher()
+	return c
+}
+
+// pushIn queues the first n bytes of the in buffer, which JavaScript has
+// just filled. It runs inside the JavaScript message event, so it must not
+// block.
+func (c *wsConn) pushIn(n int) {
+	js.CopyBytesToGo(c.inBuf[:n], c.in)
+	c.mu.Lock()
+	if c.roff == len(c.rbuf) {
+		c.rbuf, c.roff = c.rbuf[:0], 0
+	}
+	c.rbuf = append(c.rbuf, c.inBuf[:n]...)
+	c.cond.Broadcast()
+	c.mu.Unlock()
+}
+
+func (c *wsConn) remoteClosed(code int) {
+	conns.remove(c.id)
+	c.mu.Lock()
+	c.closed = true
+	c.code = code
+	c.pend = c.pend[:0]
+	c.cond.Broadcast()
+	c.mu.Unlock()
+	select {
+	case c.flush <- struct{}{}:
+	default:
+	}
+}
+
+func (c *wsConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.roff == len(c.rbuf) && !c.closed {
+		c.cond.Wait()
+	}
+	if c.roff == len(c.rbuf) {
+		return 0, io.EOF
+	}
+	n := copy(b, c.rbuf[c.roff:])
+	c.roff += n
+	if c.roff == len(c.rbuf) {
+		c.rbuf, c.roff = c.rbuf[:0], 0
+		if cap(c.rbuf) > keepReadBytes {
+			c.rbuf = nil
+		}
+	}
+	return n, nil
+}
+
+func (c *wsConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, net.ErrClosed
+	}
+	c.pend = append(c.pend, b...)
+	if len(c.pend) >= outBytes {
+		c.flushLocked()
+		return len(b), nil
+	}
+	if !c.queued {
+		c.queued = true
+		select {
+		case c.flush <- struct{}{}:
+		default:
+		}
+	}
+	return len(b), nil
+}
+
+// flushLocked sends everything queued, in messages of at most outBytes.
+func (c *wsConn) flushLocked() {
+	for off := 0; off < len(c.pend); {
+		n := js.CopyBytesToJS(c.out, c.pend[off:min(len(c.pend), off+outBytes)])
+		glue.send.Invoke(c.id, c.out, n)
+		off += n
+	}
+	c.pend = c.pend[:0]
+	if cap(c.pend) > keepReadBytes {
+		c.pend = nil
+	}
+}
+
+// flusher sends queued writes after the writers yield, until the
+// connection closes.
+func (c *wsConn) flusher() {
+	for range c.flush {
+		// Let the goroutines that are ready run first, so that their
+		// writes join this message.
+		runtime.Gosched()
+		c.mu.Lock()
+		c.queued = false
+		if c.closed {
+			c.mu.Unlock()
+			return
+		}
+		c.flushLocked()
+		c.mu.Unlock()
+	}
+}
+
+// Close sends what is queued and closes the WebSocket with code 1000.
+func (c *wsConn) Close() error { return c.CloseWith(1000, "closed") }
+
+// CloseWith sends what is queued and closes the WebSocket with the given
+// code and reason.
+func (c *wsConn) CloseWith(code int, reason string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.flushLocked()
+	c.closed = true
+	c.cond.Broadcast()
+	c.mu.Unlock()
+	conns.remove(c.id)
+	glue.close.Invoke(c.id, code, reason)
+	select {
+	case c.flush <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// waitClosed returns once either side has closed the connection.
+func (c *wsConn) waitClosed() {
+	c.mu.Lock()
+	for !c.closed {
+		c.cond.Wait()
+	}
+	c.mu.Unlock()
+}
+
+// isClosed reports whether either side has closed the connection.
+func (c *wsConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func (c *wsConn) LocalAddr() net.Addr              { return wsAddr{} }
+func (c *wsConn) RemoteAddr() net.Addr             { return wsAddr{} }
+func (c *wsConn) SetDeadline(time.Time) error      { return nil }
+func (c *wsConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *wsConn) SetWriteDeadline(time.Time) error { return nil }
+
+type wsAddr struct{}
+
+func (wsAddr) Network() string { return "websocket" }
+func (wsAddr) String() string  { return "websocket" }
+
+// bodyStream is a response body that JavaScript pulls from Go. Each chunk
+// goes through one persistent Uint8Array.
+type bodyStream struct {
+	id         int
+	js         js.Value
+	buf        js.Value
+	r          io.ReadCloser
+	pulls      chan struct{}
+	gone       chan struct{}
+	once       sync.Once
+	cancelOnce sync.Once
+}
+
+type streamTable struct {
+	mu   sync.Mutex
+	next int
+	m    map[int]*bodyStream
+}
+
+var streams = &streamTable{m: make(map[int]*bodyStream)}
+
+func (t *streamTable) get(id int) *bodyStream {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.m[id]
+}
+
+// newBodyStream returns a stream that reads r as JavaScript pulls, and
+// closes r at the end or when the reader cancels.
+func newBodyStream(r io.ReadCloser) *bodyStream {
+	streams.mu.Lock()
+	streams.next++
+	s := &bodyStream{
+		id:    streams.next,
+		buf:   uint8Array.New(outBytes),
+		r:     r,
+		pulls: make(chan struct{}, 1),
+		gone:  make(chan struct{}),
+	}
+	streams.m[s.id] = s
+	streams.mu.Unlock()
+	s.js = glue.stream.Invoke(s.id, s.buf)
+	go s.run()
+	return s
+}
+
+func (s *bodyStream) run() {
+	buf := make([]byte, outBytes)
+	defer s.end()
+	for {
+		select {
+		case <-s.pulls:
+		case <-s.gone:
+			return
+		}
+		n, err := s.r.Read(buf)
+		for n == 0 && err == nil {
+			n, err = s.r.Read(buf)
+		}
+		if n > 0 {
+			js.CopyBytesToJS(s.buf, buf[:n])
+			glue.chunk.Invoke(s.id, n)
+			if err == nil {
+				continue
+			}
+			// Answer the next pull with the end.
+			select {
+			case <-s.pulls:
+			case <-s.gone:
+				return
+			}
+		}
+		if err == io.EOF {
+			glue.chunk.Invoke(s.id, -1)
+		} else {
+			logf("appproxy: response body: %v", err)
+			glue.chunk.Invoke(s.id, -2)
+		}
+		return
+	}
+}
+
+func (s *bodyStream) end() {
+	s.once.Do(func() {
+		streams.mu.Lock()
+		delete(streams.m, s.id)
+		streams.mu.Unlock()
+		s.r.Close()
+	})
+}
+
+func (s *bodyStream) pull() {
+	select {
+	case s.pulls <- struct{}{}:
+	default:
+	}
+}
+
+func (s *bodyStream) cancel() {
+	s.cancelOnce.Do(func() { close(s.gone) })
+	// The reader may be blocked in Read, so close it now.
+	go s.end()
+}

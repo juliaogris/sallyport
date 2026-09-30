@@ -1,0 +1,57 @@
+# The Go hub.
+#
+# `wrangler deploy` with no env goes to the throwaway dev Worker on
+# workers.dev, which has no routes. `wrangler deploy --env go` replaces the
+# Worker behind go.example.com. The go env is the Rust hub's go env, with the
+# same Worker name, routes, vars, secrets and Durable Object class, so the
+# go test cluster on homesrv needs no change. To go back to the Rust hub, run
+# `npx wrangler@4 deploy --env go` in the Rust hub's directory.
+name = "julia-sallyport-gohub-dev"
+main = "worker.mjs"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "./build.sh"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+# The dev Worker's own host is its login host, so the login routes answer
+# there. Its secrets are the go cluster's, and CALLOUT_HOST is its own host,
+# so only a callout that signs for this host gets in.
+[vars]
+CLUSTER_NAME = "sallyport-go"
+PUBLIC_ADDR = "julia-sallyport-gohub-dev.example.workers.dev:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "julia-sallyport-gohub-dev.example.workers.dev"
+DOMAIN = "example.workers.dev"
+OWNER = "julia-sallyport-gohub-dev"
+APPS = "bench,cam:/stream,octo,octocam:/stream"
+
+[env.go]
+name = "sallyport-hub-go"
+routes = [
+  { pattern = "go.example.com", custom_domain = true },
+  { pattern = "bench-go.example.com", custom_domain = true },
+  { pattern = "cam-go.example.com", custom_domain = true },
+  { pattern = "octo-go.example.com", custom_domain = true },
+  { pattern = "octocam-go.example.com", custom_domain = true },
+]
+
+[env.go.vars]
+CLUSTER_NAME = "sallyport-go"
+PUBLIC_ADDR = "go.example.com:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "go.example.com"
+DOMAIN = "example.com"
+OWNER = "go"
+APPS = "bench,cam:/stream,octo,octocam:/stream"
+
+[[env.go.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
