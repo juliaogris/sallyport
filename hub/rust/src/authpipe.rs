@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::channel::oneshot;
 use futures::future::{select, Either};
 use futures::StreamExt;
 use ring::signature::{UnparsedPublicKey, ED25519};
@@ -22,21 +23,26 @@ use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 use worker::*;
 
-use crate::tunnel::{pump, secret_bytes, PIPE_BYTES};
+use crate::tunnel::{pump, secret_bytes, Pending, Ticket, PIPE_BYTES};
 
 pub const PATH: &str = "/tunnel/auth";
 const DOMAIN: &[u8] = b"sallyport/authpipe/v1";
 const NONCE: usize = 32;
 const SIGNATURE: usize = 64;
-const CHALLENGE_DEADLINE: Duration = Duration::from_secs(10);
-/// Open WebSockets from auth, waiting or in use, that the hub keeps. Auth
-/// opens 8 by default.
+/// The challenge is one round trip, so a socket that has not answered by
+/// then is closed.
+const CHALLENGE_DEADLINE: Duration = Duration::from_secs(3);
+/// Verified WebSockets from auth, waiting or in use, that the hub keeps.
+/// Auth opens 8 by default. Above this, a newly verified stream closes the
+/// oldest waiting one.
 const MAX_STREAMS: usize = 8;
-/// WebSockets the hub accepts, verified or not. Above [`MAX_STREAMS`], a
-/// newly verified stream closes the oldest waiting one. A waiting stream
-/// whose auth went away without closing it looks open, and without this it
-/// would hold its place forever.
+/// Verified WebSockets the hub accepts. Only streams in use can take the
+/// hub above [`MAX_STREAMS`], because [`Pool::push`] closes waiting ones.
 const MAX_ACCEPTED: usize = 2 * MAX_STREAMS;
+/// WebSockets in the challenge. Auth opens all its streams at once, so this
+/// is [`MAX_STREAMS`]. Above it, a new socket closes the oldest one in the
+/// challenge, so sockets that never answer cannot keep auth out.
+const MAX_UNVERIFIED: usize = MAX_STREAMS;
 /// How long [`Pool::take_wait`] waits for auth to open a stream when none
 /// is waiting.
 pub const TAKE_WAIT: Duration = Duration::from_secs(5);
@@ -54,8 +60,11 @@ struct Stream {
 #[derive(Clone, Default)]
 pub struct Pool {
     ready: Arc<Mutex<VecDeque<Stream>>>,
+    /// Verified WebSockets, waiting or in use.
     open: Arc<AtomicUsize>,
     arrived: Arc<Notify>,
+    /// The WebSockets in the challenge.
+    unverified: Pending,
 }
 
 impl Pool {
@@ -101,7 +110,11 @@ impl Pool {
             let mut ready = self.ready.lock().unwrap();
             ready.retain(|s| s.alive.load(Ordering::Relaxed));
             ready.push_back(stream);
-            (self.open() > MAX_STREAMS && ready.len() > 1).then(|| ready.pop_front()).flatten()
+            if self.open() > MAX_STREAMS && ready.len() > 1 {
+                ready.pop_front()
+            } else {
+                None
+            }
         };
         let closed = evicted.is_some();
         drop(evicted);
@@ -114,15 +127,25 @@ impl Pool {
         self.ready.lock().unwrap().iter().filter(|s| s.alive.load(Ordering::Relaxed)).count()
     }
 
-    /// Returns the number of open WebSockets from auth, waiting or in use.
+    /// Returns the number of verified WebSockets from auth, waiting or in
+    /// use.
     pub fn open(&self) -> usize {
         self.open.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of WebSockets from auth in the challenge.
+    pub fn unverified(&self) -> usize {
+        self.unverified.waiting()
     }
 }
 
 /// Accepts one WebSocket from auth and runs the challenge on it.
-pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
-    if pool.open.load(Ordering::Relaxed) >= MAX_ACCEPTED {
+pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
+    // Auth's callout sends no `Origin`, and a browser always sends one.
+    if req.headers().get("Origin")?.is_some() {
+        return Response::error("origin not allowed", 403);
+    }
+    if pool.open() >= MAX_ACCEPTED {
         console_log!("tunnel/auth: stream limit reached");
         return Response::error("too many streams", 503);
     }
@@ -134,24 +157,31 @@ pub fn accept(env: &Env, pool: &Pool) -> Result<Response> {
 
     let pair = WebSocketPair::new()?;
     let ws = pair.server;
+    // Newer compatibility dates deliver binary messages as Blob, which
+    // workers-rs 0.8 reads as zero bytes. Ask for ArrayBuffer instead.
     worker::js_sys::Reflect::set(ws.as_ref(), &"binaryType".into(), &"arraybuffer".into())
         .map_err(|_| Error::RustError("setting binaryType".into()))?;
     ws.accept()?;
     console_log!("tunnel/auth: connection accepted");
 
+    let (ticket, evicted, evicted_one) = pool.unverified.admit(MAX_UNVERIFIED);
+    if evicted_one {
+        console_log!("tunnel/auth: {MAX_UNVERIFIED} sockets in the challenge, closed the oldest");
+    }
     let pool = pool.clone();
-    pool.open.fetch_add(1, Ordering::Relaxed);
     wasm_bindgen_futures::spawn_local(async move {
-        serve(ws.clone(), key, host, &pool).await;
+        serve(ws.clone(), key, host, &pool, ticket, evicted).await;
         // `serve` added the WebSocket to the restart list when it started
         // listening, before the challenge.
         crate::sockets::remove(&ws);
-        pool.open.fetch_sub(1, Ordering::Relaxed);
     });
     Response::from_websocket(pair.client)
 }
 
-async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
+/// Runs the challenge on `ws`, and then adds it to `pool`. `ticket` is the
+/// socket's place among the sockets in the challenge, and `evicted`
+/// resolves when a newer socket takes that place.
+async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool, ticket: Ticket, mut evicted: oneshot::Receiver<()>) {
     let mut events = match crate::wsevents::events(&ws) {
         Ok(e) => e,
         Err(err) => {
@@ -165,11 +195,18 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
         return;
     }
 
-    let reply = match select(events.next(), Box::pin(crate::sockets::sleep(CHALLENGE_DEADLINE))).await {
+    let deadline = pin!(crate::sockets::sleep(CHALLENGE_DEADLINE));
+    let stop = select(deadline, &mut evicted);
+    let reply = match select(events.next(), stop).await {
         Either::Left((Some(Ok(WebsocketEvent::Message(msg))), _)) => msg.bytes(),
-        Either::Right(_) => {
+        Either::Right((Either::Left(_), _)) => {
             console_log!("tunnel/auth: challenge failed, no reply within {CHALLENGE_DEADLINE:?}");
             let _ = ws.close(Some(1008), Some("challenge timeout"));
+            return;
+        }
+        Either::Right((Either::Right(_), _)) => {
+            console_log!("tunnel/auth: closed a socket in the challenge for a newer one");
+            let _ = ws.close(Some(1008), Some("too many sockets in the challenge"));
             return;
         }
         _ => None,
@@ -191,6 +228,8 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
         return;
     }
     console_log!("tunnel/auth: stream ready");
+    drop(ticket);
+    pool.open.fetch_add(1, Ordering::Relaxed);
 
     let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
     let alive = Arc::new(AtomicBool::new(true));
@@ -203,6 +242,7 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool) {
     }
     pump(&ws, events, pipe_side).await;
     alive.store(false, Ordering::Relaxed);
+    pool.open.fetch_sub(1, Ordering::Relaxed);
     console_log!("tunnel/auth: stream closed");
 }
 

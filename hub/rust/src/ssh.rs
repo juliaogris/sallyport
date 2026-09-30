@@ -62,8 +62,6 @@ pub struct AppTunnel {
 /// State shared by every connection in the Durable Object.
 #[derive(Clone)]
 pub struct Shared {
-    /// Set once this connection authenticates; the pre-auth deadline reads it.
-    pub authed: Arc<AtomicBool>,
     /// Passthroughs to auth open across the Durable Object.
     pub passthroughs: Arc<AtomicUsize>,
     /// Where an `App` connection registers itself after its first ping.
@@ -77,6 +75,12 @@ pub struct AgentHandler {
     host_ca: PublicKey,
     cluster: String,
     shared: Shared,
+    /// Set once this connection authenticates. The pre-auth deadline reads
+    /// it.
+    authed: Arc<AtomicBool>,
+    /// This connection's place among the unauthenticated connections,
+    /// dropped once it authenticates.
+    ticket: Option<crate::tunnel::Ticket>,
     auth_failures: u32,
     passthroughs: Arc<AtomicUsize>,
     /// The authenticated agent's host ID, set by certificate auth.
@@ -94,9 +98,11 @@ pub struct AgentHandler {
 }
 
 impl AgentHandler {
-    pub fn new(host_ca: PublicKey, cluster: String, proxy_name: String, shared: Shared) -> Self {
+    pub fn new(host_ca: PublicKey, cluster: String, proxy_name: String, shared: Shared, authed: Arc<AtomicBool>, ticket: crate::tunnel::Ticket) -> Self {
         Self {
             shared,
+            authed,
+            ticket: Some(ticket),
             auth_failures: 0,
             passthroughs: Arc::new(AtomicUsize::new(0)),
             proxy_name,
@@ -175,7 +181,8 @@ impl russh::server::Handler for AgentHandler {
         console_log!("ssh: agent {user:?} authenticated, role {role}");
         self.host_id = Some(user.to_string());
         self.role = Some(role);
-        self.shared.authed.store(true, Ordering::Relaxed);
+        self.authed.store(true, Ordering::Relaxed);
+        self.ticket = None;
         Ok(Auth::Accept)
     }
 
