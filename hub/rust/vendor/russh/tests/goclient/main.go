@@ -343,9 +343,9 @@ func kexStall(addr string) {
 	transport := field(reflect.ValueOf(client.Conn), "transport", "*ssh.handshakeTransport")
 	conn := field(transport, "conn", "*ssh.transport")
 	msg := globalRequestMsg{Type: "keepalive@openssh.com", WantReply: true}
-	// The server's limit is 4 MiB of queued replies, about 840,000 of
-	// them.
-	for range 1_200_000 {
+	// The test sets the server's limit to 64 KiB of queued replies, about
+	// 13,000 of them.
+	for range 100_000 {
 		if err := transportWritePacket(conn.UnsafePointer(), ssh.Marshal(msg)); err != nil {
 			fmt.Println("disconnected=true")
 			return

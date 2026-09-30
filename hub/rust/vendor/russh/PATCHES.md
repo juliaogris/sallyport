@@ -170,9 +170,10 @@ and handler replies and keepalives went out too.
 
 - `src/server/session.rs`: `Session::flush` keeps everything in `enc.write`
   while a key exchange is active, except after a disconnect. If `enc.write`
-  passes 4 MiB during a key exchange, `flush` ends the connection with
-  `Error::Kex`, because a peer that never finishes the exchange could
-  otherwise grow it without limit with requests that want a reply.
+  passes the new `Config::max_write_during_kex`, 4 MiB by default, during a
+  key exchange, `flush` ends the connection with `Error::Kex`, because a
+  peer that never finishes the exchange could otherwise grow it without
+  limit with requests that want a reply.
 - `src/server/session.rs`: `Session::flush_pending` does nothing during a
   key exchange, because the exchange ends with `flush_all_pending`.
 - `src/session.rs`: `Encrypted::data` and `extended_data` queue during a key

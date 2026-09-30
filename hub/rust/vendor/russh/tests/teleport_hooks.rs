@@ -474,7 +474,11 @@ async fn repeated_open_confirmation_disconnects() {
 
 #[tokio::test]
 async fn stalled_key_exchange_disconnects() {
-    let r = run_with(ed25519_config(), &["kex-stall"], |_| async {}).await;
+    let config = server::Config {
+        max_write_during_kex: 64 << 10,
+        ..ed25519_config()
+    };
+    let r = run_with(config, &["kex-stall"], |_| async {}).await;
     assert_eq!(r.stdout, "disconnected=true\n");
 }
 

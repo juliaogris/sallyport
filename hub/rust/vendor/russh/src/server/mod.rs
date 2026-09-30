@@ -104,6 +104,10 @@ pub struct Config {
     pub keepalive_max: usize,
     /// If active, invoke `set_nodelay(true)` on client sockets; disabled by default (i.e. Nagle's algorithm is active).
     pub nodelay: bool,
+    /// sallyport: the most bytes of outgoing packets that `Session::flush`
+    /// keeps while a key exchange is active. Above it, the connection ends
+    /// with `Error::Kex`. The default is 4 MiB.
+    pub max_write_during_kex: usize,
 }
 
 impl Default for Config {
@@ -130,6 +134,7 @@ impl Default for Config {
             keepalive_interval: None,
             keepalive_max: 3,
             nodelay: false,
+            max_write_during_kex: 4 << 20,
         }
     }
 }
@@ -166,6 +171,7 @@ impl Debug for Config {
             .field("inactivity_timeout", &self.inactivity_timeout)
             .field("keepalive_interval", &self.keepalive_interval)
             .field("keepalive_max", &self.keepalive_max)
+            .field("max_write_during_kex", &self.max_write_during_kex)
             .finish()
     }
 }
