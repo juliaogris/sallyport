@@ -54,50 +54,61 @@ const MAX_BODY: usize = 64 * 1024;
 /// session's public address, `AppPublicAddrASN1ExtensionOID`.
 const APP_PUBLIC_ADDR_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.9999.1.6");
 
-/// How many `begin` calls one client address may make at once, and how
-/// often it gets one more. Each call spends auth's login rate limit for the
-/// hub's one address, which is a burst of 40 and then 20 a minute.
-const BEGIN_BURST: f64 = 10.0;
-const BEGIN_REFILL_MS: f64 = 6_000.0;
-/// How many client addresses [`BeginLimit`] tracks.
-const BEGIN_CLIENTS: usize = 4096;
+/// How many `begin` calls, and separately how many `finish` calls, one
+/// client address may make at once, and how often it gets one more. Each
+/// call spends auth's login rate limit for the hub's one address, which is
+/// a burst of 40 and then 20 a minute.
+const RATE_BURST: f64 = 10.0;
+const RATE_REFILL_MS: f64 = 6_000.0;
+/// How many client addresses [`RateLimit`] tracks.
+const RATE_CLIENTS: usize = 4096;
 
 thread_local! {
-    static BEGIN_LIMIT: RefCell<BeginLimit> = RefCell::new(BeginLimit::default());
-    static FINISH_LIMIT: RefCell<BeginLimit> = RefCell::new(BeginLimit::default());
+    static BEGIN_LIMIT: RefCell<RateLimit> = RefCell::new(RateLimit::default());
+    static FINISH_LIMIT: RefCell<RateLimit> = RefCell::new(RateLimit::default());
 }
 
 /// A token bucket per client address for the `begin` and `finish` calls of
 /// login and invite.
 #[derive(Default)]
-struct BeginLimit {
-    /// The tokens left and the time they were counted, in ms, per address.
-    buckets: HashMap<String, (f64, u64)>,
+struct RateLimit {
+    buckets: HashMap<String, Bucket>,
 }
 
-impl BeginLimit {
+/// The tokens one client address has left.
+#[derive(Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    /// When `tokens` was counted, in ms.
+    at_ms: u64,
+}
+
+impl RateLimit {
     /// Takes one token for `client` at `now_ms`, and returns false when
     /// there is none. It also returns false for a new address when
-    /// [`BEGIN_CLIENTS`] addresses have tokens missing.
+    /// [`RATE_CLIENTS`] addresses have tokens missing.
     fn allow(&mut self, client: &str, now_ms: u64) -> bool {
-        let refill = |(tokens, at): (f64, u64)| {
-            (tokens + now_ms.saturating_sub(at) as f64 / BEGIN_REFILL_MS).min(BEGIN_BURST)
+        let refill = |b: Bucket| {
+            (b.tokens + now_ms.saturating_sub(b.at_ms) as f64 / RATE_REFILL_MS).min(RATE_BURST)
         };
-        if !self.buckets.contains_key(client) && self.buckets.len() >= BEGIN_CLIENTS {
-            self.buckets.retain(|_, b| refill(*b) < BEGIN_BURST);
-            if self.buckets.len() >= BEGIN_CLIENTS {
+        if !self.buckets.contains_key(client) && self.buckets.len() >= RATE_CLIENTS {
+            self.buckets.retain(|_, b| refill(*b) < RATE_BURST);
+            if self.buckets.len() >= RATE_CLIENTS {
                 return false;
             }
         }
-        let bucket = self
-            .buckets
-            .entry(client.to_string())
-            .or_insert((BEGIN_BURST, now_ms));
+        let bucket = self.buckets.entry(client.to_string()).or_insert(Bucket {
+            tokens: RATE_BURST,
+            at_ms: now_ms,
+        });
         let tokens = refill(*bucket);
         if tokens < 1.0 {
             return false;
         }
-        *bucket = (tokens - 1.0, now_ms);
+        *bucket = Bucket {
+            tokens: tokens - 1.0,
+            at_ms: now_ms,
+        };
         true
     }
 }
@@ -1304,8 +1315,8 @@ mod tests {
     }
 
     #[test]
-    fn begin_limit_refills() {
-        let mut l = BeginLimit::default();
+    fn rate_limit_refills() {
+        let mut l = RateLimit::default();
         for _ in 0..10 {
             assert!(l.allow("a", 0));
         }
@@ -1321,9 +1332,9 @@ mod tests {
     }
 
     #[test]
-    fn begin_limit_caps_clients() {
-        let mut l = BeginLimit::default();
-        for i in 0..BEGIN_CLIENTS {
+    fn rate_limit_caps_clients() {
+        let mut l = RateLimit::default();
+        for i in 0..RATE_CLIENTS {
             assert!(l.allow(&i.to_string(), 0));
         }
         assert!(!l.allow("new", 0));
