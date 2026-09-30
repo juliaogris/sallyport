@@ -64,6 +64,12 @@ pub enum Host {
 /// App names match `^[a-z][a-z0-9]*$`, so `<app>-<owner>` splits once.
 pub fn classify(env: &Env, host: &str) -> Option<Host> {
     let (owner, domain) = owner_domain(env)?;
+    classify_host(&owner, &domain, host)
+}
+
+/// Returns the host kind for `host` under `owner` and `domain`, as
+/// [`classify`] does.
+fn classify_host(owner: &str, domain: &str, host: &str) -> Option<Host> {
     let label = host.strip_suffix(&format!(".{domain}"))?;
     if label == owner {
         return Some(Host::Login);
@@ -580,25 +586,38 @@ async fn read_body(req: &mut Request) -> Result<Option<Vec<u8>>> {
 }
 
 fn same_origin(req: &Request, host: &str) -> Result<bool> {
-    Ok(req.headers().get("Origin")?.as_deref() == Some(format!("https://{host}").as_str()))
+    Ok(origin_is(req.headers().get("Origin")?.as_deref(), host))
+}
+
+/// Returns true when `origin` is `https://<host>`.
+fn origin_is(origin: Option<&str>, host: &str) -> bool {
+    origin == Some(format!("https://{host}").as_str())
 }
 
 /// Returns false when the browser says the request came from another
 /// origin. A request with neither `Sec-Fetch-Site` nor `Origin` is not from
 /// a browser page and passes.
 fn same_origin_fetch(req: &Request, host: &str) -> Result<bool> {
-    if let Some(site) = req.headers().get("Sec-Fetch-Site")? {
-        return Ok(site == "same-origin" || site == "none");
-    }
-    match req.headers().get("Origin")? {
-        Some(origin) => Ok(origin == format!("https://{host}")),
-        None => Ok(true),
+    Ok(fetch_is_same_origin(req.headers().get("Sec-Fetch-Site")?.as_deref(), req.headers().get("Origin")?.as_deref(), host))
+}
+
+/// Returns the [`same_origin_fetch`] answer for the `Sec-Fetch-Site` and
+/// `Origin` header values.
+fn fetch_is_same_origin(site: Option<&str>, origin: Option<&str>, host: &str) -> bool {
+    match (site, origin) {
+        (Some(site), _) => site == "same-origin" || site == "none",
+        (None, Some(_)) => origin_is(origin, host),
+        (None, None) => true,
     }
 }
 
 fn cookie(req: &Request, name: &str) -> Result<Option<String>> {
-    let header = req.headers().get("Cookie")?.unwrap_or_default();
-    Ok(header.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v.to_string()))
+    Ok(cookie_value(&req.headers().get("Cookie")?.unwrap_or_default(), name).map(str::to_string))
+}
+
+/// Returns the value of the cookie `name` in a `Cookie` header value.
+fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
 }
 
 fn set_cookie(name: &str, value: &str) -> String {
@@ -817,6 +836,94 @@ mod tests {
         ] {
             assert!(parse_credential(body).is_err(), "{:?}", String::from_utf8_lossy(body));
         }
+    }
+
+    #[test]
+    fn classify_host_cases() {
+        let kind = |host: &str| match classify_host("julia", "example.com", host) {
+            Some(Host::Login) => "login".to_string(),
+            Some(Host::App(app)) => format!("app {app}"),
+            None => "none".to_string(),
+        };
+        let long = format!("{}-julia.example.com", "a".repeat(31));
+        let max = format!("{}-julia.example.com", "a".repeat(30));
+        for (host, want) in [
+            ("julia.example.com", "login"),
+            ("bench-julia.example.com", "app bench"),
+            ("octo2-julia.example.com", "app octo2"),
+            (max.as_str(), "app aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("example.com", "none"),
+            ("evil.julia.example.com", "none"),
+            ("julia.example.com.evil", "none"),
+            ("bench-julia.example.com.evil", "none"),
+            ("foo-bar-julia.example.com", "none"),
+            ("Bench-julia.example.com", "none"),
+            ("2bench-julia.example.com", "none"),
+            ("-julia.example.com", "none"),
+            ("bench-bob.example.com", "none"),
+            (long.as_str(), "none"),
+        ] {
+            assert_eq!(kind(host), want, "{host}");
+        }
+    }
+
+    #[test]
+    fn origin_is_cases() {
+        assert!(origin_is(Some("https://julia.example.com"), "julia.example.com"));
+        assert!(!origin_is(None, "julia.example.com"));
+        assert!(!origin_is(Some("http://julia.example.com"), "julia.example.com"));
+        assert!(!origin_is(Some("https://bench-julia.example.com"), "julia.example.com"));
+        assert!(!origin_is(Some("https://julia.example.com:443"), "julia.example.com"));
+        assert!(!origin_is(Some("null"), "julia.example.com"));
+    }
+
+    #[test]
+    fn fetch_is_same_origin_cases() {
+        let host = "bench-julia.example.com";
+        let same = Some("https://bench-julia.example.com");
+        let sibling = Some("https://octo-julia.example.com");
+        for (site, origin, want) in [
+            (Some("same-origin"), None, true),
+            (Some("none"), None, true),
+            (Some("same-site"), same, false),
+            (Some("cross-site"), same, false),
+            (Some("same-origin"), sibling, true),
+            (None, same, true),
+            (None, sibling, false),
+            (None, None, true),
+        ] {
+            assert_eq!(fetch_is_same_origin(site, origin, host), want, "{site:?} {origin:?}");
+        }
+    }
+
+    #[test]
+    fn cookie_value_cases() {
+        let header = "a=1; __Host-sp_app2=x;__Host-sp_app=s1=; b";
+        assert_eq!(cookie_value(header, "__Host-sp_app"), Some("s1="));
+        assert_eq!(cookie_value(header, "__Host-sp_app2"), Some("x"));
+        assert_eq!(cookie_value(header, "a"), Some("1"));
+        assert_eq!(cookie_value(header, "b"), None);
+        assert_eq!(cookie_value(header, "__host-sp_app"), None);
+        assert_eq!(cookie_value("", "a"), None);
+    }
+
+    #[test]
+    fn ct_eq_cases() {
+        assert!(ct_eq(b"token", b"token"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"token", b"tokens"));
+        assert!(!ct_eq(b"token", b"tokem"));
+    }
+
+    #[test]
+    fn valid_name_cases() {
+        assert!(valid_name("a"));
+        assert!(valid_name("octo2"));
+        assert!(!valid_name(""));
+        assert!(!valid_name("2octo"));
+        assert!(!valid_name("oc-to"));
+        assert!(!valid_name("Octo"));
+        assert!(!valid_name(&"a".repeat(31)));
     }
 
     #[test]

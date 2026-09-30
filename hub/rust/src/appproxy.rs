@@ -295,3 +295,16 @@ impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_sp_cookies_cases() {
+        assert_eq!(strip_sp_cookies("__Host-sp_app=s; __Host-sp_subject=t"), None);
+        assert_eq!(strip_sp_cookies("a=1; __Host-sp_subject=t; b=2"), Some("a=1; b=2".into()));
+        assert_eq!(strip_sp_cookies("a=1;; ;b=2"), Some("a=1; b=2".into()));
+        assert_eq!(strip_sp_cookies(""), None);
+    }
+}
