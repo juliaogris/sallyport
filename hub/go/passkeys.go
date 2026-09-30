@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -40,18 +39,20 @@ import (
 // {"ok": true} when a finish or delete worked. Errors from auth are mapped
 // by [authError].
 //
-// The other device opens the link, with no session, and its page uses the
-// token as the invite page does:
+// The other device opens the link, with no session. The token is in the
+// URL fragment, so it reaches neither a request log nor a Referer, and the
+// page takes it out of the address bar and sends it in the body of each
+// POST:
 //
-//   - GET /web/add-passkey/<token> is the page.
-//   - POST /webapi/add-passkey/<token>/begin returns WebAuthn creation
-//     options for the token's user.
-//   - POST /webapi/add-passkey/<token>/finish takes {"name": ...,
+//   - GET /web/add-passkey is the page.
+//   - POST /webapi/add-passkey/begin takes {"token": ...} and returns
+//     WebAuthn creation options for the token's user.
+//   - POST /webapi/add-passkey/finish takes {"token": ..., "name": ...,
 //     "credential": ...} and adds the passkey.
 //
 // A token that does not have auth's form is refused before auth is asked:
-// 404 for the page, 403 "invalid token" for the POSTs, which is also
-// auth's answer for a token it does not know or that has expired.
+// 403 "invalid token", which is also auth's answer for a token it does not
+// know or that has expired.
 
 // clientStatus maps the gRPC codes of auth's client errors to HTTP:
 // InvalidArgument, NotFound, AlreadyExists, PermissionDenied and
@@ -290,37 +291,38 @@ func (h *hub) passkeyLink(cert tls.Certificate, body []byte) *response {
 	if token == nil {
 		return authError(errors.New("no privilege token"))
 	}
-	url := "https://" + h.cfg.loginHost() + "/web/add-passkey/" + token.id
+	url := "https://" + h.cfg.loginHost() + "/web/add-passkey#" + token.id
 	return jsonResponse(map[string]string{"url": url, "expires": token.expires.Format(time.RFC3339)})
 }
 
-// showAddPasskey serves the page for another device, or 404 for a token
-// that does not have auth's form.
-func (h *hub) showAddPasskey(token string) *response {
-	if !validTokenID(token) {
-		return textError("not found", 404)
-	}
-	return html(addPasskeyPage)
+// addPasskeyRequest is the body of the add-passkey routes. A begin has only
+// the token.
+type addPasskeyRequest struct {
+	Token      string     `json:"token"`
+	Name       string     `json:"name"`
+	Credential credential `json:"credential"`
 }
 
-// addPasskeyAPI answers the /webapi/add-passkey routes. rest is the path
-// after /webapi/add-passkey/, the token and the step.
-func (h *hub) addPasskeyAPI(req *request, rest string) *response {
-	token, step, ok := strings.Cut(rest, "/")
-	if !ok || (step != "begin" && step != "finish") {
-		return passkeyError("not found", 404)
+// parse reads body into the request. It answers 400 for a body that is not
+// JSON and 403 for a token that does not have auth's form, or nil.
+func (in *addPasskeyRequest) parse(body []byte) *response {
+	if err := json.Unmarshal(body, in); err != nil {
+		return passkeyError("bad request", 400)
 	}
-	if !validTokenID(token) {
+	if !validTokenID(in.Token) {
 		return passkeyError("invalid token", 403)
 	}
-	if step == "begin" {
-		return h.addPasskeyBegin(token)
-	}
-	return h.addPasskeyFinish(token, req.body)
+	return nil
 }
 
-func (h *hub) addPasskeyBegin(token string) *response {
-	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(token))
+// addPasskeyBegin returns WebAuthn creation options for the user of the
+// token in body.
+func (h *hub) addPasskeyBegin(body []byte) *response {
+	var in addPasskeyRequest
+	if refused := in.parse(body); refused != nil {
+		return refused
+	}
+	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(in.Token))
 	if err != nil {
 		return authError(err)
 	}
@@ -331,19 +333,18 @@ func (h *hub) addPasskeyBegin(token string) *response {
 	return jsonResponse(v)
 }
 
-func (h *hub) addPasskeyFinish(token string, body []byte) *response {
-	var in struct {
-		Name       string     `json:"name"`
-		Credential credential `json:"credential"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil {
-		return passkeyError("bad request", 400)
+// addPasskeyFinish adds the credential in body as a passkey of the user of
+// the token in body.
+func (h *hub) addPasskeyFinish(body []byte) *response {
+	var in addPasskeyRequest
+	if refused := in.parse(body); refused != nil {
+		return refused
 	}
 	cred, err := in.Credential.proto()
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
-	_, err = h.auth.call(addMFADeviceSync, addMFADeviceWithTokenRequest(token, in.Name, cred))
+	_, err = h.auth.call(addMFADeviceSync, addMFADeviceWithTokenRequest(in.Token, in.Name, cred))
 	if err != nil {
 		return authError(err)
 	}

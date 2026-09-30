@@ -272,7 +272,7 @@ func TestPasskeyLink(t *testing.T) {
 	t.Run("link", func(t *testing.T) {
 		before := time.Now()
 		url, expires := s.passkeyLink(t, session)
-		require.True(t, strings.HasPrefix(url, "https://"+LoginHost+"/web/add-passkey/"), "url %q", url)
+		require.True(t, strings.HasPrefix(url, "https://"+LoginHost+"/web/add-passkey#"), "url %q", url)
 		token = tokenOf(url)
 		require.Len(t, token, 32)
 		require.Regexp(t, "^[0-9a-f]+$", token)
@@ -284,16 +284,19 @@ func TestPasskeyLink(t *testing.T) {
 	})
 
 	t.Run("page", func(t *testing.T) {
-		resp := s.get(t, LoginHost, "/web/add-passkey/"+token)
+		resp := s.get(t, LoginHost, "/web/add-passkey")
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Contains(t, resp.Header.Get("Content-Type"), "text/html")
-		require.Contains(t, string(body), "/webapi/add-passkey/")
+		require.Contains(t, string(body), `<meta name="referrer" content="no-referrer">`)
+		require.Contains(t, string(body), "location.hash")
+		require.Contains(t, string(body), "history.replaceState")
+		require.Contains(t, string(body), "/webapi/add-passkey/begin")
 		require.Contains(t, string(body), "Add a passkey")
 	})
 
 	t.Run("add without a session", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "begin"), origin(LoginHost), "")
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 		require.JSONEq(t, `{
@@ -307,7 +310,7 @@ func TestPasskeyLink(t *testing.T) {
 			"authenticatorSelection": {"requireResidentKey": true, "residentKey": "required", "userVerification": "required"}
 		}`, string(body))
 
-		resp = s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), passkeyCredential("phone", "cred-alice-phone"))
+		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "phone", "cred-alice-phone"))
 		body = readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 		require.JSONEq(t, `{"ok": true}`, string(body))
@@ -331,20 +334,20 @@ func TestPasskeyLink(t *testing.T) {
 	// Auth keeps a privilege token until it expires, so the same link adds
 	// a second passkey.
 	t.Run("second use of the token", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "begin"), origin(LoginHost), "")
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		resp = s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), passkeyCredential("tablet", "cred-alice-tablet"))
+		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "tablet", "cred-alice-tablet"))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 		require.Len(t, s.auth.Devices(Alice), 3)
 	})
 
 	t.Run("used name", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "begin"), origin(LoginHost), "")
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		resp = s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), passkeyCredential("phone", "cred-alice-4"))
+		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "phone", "cred-alice-4"))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
 		require.Equal(t, `MFA device with name "phone" already exists`, string(body))
@@ -357,7 +360,7 @@ func TestPasskeyLink(t *testing.T) {
 		url, _ := s.passkeyLink(t, session)
 		token = tokenOf(url)
 		require.NotEqual(t, old, token)
-		resp := s.post(t, LoginHost, addPasskeyPath(old, "begin"), origin(LoginHost), "")
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(old))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
 		require.Equal(t, "invalid token", string(body))
@@ -365,11 +368,11 @@ func TestPasskeyLink(t *testing.T) {
 
 	t.Run("expired token", func(t *testing.T) {
 		s.auth.ExpireUserTokens()
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "begin"), origin(LoginHost), "")
+		resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(token))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
 		require.Equal(t, "invalid token", string(body))
-		resp = s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), passkeyCredential("watch", "cred-alice-5"))
+		resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(token, "watch", "cred-alice-5"))
 		body = readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode, "body %s", body)
 		require.Equal(t, "invalid token", string(body))
@@ -378,14 +381,15 @@ func TestPasskeyLink(t *testing.T) {
 
 	t.Run("malformed token", func(t *testing.T) {
 		before := len(s.auth.Calls())
-		for _, bad := range []string{"tok-bob", strings.Repeat("a", 31), strings.Repeat("A", 32), strings.Repeat("a", 33)} {
-			resp := s.post(t, LoginHost, addPasskeyPath(bad, "begin"), origin(LoginHost), "")
+		for _, bad := range []string{"", "tok-bob", strings.Repeat("a", 31), strings.Repeat("A", 32), strings.Repeat("a", 33)} {
+			resp := s.post(t, LoginHost, addPasskeyBegin, origin(LoginHost), addPasskeyToken(bad))
 			body := readBody(t, resp)
-			require.Equal(t, http.StatusForbidden, resp.StatusCode, "%s: body %s", bad, body)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, "%q: body %s", bad, body)
 			require.Equal(t, "invalid token", string(body))
-			resp = s.get(t, LoginHost, "/web/add-passkey/"+bad)
-			readBody(t, resp)
-			require.Equal(t, http.StatusNotFound, resp.StatusCode, bad)
+			resp = s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), addPasskeyCredential(bad, "watch", "cred-alice-5"))
+			body = readBody(t, resp)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, "%q: body %s", bad, body)
+			require.Equal(t, "invalid token", string(body))
 		}
 		require.Len(t, s.auth.Calls(), before, "auth asked about a malformed token")
 	})
@@ -406,7 +410,7 @@ func TestPasskeyLink(t *testing.T) {
 	})
 
 	t.Run("other origin", func(t *testing.T) {
-		for _, path := range []string{"/webapi/passkeys/link", addPasskeyPath(token, "begin"), addPasskeyPath(token, "finish")} {
+		for _, path := range []string{"/webapi/passkeys/link", addPasskeyBegin, addPasskeyFinish} {
 			for _, o := range []string{"", "https://other.test", origin(appHost("bench"))} {
 				resp := s.post(t, LoginHost, path, o, "{}", session)
 				readBody(t, resp)
@@ -416,32 +420,39 @@ func TestPasskeyLink(t *testing.T) {
 	})
 
 	t.Run("bad body", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/webapi/passkeys/link", origin(LoginHost), "not json", session)
-		readBody(t, resp)
-		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-		resp = s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), "not json")
-		readBody(t, resp)
-		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		for _, path := range []string{"/webapi/passkeys/link", addPasskeyBegin, addPasskeyFinish} {
+			resp := s.post(t, LoginHost, path, origin(LoginHost), "not json", session)
+			readBody(t, resp)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, path)
+		}
 	})
 
 	t.Run("body too large", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "finish"), origin(LoginHost), strings.Repeat("x", bodyLimit+1))
+		resp := s.post(t, LoginHost, addPasskeyFinish, origin(LoginHost), strings.Repeat("x", bodyLimit+1))
 		readBody(t, resp)
 		require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		resp := s.post(t, LoginHost, addPasskeyPath(token, "nope"), origin(LoginHost), "")
-		readBody(t, resp)
-		require.Equal(t, http.StatusNotFound, resp.StatusCode)
-		resp = s.post(t, LoginHost, "/webapi/add-passkey/"+token, origin(LoginHost), "")
-		readBody(t, resp)
-		require.Equal(t, http.StatusNotFound, resp.StatusCode)
-		resp = s.get(t, LoginHost, addPasskeyPath(token, "begin"))
-		readBody(t, resp)
-		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		for _, path := range []string{"/webapi/add-passkey/nope", "/webapi/add-passkey", "/webapi/add-passkey/" + token + "/begin"} {
+			resp := s.post(t, LoginHost, path, origin(LoginHost), addPasskeyToken(token))
+			readBody(t, resp)
+			require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+		}
+		for _, path := range []string{addPasskeyBegin, "/web/add-passkey/" + token} {
+			resp := s.get(t, LoginHost, path)
+			readBody(t, resp)
+			require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+		}
 	})
 }
+
+// addPasskeyBegin and addPasskeyFinish are the routes of the other device.
+// The token is in the body, not the path.
+const (
+	addPasskeyBegin  = "/webapi/add-passkey/begin"
+	addPasskeyFinish = "/webapi/add-passkey/finish"
+)
 
 // passkeyPosts are the POST routes for managing passkeys.
 var passkeyPosts = []string{"/webapi/passkeys/challenge", "/webapi/passkeys/begin", "/webapi/passkeys/finish", "/webapi/passkeys/delete", "/webapi/passkeys/link"}
@@ -510,19 +521,35 @@ func passkeyAssertion(credID string, challenge []byte) string {
 // passkeyCredential is the body of a finish: the name and the browser's new
 // credential with ID credID.
 func passkeyCredential(name, credID string) string {
-	b64 := base64.RawURLEncoding.EncodeToString
-	v, _ := json.Marshal(map[string]any{
-		"name": name,
-		"credential": map[string]any{
-			"type":  "public-key",
-			"rawId": b64([]byte(credID)),
-			"response": map[string]string{
-				"clientDataJSON":    b64([]byte(`{"type":"webauthn.create"}`)),
-				"attestationObject": b64([]byte("attestation")),
-			},
-		},
-	})
+	v, _ := json.Marshal(map[string]any{"name": name, "credential": newCredential(credID)})
 	return string(v)
+}
+
+// addPasskeyToken is the body of a begin on the other device.
+func addPasskeyToken(token string) string {
+	v, _ := json.Marshal(map[string]string{"token": token})
+	return string(v)
+}
+
+// addPasskeyCredential is the body of a finish on the other device: the
+// token, the name and the browser's new credential with ID credID.
+func addPasskeyCredential(token, name, credID string) string {
+	v, _ := json.Marshal(map[string]any{"token": token, "name": name, "credential": newCredential(credID)})
+	return string(v)
+}
+
+// newCredential is the browser's new credential with ID credID, as the
+// pages send it.
+func newCredential(credID string) map[string]any {
+	b64 := base64.RawURLEncoding.EncodeToString
+	return map[string]any{
+		"type":  "public-key",
+		"rawId": b64([]byte(credID)),
+		"response": map[string]string{
+			"clientDataJSON":    b64([]byte(`{"type":"webauthn.create"}`)),
+			"attestationObject": b64([]byte("attestation")),
+		},
+	}
 }
 
 // passkeyDelete is the body of a delete: the name and a fresh answer.
@@ -567,14 +594,10 @@ func (s *stack) passkeyLink(t *testing.T, session *http.Cookie) (string, time.Ti
 	return link.URL, expires
 }
 
-// tokenOf returns the token of an add-passkey link.
+// tokenOf returns the token of an add-passkey link, its fragment.
 func tokenOf(url string) string {
-	return url[strings.LastIndex(url, "/")+1:]
-}
-
-// addPasskeyPath is the route of step on the other device, with the token.
-func addPasskeyPath(token, step string) string {
-	return "/webapi/add-passkey/" + token + "/" + step
+	_, token, _ := strings.Cut(url, "#")
+	return token
 }
 
 // passkeyList returns the names and addedAt values from the list route.

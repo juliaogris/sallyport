@@ -26,8 +26,8 @@ func TestPageQR(t *testing.T) {
 		size       int
 	}{
 		{"short", "hello", 21},
-		{"go link", "https://go.example.com/web/add-passkey/" + token, 37},
-		{"edge link", "https://julia.example.com/web/add-passkey/" + token, 37},
+		{"go link", "https://go.example.com/web/add-passkey#" + token, 37},
+		{"edge link", "https://julia.example.com/web/add-passkey#" + token, 37},
 		{"four blocks", strings.Repeat("sallyport ", 10), 41},
 		{"longest", strings.Repeat("x", 106), 41},
 	}
@@ -80,7 +80,7 @@ func TestDecodeQRAgainstQrencode(t *testing.T) {
 	if err != nil {
 		t.Skip("qrencode not installed")
 	}
-	texts := []string{"hello", "https://go.example.com/web/add-passkey/0123456789abcdef0123456789abcdef", strings.Repeat("sallyport ", 10)}
+	texts := []string{"hello", "https://go.example.com/web/add-passkey#0123456789abcdef0123456789abcdef", strings.Repeat("sallyport ", 10)}
 	for _, text := range texts {
 		out, err := exec.CommandContext(t.Context(), qrencode, "-8", "-l", "M", "-m", "0", "-t", "ASCII", "-o", "-", text).Output()
 		if err != nil {

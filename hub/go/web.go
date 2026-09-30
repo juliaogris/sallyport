@@ -74,10 +74,12 @@ func (h *hub) loginHostRequest(req *request) *response {
 		return h.showPasskeys(req)
 	case p == "/webapi/passkeys" || strings.HasPrefix(p, "/webapi/passkeys/"):
 		return h.passkeyAPI(req, strings.TrimPrefix(strings.TrimPrefix(p, "/webapi/passkeys"), "/"))
-	case req.method == "GET" && strings.HasPrefix(p, "/web/add-passkey/"):
-		return h.showAddPasskey(strings.TrimPrefix(p, "/web/add-passkey/"))
-	case req.method == "POST" && strings.HasPrefix(p, "/webapi/add-passkey/"):
-		return h.addPasskeyAPI(req, strings.TrimPrefix(p, "/webapi/add-passkey/"))
+	case req.method == "GET" && p == "/web/add-passkey":
+		return html(addPasskeyPage)
+	case req.method == "POST" && p == "/webapi/add-passkey/begin":
+		return h.addPasskeyBegin(req.body)
+	case req.method == "POST" && p == "/webapi/add-passkey/finish":
+		return h.addPasskeyFinish(req.body)
 	default:
 		return textError("not found", 404)
 	}
