@@ -365,7 +365,8 @@ func sessionResponse(user, sid string, err error) *response {
 }
 
 // sessionCert returns the web session's user certificate, for calls to
-// auth as the user.
+// auth as the user. Auth sets tlsPriv only when it issues separate SSH and
+// TLS keys. Otherwise privKey is both.
 func (h *hub) sessionCert(s *webSession) (tls.Certificate, error) {
 	key := s.tlsPriv
 	if len(key) == 0 {

@@ -204,9 +204,10 @@ func (h *hub) passkeyFinish(cert tls.Certificate, body []byte) *response {
 	return jsonResponse(map[string]bool{"ok": true})
 }
 
-// passkeyDelete removes a passkey after a fresh challenge answer. It counts
-// the user's devices first and refuses to remove the last one, before the
-// answer reaches auth.
+// passkeyDelete removes a passkey after a fresh challenge answer. It lists
+// the user's passkeys first and refuses to remove the last one, before the
+// answer reaches auth. Auth allows that when the user has a password, and
+// the hub has no password login.
 func (h *hub) passkeyDelete(cert tls.Certificate, body []byte) *response {
 	var in struct {
 		Name      string    `json:"name"`
