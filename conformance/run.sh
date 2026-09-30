@@ -17,11 +17,11 @@ fi
 build() {
 	case "$1" in
 	go)
-		NO_OPT=1 "$root/go/hub/build.sh" >/dev/null
+		NO_OPT=1 "$root/hub/go/build.sh" >/dev/null
 		;;
 	rust)
 		(
-			cd "$root/rust/hub"
+			cd "$root/hub/rust"
 			CC_wasm32_unknown_unknown="${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang}" \
 				AR_wasm32_unknown_unknown="${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar}" \
 				RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \

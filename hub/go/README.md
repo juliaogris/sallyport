@@ -46,7 +46,7 @@ test cluster on homesrv needs no change when the Worker changes language.
 Deploy the Rust hub's `go` env again from the Rust hub's directory:
 
 ```
-cd rust/hub && npx wrangler@4 deploy --env go
+cd hub/rust && npx wrangler@4 deploy --env go
 ```
 
 The secrets stay, because they belong to the Worker, not to the code. A

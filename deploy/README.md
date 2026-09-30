@@ -6,7 +6,7 @@ Three users log in with passkeys: Julia, alice and `julia-teleport`.
 
 ## What runs where
 
-- **Cloudflare:** `cd rust/hub && npx wrangler@4 deploy --env edge`. The `edge`
+- **Cloudflare:** `cd hub/rust && npx wrangler@4 deploy --env edge`. The `edge`
   env serves `julia.example.com` (login host) and the app hosts
   `bench-julia.example.com`, `octo-julia.example.com` and
   `octocam-julia.example.com`. The edge build leaves out the `spikes` Cargo
@@ -34,13 +34,13 @@ the keepalive when it starts, so restart it after changing auth's value.
   core's, so never push core history to the fork.
 - **`base64ct` 1.6.0 bug.** It rejects some valid OpenSSH private keys
   with `InvalidLength`. The hub identity minted for `julia.example.com` hit
-  it. See `rust/vendor/russh/PATCHES.md`.
+  it. See `hub/rust/vendor/russh/PATCHES.md`.
 - **Stall at 14:09.** Discovery to the agent and auth passthroughs stopped
   while pages still loaded, until a redeploy. russh adjusts the window
   when data arrives and then waits for the channel's queue, so a reader
   that stops reading blocks the session loop and every other channel.
   The patched russh closes that channel instead, and
-  `rust/vendor/russh/tests/test_backpressure.rs` fails on the old code and
+  `hub/rust/vendor/russh/tests/test_backpressure.rs` fails on the old code and
   passes on the new. The hub queues up to 256 messages per channel.
 - **OctoPrint.** `octo` is back on the dashboard without WebSocket
   forwarding. OctoPrint asks for its own login. Its SockJS client should

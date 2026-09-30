@@ -1,4 +1,4 @@
-module github.com/juliaogris/sallyport/go/hub/devtools
+module github.com/juliaogris/sallyport/devtools
 
 go 1.26.1
 

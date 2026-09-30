@@ -32,3 +32,17 @@ http-body-util = "0.1"
 prost = "0.13"
 console_error_panic_hook = "0.1"
 russh = { version = "0.54.5", default-features = false, features = ["ring"] }
+
+# The hub is its own workspace, so the vendored crates are patched in here.
+[workspace]
+resolver = "2"
+exclude = ["vendor"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+
+[patch.crates-io]
+russh = { path = "vendor/russh" }
+internal-russh-forked-ssh-key = { path = "vendor/ssh-key" }

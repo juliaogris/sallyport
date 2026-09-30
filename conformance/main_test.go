@@ -10,7 +10,7 @@ import (
 )
 
 // The hub under test. SP_HUB is go or rust. SP_HUB_DIR is the hub's
-// directory, by default ../go/hub or ../rust/hub.
+// directory, by default ../hub/go or ../hub/rust.
 var (
 	hubKind = os.Getenv("SP_HUB")
 	hubDir  = os.Getenv("SP_HUB_DIR")
@@ -34,7 +34,7 @@ func run(m *testing.M) int {
 		return 2
 	}
 	if hubDir == "" {
-		hubDir = filepath.Join("..", hubKind, "hub")
+		hubDir = filepath.Join("..", "hub", hubKind)
 	}
 	abs, err := filepath.Abs(hubDir)
 	if err != nil {

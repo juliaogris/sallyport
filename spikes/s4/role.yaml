@@ -1,9 +1,0 @@
-# S4 spike: the test user's role. It can reach apps labelled for the spike.
-kind: role
-version: v7
-metadata:
-  name: s4-apps
-spec:
-  allow:
-    app_labels:
-      sallyport-spike: s4

@@ -1,4 +1,4 @@
-module github.com/juliaogris/sallyport/go/hub
+module github.com/juliaogris/sallyport/hub/go
 
 go 1.26.1
 
