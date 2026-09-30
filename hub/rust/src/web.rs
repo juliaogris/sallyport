@@ -591,7 +591,8 @@ async fn create_app_session(
             app_name: app.to_string(),
         },
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
     let sid = created
         .session
         .and_then(|s| s.metadata)
@@ -607,7 +608,8 @@ async fn create_app_session(
                 session_id: sid.clone(),
             },
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
     let bearer = got
         .session
         .and_then(|s| s.spec)
@@ -740,7 +742,8 @@ async fn invite_finish(
                 new_device_name: "passkey".into(),
             },
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
     let ws = changed.web_session.ok_or("no web session")?;
     let sid = ws.metadata.map(|m| m.name).ok_or("no web session name")?;
     let user = ws.spec.map(|s| s.user).ok_or("no web session user")?;

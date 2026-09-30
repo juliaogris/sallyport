@@ -441,12 +441,6 @@ impl From<&str> for CallError {
     }
 }
 
-impl From<CallError> for String {
-    fn from(err: CallError) -> Self {
-        err.to_string()
-    }
-}
-
 /// Makes one unary call within [`CALL_DEADLINE`].
 pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(
     send: &SendRequest<Bytes>,
