@@ -36,8 +36,9 @@ const CHALLENGE_DEADLINE: Duration = Duration::from_secs(10);
 /// Auth opens 8 by default. Above this, a newly verified stream closes the
 /// oldest waiting one.
 const MAX_STREAMS: usize = 8;
-/// Verified WebSockets the hub accepts. Only streams in use can take the
-/// hub above [`MAX_STREAMS`], because [`Pool::push`] closes waiting ones.
+/// Verified WebSockets, waiting or in use, above which [`accept`] answers
+/// 503. Only streams in use can take the count above [`MAX_STREAMS`],
+/// because [`Pool::push`] closes waiting ones.
 const MAX_ACCEPTED: usize = 2 * MAX_STREAMS;
 /// WebSockets in the challenge. Auth opens all its streams at once, so this
 /// is twice [`MAX_STREAMS`], which leaves room for a few other sockets
@@ -178,7 +179,9 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
         .unverified
         .admit(MAX_UNVERIFIED, &crate::tunnel::client_key(req)?);
     if evicted_other {
-        console_log!("tunnel/auth: {MAX_UNVERIFIED} sockets in the challenge, closed the oldest");
+        console_log!(
+            "tunnel/auth: {MAX_UNVERIFIED} sockets in the challenge, closed the busiest client's oldest"
+        );
     }
     let pool = pool.clone();
     wasm_bindgen_futures::spawn_local(async move {

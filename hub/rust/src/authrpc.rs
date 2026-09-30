@@ -665,9 +665,9 @@ impl HubAuth {
         let mut cached = self.cached.lock().await;
         if let Some(send) = cached.send.clone() {
             // `ready` waits when the connection is at its stream limit, so
-            // it is only polled once here. A closed connection fails at
-            // once. A connection that is open but stalled fails in the call,
-            // and the call asks for a new one.
+            // it is polled once. A closed connection fails at once. A
+            // connection that is open but stalled fails in the call, and
+            // the call asks for a new one.
             let closed = matches!(send.clone().ready().now_or_never(), Some(Err(_)));
             if broken != Some(cached.generation) && !closed {
                 return Ok((cached.generation, send));

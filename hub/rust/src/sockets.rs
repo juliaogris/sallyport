@@ -15,6 +15,11 @@
 //! and the call traps again. So the socket list also keeps each socket's
 //! listeners, which [`close_all`] removes before it closes the socket, and
 //! [`sleep`] keeps its timer IDs in a list that [`clear_timers`] clears.
+//!
+//! [`close_all`] and [`clear_timers`] clear the lists of every earlier
+//! object in the isolate. The hub has one Durable Object ID, and the runtime
+//! runs at most one object per ID, so no live object loses its sockets or
+//! timers.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -139,7 +144,7 @@ pub fn clear_timers() -> u32 {
     n
 }
 
-/// Returns a future that resolves after `d`. It is `worker::Delay` with
+/// Returns a future that resolves after `d`, like `worker::Delay`, with
 /// its timer ID kept in the list that [`clear_timers`] clears.
 pub fn sleep(d: Duration) -> Sleep {
     Sleep {

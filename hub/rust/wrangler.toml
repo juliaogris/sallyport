@@ -53,8 +53,8 @@ class_name = "Hub"
 # Two test clusters on homesrv that compare hubs, with nothing else different:
 # `wrangler deploy --env rust` and `--env go`. Each env is its own Worker,
 # with its own Durable Object namespace and secrets. Both build the Rust
-# hub here. `--env go` from this directory replaces the Go hub deployed
-# from `hub/go/wrangler.toml`.
+# hub. `--env go` from this directory replaces the Go hub that
+# `hub/go/wrangler.toml` deploys.
 [env.rust]
 routes = [
   { pattern = "rust.example.com", custom_domain = true },

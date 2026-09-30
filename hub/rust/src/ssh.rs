@@ -48,7 +48,8 @@ const MAX_AGENT_CHANNELS: usize = 32;
 /// Transport channels one connection may hold before their dial request.
 const MAX_PENDING_TRANSPORTS: usize = 16;
 /// How long an agent-opened transport channel may wait for its dial, and
-/// how long the hub waits for the agent to open and dial a channel.
+/// how long the hub's own dial into the agent may take, from the channel
+/// open to the end of the TLS handshake.
 pub const DIAL_DEADLINE: Duration = Duration::from_secs(10);
 /// Passthroughs to auth per connection, and across the Durable Object. Each
 /// one holds an auth pipe stream, so the total stays under the pool size to
@@ -68,8 +69,8 @@ static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 pub struct AppTunnel {
     pub handle: Handle,
     pub server_id: String,
-    /// The ID of the connection, so that it clears the slot only while the
-    /// slot still holds it.
+    /// The ID of the connection, so that its end clears the slot only while
+    /// the slot still holds this tunnel and not a newer connection's.
     conn: u64,
     /// Streams to the app service open on this connection, for
     /// [`crate::app::MAX_FORWARDS`].

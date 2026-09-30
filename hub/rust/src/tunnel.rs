@@ -41,8 +41,9 @@ const AUTH_DEADLINE: Duration = Duration::from_secs(30);
 /// about three: its auth client, its tunnel, and a short-lived probe.
 const MAX_CONNECTIONS: usize = 16;
 /// Tunnels that have not authenticated, which do not count toward
-/// [`MAX_CONNECTIONS`]. A new one above this closes the oldest, so clients
-/// that never authenticate cannot keep a redialing agent out.
+/// [`MAX_CONNECTIONS`]. A new one above this closes the oldest tunnel of
+/// the client address with the most waiting, so clients that never
+/// authenticate cannot keep a redialing agent out.
 const MAX_UNAUTHENTICATED: usize = 8;
 /// Messages queued per SSH channel before the channel is closed.
 const CHANNEL_BUFFER: usize = 256;
@@ -52,7 +53,8 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 #[durable_object]
 pub struct Hub {
     env: Env,
-    /// Open tunnels, for [`MAX_CONNECTIONS`]. The object is single-threaded.
+    /// Open tunnels, authenticated or not. Those not in `unauthenticated`
+    /// count toward [`MAX_CONNECTIONS`]. The object is single-threaded.
     connections: Rc<Cell<usize>>,
     /// The open tunnels that have not authenticated.
     unauthenticated: Pending,
@@ -133,7 +135,7 @@ impl DurableObject for Hub {
 
         // A stock agent sends no `Origin`, and a browser always sends one.
         // Refusing it keeps web pages from using their visitors to fill the
-        // slots below.
+        // connection slots.
         if req.headers().get("Origin")?.is_some() {
             return Response::error("origin not allowed", 403);
         }
@@ -166,7 +168,7 @@ impl DurableObject for Hub {
             .admit(MAX_UNAUTHENTICATED, &client_key(&req)?);
         if evicted_other {
             console_log!(
-                "tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the oldest"
+                "tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the busiest client's oldest"
             );
         }
         let (ws_side, tls_side) = tokio::io::duplex(PIPE_BYTES);
@@ -485,6 +487,7 @@ impl Pending {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().unwrap();
         let mut evicted_other = false;
+        // With a cap of 0 the loop would never end.
         while inner.queue.len() >= cap.max(1) {
             let mut counts: HashMap<&str, usize> = HashMap::new();
             *counts.entry(client).or_default() += 1;
