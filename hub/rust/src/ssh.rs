@@ -11,11 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::channel::oneshot;
 use futures::future::{select, Either};
 use russh::keys::ssh_key::certificate::CertType;
 use russh::keys::ssh_key::{Certificate, PublicKey};
 use russh::server::{Auth, Handle, Msg, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, ChannelMsg};
 use tokio::io::DuplexStream;
 use worker::*;
 
@@ -112,8 +113,10 @@ pub struct AgentHandler {
     proxy_name: String,
     /// The channels the agent opened and has not closed.
     agent_channels: HashSet<ChannelId>,
-    /// Agent-opened transport channels waiting for their dial request.
-    transports: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// Agent-opened transport channels waiting for their dial request. Each
+    /// sender hands the auth pipe stream to the channel's task in
+    /// [`transport`], and dropping it refuses the dial.
+    transports: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<DuplexStream>>>>,
 }
 
 impl AgentHandler {
@@ -289,24 +292,25 @@ impl russh::server::Handler for AgentHandler {
                 self.heartbeat = Some(id);
             }
             CHAN_TRANSPORT => {
+                let (tx, rx) = oneshot::channel();
                 {
                     let mut pending = self.transports.lock().unwrap();
                     if pending.len() >= MAX_PENDING_TRANSPORTS {
                         console_log!("ssh: rejected transport, {} pending", pending.len());
                         return Ok(false);
                     }
-                    pending.insert(id, channel);
+                    pending.insert(id, tx);
                 }
-                // Drop a transport channel whose dial request never comes.
-                let pending = self.transports.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    crate::sockets::sleep(DIAL_DEADLINE).await;
-                    let stale = pending.lock().unwrap().remove(&id);
-                    if let Some(ch) = stale {
-                        console_log!("ssh: transport channel never dialed, closing");
-                        let _ = ch.close().await;
-                    }
-                });
+                let counts = (
+                    self.conn_passthroughs.clone(),
+                    self.shared.passthroughs.clone(),
+                );
+                wasm_bindgen_futures::spawn_local(transport(
+                    channel,
+                    rx,
+                    self.transports.clone(),
+                    counts,
+                ));
             }
             other => {
                 console_log!("ssh: rejected channel type {other:?}");
@@ -351,37 +355,27 @@ impl russh::server::Handler for AgentHandler {
                 Ok(true)
             }
             REQ_DIAL => {
-                let Some(ch) = self.transports.lock().unwrap().remove(&channel) else {
+                let Some(tx) = self.transports.lock().unwrap().remove(&channel) else {
                     return Ok(false);
                 };
-                let mut pipe = match self.passthrough_stream(data) {
+                // Dropping `tx` on a refusal makes the channel's task close
+                // the channel.
+                let pipe = match self.passthrough_stream(data) {
                     Ok(pipe) => pipe,
                     Err(reason) => {
                         console_log!("ssh: {reason}");
-                        close_later(ch);
                         return Ok(false);
                     }
                 };
-                // The bytes are the agent's own mTLS to auth. The hub only
-                // copies them.
+                self.conn_passthroughs.fetch_add(1, Ordering::Relaxed);
+                self.shared.passthroughs.fetch_add(1, Ordering::Relaxed);
+                if tx.send(pipe).is_err() {
+                    // The task already gave up at the dial deadline.
+                    self.conn_passthroughs.fetch_sub(1, Ordering::Relaxed);
+                    self.shared.passthroughs.fetch_sub(1, Ordering::Relaxed);
+                    return Ok(false);
+                }
                 console_log!("ssh: passthrough to auth over the callout");
-                let (conn_count, total_count) = (
-                    self.conn_passthroughs.clone(),
-                    self.shared.passthroughs.clone(),
-                );
-                conn_count.fetch_add(1, Ordering::Relaxed);
-                total_count.fetch_add(1, Ordering::Relaxed);
-                wasm_bindgen_futures::spawn_local(async move {
-                    let mut stream = ch.into_stream();
-                    match tokio::io::copy_bidirectional(&mut stream, &mut pipe).await {
-                        Ok((up, down)) => {
-                            console_log!("ssh: passthrough closed, {up} up, {down} down")
-                        }
-                        Err(err) => console_log!("ssh: passthrough error: {err}"),
-                    }
-                    conn_count.fetch_sub(1, Ordering::Relaxed);
-                    total_count.fetch_sub(1, Ordering::Relaxed);
-                });
                 Ok(true)
             }
             other => {
@@ -410,6 +404,60 @@ impl russh::server::Handler for AgentHandler {
     ) -> std::result::Result<bool, Self::Error> {
         Ok(typ == GLOBAL_KEEPALIVE)
     }
+}
+
+/// Runs one agent-opened transport channel. It waits up to
+/// [`DIAL_DEADLINE`] for the handler to send an auth pipe stream on `dial`,
+/// and then copies bytes between the channel and the stream. `counts` are
+/// the connection's and the Durable Object's passthrough counts, which the
+/// handler raised before it sent the stream. The channel is closed when the
+/// dial is refused, when the deadline passes, or when the agent sends data
+/// before its dial, because nothing would read that data.
+async fn transport(
+    mut ch: Channel<Msg>,
+    mut dial: oneshot::Receiver<DuplexStream>,
+    pending: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<DuplexStream>>>>,
+    counts: (Arc<AtomicUsize>, Arc<AtomicUsize>),
+) {
+    let id = ch.id();
+    let mut deadline = pin!(crate::sockets::sleep(DIAL_DEADLINE));
+    let pipe = loop {
+        // `dial` comes first, so a stream the handler sent wins over data
+        // that follows the dial request.
+        match select(&mut dial, select(deadline.as_mut(), pin!(ch.wait()))).await {
+            Either::Left((Ok(pipe), _)) => break Some(pipe),
+            Either::Left((Err(_), _)) => break None,
+            Either::Right((Either::Left(_), _)) => {
+                console_log!("ssh: transport channel never dialed, closing");
+                break None;
+            }
+            Either::Right((
+                Either::Right((Some(ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }), _)),
+                _,
+            )) => {
+                console_log!("ssh: data on a transport channel before its dial, closing");
+                break None;
+            }
+            Either::Right((Either::Right((Some(_), _)), _)) => {}
+            Either::Right((Either::Right((None, _)), _)) => {
+                pending.lock().unwrap().remove(&id);
+                return;
+            }
+        }
+    };
+    pending.lock().unwrap().remove(&id);
+    let Some(mut pipe) = pipe else {
+        let _ = ch.close().await;
+        return;
+    };
+    // The bytes are the agent's own mTLS to auth. The hub only copies them.
+    let mut stream = ch.into_stream();
+    match tokio::io::copy_bidirectional(&mut stream, &mut pipe).await {
+        Ok((up, down)) => console_log!("ssh: passthrough closed, {up} up, {down} down"),
+        Err(err) => console_log!("ssh: passthrough error: {err}"),
+    }
+    counts.0.fetch_sub(1, Ordering::Relaxed);
+    counts.1.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Opens a transport channel into the agent, asks it to dial its local
