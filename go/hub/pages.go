@@ -7,7 +7,33 @@ const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}b
 
 const loginPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport login</title>
 <button id="go">Log in with passkey</button><pre id="out"></pre><script>
-`
+const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const out = document.getElementById('out');
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  return r.json();
+}
+document.getElementById('go').onclick = async () => {
+  try {
+    const c = await post('/webapi/login/begin');
+    const cred = await navigator.credentials.get({ publicKey: {
+      challenge: dec(c.challenge), rpId: c.rpId, timeout: c.timeout || undefined,
+      userVerification: c.userVerification || 'required',
+      allowCredentials: c.allowCredentials.map(a => ({ type: a.type, id: dec(a.id) })),
+    } });
+    await post('/webapi/login/finish', {
+      id: cred.id, rawId: enc(cred.rawId), type: cred.type, extensions: cred.getClientExtensionResults(),
+      response: {
+        authenticatorData: enc(cred.response.authenticatorData), clientDataJSON: enc(cred.response.clientDataJSON),
+        signature: enc(cred.response.signature), userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : null,
+      },
+    });
+    location.href = '/';
+  } catch (e) { out.textContent = 'error: ' + e; }
+};
+</script>`
 
 const invitePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport invite</title>
 <button id="go">Register a passkey</button><pre id="out"></pre><script>
