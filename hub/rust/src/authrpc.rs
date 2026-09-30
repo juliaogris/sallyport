@@ -6,11 +6,14 @@
 //! written by hand over the `h2` crate. Messages are `prost` structs with
 //! only the fields the hub reads. prost skips the other fields.
 
+use std::future::Future;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::future::{select, Either};
+use futures::FutureExt;
 use h2::client::SendRequest;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use tokio::io::DuplexStream;
@@ -357,9 +360,23 @@ pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result
     Ok(config)
 }
 
-/// Runs TLS and the HTTP/2 handshake on an auth pipe stream. The returned
-/// sender makes calls until the stream closes.
+/// Runs `fut` until it finishes or [`CALL_DEADLINE`] passes. On the
+/// deadline, it drops `fut` and returns an error that names `what`.
+async fn with_deadline<T>(what: &str, fut: impl Future<Output = std::result::Result<T, String>>) -> std::result::Result<T, String> {
+    match select(pin!(fut), pin!(Delay::from(CALL_DEADLINE))).await {
+        Either::Left((res, _)) => res,
+        Either::Right(_) => Err(format!("{what}: no answer within {CALL_DEADLINE:?}")),
+    }
+}
+
+/// Runs TLS and the HTTP/2 handshake on an auth pipe stream within
+/// [`CALL_DEADLINE`]. The returned sender makes calls until the stream
+/// closes.
 pub async fn connect(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> std::result::Result<SendRequest<Bytes>, String> {
+    with_deadline("connect to auth", connect_inner(stream, tls)).await
+}
+
+async fn connect_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> std::result::Result<SendRequest<Bytes>, String> {
     let name = ServerName::try_from(AUTH_SNI).map_err(|e| e.to_string())?;
     let tls = tokio_rustls::TlsConnector::from(tls)
         .connect(name, stream)
@@ -381,11 +398,7 @@ pub async fn connect(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> st
 /// Makes one unary call within [`CALL_DEADLINE`]. The error is the gRPC
 /// status and message, or the transport error.
 pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(send: &SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, String> {
-    let call = Box::pin(unary_inner(send.clone(), path, req));
-    match select(call, Box::pin(Delay::from(CALL_DEADLINE))).await {
-        Either::Left((res, _)) => res,
-        Either::Right(_) => Err(format!("{path}: no answer within {CALL_DEADLINE:?}")),
-    }
+    with_deadline(path, unary_inner(send.clone(), path, req)).await
 }
 
 async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, String> {
@@ -438,11 +451,7 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
 pub async fn post_json(stream: DuplexStream, tls: &rustls::ClientConfig, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
     let mut tls = tls.clone();
     tls.alpn_protocols.clear();
-    let call = Box::pin(post_json_inner(stream, Arc::new(tls), path, body));
-    match select(call, Box::pin(Delay::from(CALL_DEADLINE))).await {
-        Either::Left((res, _)) => res,
-        Either::Right(_) => Err(format!("{path}: no answer within {CALL_DEADLINE:?}")),
-    }
+    with_deadline(path, post_json_inner(stream, Arc::new(tls), path, body)).await
 }
 
 async fn post_json_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
@@ -522,33 +531,48 @@ fn percent_decode(s: &str) -> String {
 /// One HTTP/2 connection to auth with the hub TLS identity, reused across
 /// calls. A call that fails at the transport opens a new connection from
 /// the pool and is retried once. A gRPC error status is not retried. When
-/// the pool has no stream, opening a connection waits for auth to open one.
+/// the pool has no stream, opening a connection waits up to
+/// [`crate::authpipe::TAKE_WAIT`] for auth to open one.
 ///
 /// The lock is held while a connection opens, so callers that arrive
 /// together share one connection instead of each taking a pool stream.
+/// The wait for a stream and [`connect`] each have a deadline, so the lock
+/// is held for at most their sum.
 #[derive(Clone, Default)]
 pub struct HubAuth {
-    /// The connection and its generation, which counts connections opened.
-    send: Arc<futures::lock::Mutex<(u64, Option<SendRequest<Bytes>>)>>,
+    cached: Arc<futures::lock::Mutex<Cached>>,
+}
+
+#[derive(Default)]
+struct Cached {
+    /// Counts connections opened.
+    generation: u64,
+    send: Option<SendRequest<Bytes>>,
 }
 
 impl HubAuth {
-    /// Returns the cached connection and its generation if it still works.
-    /// When `broken` names the cached generation, that connection failed,
-    /// so a new one is opened. A caller whose broken connection another
-    /// caller already replaced gets the replacement.
+    /// Returns the cached connection and its generation, unless it has
+    /// closed. When `broken` names the cached generation, that connection
+    /// failed, so a new one is opened. A caller whose broken connection
+    /// another caller already replaced gets the replacement.
     async fn conn(&self, env: &Env, pool: &crate::authpipe::Pool, broken: Option<u64>) -> std::result::Result<(u64, SendRequest<Bytes>), String> {
-        let mut slot = self.send.lock().await;
-        if let Some(send) = slot.1.clone() {
-            if broken != Some(slot.0) && send.clone().ready().await.is_ok() {
-                return Ok((slot.0, send));
+        let mut cached = self.cached.lock().await;
+        if let Some(send) = cached.send.clone() {
+            // `ready` waits when the connection is at its stream limit, so
+            // it is only polled once here. A closed connection fails at
+            // once. A connection that is open but stalled fails in the call,
+            // and the call asks for a new one.
+            let closed = matches!(send.clone().ready().now_or_never(), Some(Err(_)));
+            if broken != Some(cached.generation) && !closed {
+                return Ok((cached.generation, send));
             }
         }
+        cached.send = None;
         let tls = Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
         let send = connect(pool.take_wait().await?, tls).await?;
-        slot.0 += 1;
-        slot.1 = Some(send.clone());
-        Ok((slot.0, send))
+        cached.generation += 1;
+        cached.send = Some(send.clone());
+        Ok((cached.generation, send))
     }
 
     /// Makes one unary call with the hub identity.
