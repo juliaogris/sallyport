@@ -14,6 +14,8 @@
 //!
 //! Every `POST` must have an `Origin` equal to its own host.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,6 +52,54 @@ const APP_PUBLIC_ADDR_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.
 /// How [`authrpc::unary`] reports gRPC status `RESOURCE_EXHAUSTED`, which
 /// auth returns when a client address makes too many login or invite calls.
 const RATE_LIMITED: &str = "grpc-status \"8\"";
+
+/// How many `begin` calls one client address may make at once, and how
+/// often it gets one more. Each call spends auth's login rate limit for the
+/// hub's one address, which is a burst of 40 and then 20 a minute.
+const BEGIN_BURST: f64 = 10.0;
+const BEGIN_REFILL_MS: f64 = 6_000.0;
+/// How many client addresses [`BeginLimit`] tracks.
+const BEGIN_CLIENTS: usize = 4096;
+
+thread_local! {
+    static BEGIN_LIMIT: RefCell<BeginLimit> = RefCell::new(BeginLimit::default());
+}
+
+/// A token bucket per client address for `login/begin` and `invite/begin`.
+#[derive(Default)]
+struct BeginLimit {
+    /// The tokens left and the time they were counted, in ms, per address.
+    buckets: HashMap<String, (f64, u64)>,
+}
+
+impl BeginLimit {
+    /// Takes one token for `client` at `now_ms`, and returns false when
+    /// there is none. It also returns false for a new address when
+    /// [`BEGIN_CLIENTS`] addresses have tokens missing.
+    fn allow(&mut self, client: &str, now_ms: u64) -> bool {
+        let refill = |(tokens, at): (f64, u64)| (tokens + now_ms.saturating_sub(at) as f64 / BEGIN_REFILL_MS).min(BEGIN_BURST);
+        if !self.buckets.contains_key(client) && self.buckets.len() >= BEGIN_CLIENTS {
+            self.buckets.retain(|_, b| refill(*b) < BEGIN_BURST);
+            if self.buckets.len() >= BEGIN_CLIENTS {
+                return false;
+            }
+        }
+        let bucket = self.buckets.entry(client.to_string()).or_insert((BEGIN_BURST, now_ms));
+        let tokens = refill(*bucket);
+        if tokens < 1.0 {
+            return false;
+        }
+        *bucket = (tokens - 1.0, now_ms);
+        true
+    }
+}
+
+/// Returns false when the client address of `req` has made too many
+/// `begin` calls.
+fn begin_allowed(req: &Request) -> Result<bool> {
+    let client = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
+    Ok(BEGIN_LIMIT.with(|l| l.borrow_mut().allow(&client, Date::now().as_millis())))
+}
 
 /// What the hub needs to answer a browser request.
 pub struct Ctx<'a> {
@@ -121,7 +171,12 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
         (Method::Get, "/") => dashboard(&req, cx).await,
         (Method::Get, "/web/login") => Response::from_html(LOGIN_PAGE),
         (Method::Get, p) if p.starts_with("/web/invite/") => Response::from_html(INVITE_PAGE),
-        (Method::Post, "/webapi/login/begin") => json_or_error(login_begin(cx).await),
+        (Method::Post, "/webapi/login/begin") => {
+            if !begin_allowed(&req)? {
+                return Response::error("too many requests, try again in a minute", 429);
+            }
+            json_or_error(login_begin(cx).await)
+        }
         (Method::Post, "/webapi/login/finish") => {
             let Some(body) = read_body(&mut req).await? else {
                 return Response::error("request too large", 413);
@@ -144,7 +199,12 @@ async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response>
         return Response::error("not found", 404);
     };
     match step {
-        "begin" => json_or_error(invite_begin(cx, token).await),
+        "begin" => {
+            if !begin_allowed(req)? {
+                return Response::error("too many requests, try again in a minute", 429);
+            }
+            json_or_error(invite_begin(cx, token).await)
+        }
         "finish" => {
             let Some(body) = read_body(req).await? else {
                 return Response::error("request too large", 413);
@@ -979,6 +1039,35 @@ mod tests {
         assert!(!valid_name("oc-to"));
         assert!(!valid_name("Octo"));
         assert!(!valid_name(&"a".repeat(31)));
+    }
+
+    #[test]
+    fn begin_limit_refills() {
+        let mut l = BeginLimit::default();
+        for _ in 0..10 {
+            assert!(l.allow("a", 0));
+        }
+        assert!(!l.allow("a", 0));
+        assert!(l.allow("b", 0));
+        assert!(!l.allow("a", 5_999));
+        assert!(l.allow("a", 6_000));
+        assert!(!l.allow("a", 6_000));
+        for _ in 0..10 {
+            assert!(l.allow("a", 1_000_000));
+        }
+        assert!(!l.allow("a", 1_000_000));
+    }
+
+    #[test]
+    fn begin_limit_caps_clients() {
+        let mut l = BeginLimit::default();
+        for i in 0..BEGIN_CLIENTS {
+            assert!(l.allow(&i.to_string(), 0));
+        }
+        assert!(!l.allow("new", 0));
+        assert!(l.allow("0", 0));
+        assert!(l.allow("new", 6_000));
+        assert_eq!(l.buckets.len(), 2);
     }
 
     #[test]
