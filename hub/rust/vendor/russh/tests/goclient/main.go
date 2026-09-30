@@ -300,7 +300,7 @@ type channelEOFMsg struct {
 func handshakeWritePacket(t unsafe.Pointer, p []byte) error
 
 func writeRaw(client *ssh.Client, msg any) {
-	transport := reflect.ValueOf(client.Conn).Elem().FieldByName("transport").Elem()
+	transport := field(reflect.ValueOf(client.Conn), "transport", "*ssh.handshakeTransport")
 	if err := handshakeWritePacket(transport.UnsafePointer(), ssh.Marshal(msg)); err != nil {
 		log.Fatalf("write raw: %v", err)
 	}
@@ -340,8 +340,8 @@ func kexStall(addr string) {
 
 	// The key exchange goroutine is blocked, and x/crypto queues every
 	// other write, so nothing else writes to the transport.
-	transport := reflect.ValueOf(client.Conn).Elem().FieldByName("transport").Elem()
-	conn := transport.Elem().FieldByName("conn").Elem()
+	transport := field(reflect.ValueOf(client.Conn), "transport", "*ssh.handshakeTransport")
+	conn := field(transport, "conn", "*ssh.transport")
 	msg := globalRequestMsg{Type: "keepalive@openssh.com", WantReply: true}
 	// The server's limit is 4 MiB of queued replies, about 840,000 of
 	// them.
@@ -361,6 +361,21 @@ type globalRequestMsg struct {
 
 //go:linkname transportWritePacket golang.org/x/crypto/ssh.(*transport).writePacket
 func transportWritePacket(t unsafe.Pointer, p []byte) error
+
+// field returns the value in the interface field name of the struct that
+// ptr points to, and exits if its type is not want. The linknamed writers
+// take a raw pointer, so a changed x/crypto type would otherwise corrupt
+// memory instead of failing the test.
+func field(ptr reflect.Value, name, want string) reflect.Value {
+	f := ptr.Elem().FieldByName(name)
+	if !f.IsValid() || f.Kind() != reflect.Interface || f.IsNil() {
+		log.Fatalf("x/crypto has no interface field %s", name)
+	}
+	if got := f.Elem().Type().String(); got != want {
+		log.Fatalf("x/crypto field %s is a %s, want %s", name, got, want)
+	}
+	return f.Elem()
+}
 
 // remoteID returns the server's ID for a channel, from x/crypto's
 // unexported channel struct. ch is an ssh.NewChannel or an ssh.Channel.
