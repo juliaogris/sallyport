@@ -158,9 +158,9 @@ pub struct GetAppSessionRequest {
     pub session_id: String,
 }
 
-/// The response of both `CreateAppSession` and `GetAppSession`.
+/// The response of `CreateAppSession`, `GetAppSession` and `GetWebSession`.
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct AppSessionResponse {
+pub struct SessionResponse {
     #[prost(message, optional, tag = "1")]
     pub session: Option<WebSessionV2>,
 }

@@ -168,7 +168,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         return to_login();
     };
     // Auth is asked on every request, and any error denies.
-    let got: std::result::Result<AppSessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid }).await;
+    let got: std::result::Result<SessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid }).await;
     let spec = match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => spec,
         Ok(_) => return to_login(),
@@ -193,7 +193,7 @@ async fn handoff(cx: &Ctx<'_>, body: &Value) -> Result<Response> {
     if sid.is_empty() || subject.is_empty() {
         return Response::error("bad handoff", 400);
     }
-    let got: std::result::Result<AppSessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
+    let got: std::result::Result<SessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => {}
         Ok(_) => return Response::error("bad handoff", 403),
@@ -217,7 +217,7 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, Stri
     let Some((user, sid)) = value.split_once(':') else {
         return Ok(None);
     };
-    let got: std::result::Result<AppSessionResponse, CallError> = cx
+    let got: std::result::Result<SessionResponse, CallError> = cx
         .auth
         .call(cx.env, cx.pool, GET_WEB_SESSION, &GetWebSessionRequest { user: user.to_string(), session_id: sid.to_string() })
         .await;
@@ -273,7 +273,7 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
         let key = if spec.tls_priv.is_empty() { &spec.priv_key } else { &spec.tls_priv };
         let tls = Arc::new(authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?);
         let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
-        let created: AppSessionResponse = unary(
+        let created: SessionResponse = unary(
             &as_user,
             CREATE_APP_SESSION,
             &CreateAppSessionRequest {
@@ -285,7 +285,7 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
         )
         .await?;
         let sid = created.session.and_then(|s| s.metadata).map(|m| m.name).ok_or("no app session name")?;
-        let got: AppSessionResponse = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await?;
+        let got: SessionResponse = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await?;
         let bearer = got.session.and_then(|s| s.spec).map(|s| s.bearer_token).filter(|b| !b.is_empty()).ok_or("no bearer token")?;
         Ok::<_, String>((sid, bearer))
     }
