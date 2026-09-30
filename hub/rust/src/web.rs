@@ -114,9 +114,9 @@ impl RateLimit {
 }
 
 /// Returns false when the client address of `req` has made too many
-/// `begin` calls.
+/// `begin` calls. An IPv6 address counts as its /64.
 fn begin_allowed(req: &Request) -> Result<bool> {
-    let client = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
+    let client = crate::tunnel::client_key(req)?;
     Ok(BEGIN_LIMIT.with(|l| l.borrow_mut().allow(&client, Date::now().as_millis())))
 }
 
@@ -125,7 +125,7 @@ fn begin_allowed(req: &Request) -> Result<bool> {
 /// limit one client could empty the pool. It has its own bucket, so that a
 /// login's begin and finish each spend one token.
 fn finish_allowed(req: &Request) -> Result<bool> {
-    let client = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
+    let client = crate::tunnel::client_key(req)?;
     Ok(FINISH_LIMIT.with(|l| l.borrow_mut().allow(&client, Date::now().as_millis())))
 }
 
