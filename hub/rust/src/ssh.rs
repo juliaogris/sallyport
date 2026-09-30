@@ -70,6 +70,9 @@ pub struct AppTunnel {
     /// The ID of the connection, so that it clears the slot only while the
     /// slot still holds it.
     conn: u64,
+    /// Streams to the app service open on this connection, for
+    /// [`crate::app::MAX_FORWARDS`].
+    pub forwards: Arc<AtomicUsize>,
 }
 
 /// State shared by every connection in the Durable Object.
@@ -202,7 +205,7 @@ fn reject_reason(host_ca: &PublicKey, cluster: &str, user: &str, cert: &Certific
 
 /// Closes a channel the hub will not use. russh's `Channel` sends nothing
 /// when it is dropped, so without this the session keeps the channel.
-fn close_later(ch: Channel<Msg>) {
+pub(crate) fn close_later(ch: Channel<Msg>) {
     wasm_bindgen_futures::spawn_local(async move {
         let _ = ch.close().await;
     });
@@ -296,6 +299,7 @@ impl russh::server::Handler for AgentHandler {
                             handle: session.handle(),
                             server_id: host_id,
                             conn: self.conn,
+                            forwards: Default::default(),
                         });
                     }
                     wasm_bindgen_futures::spawn_local(discovery_loop(session.handle(), self.proxy_name.clone()));
