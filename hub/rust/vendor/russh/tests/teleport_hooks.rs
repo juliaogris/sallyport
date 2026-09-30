@@ -412,6 +412,12 @@ async fn data_over_window_disconnects() {
     );
 }
 
+#[tokio::test]
+async fn stalled_key_exchange_disconnects() {
+    let r = run_with(ed25519_config(), &["kex-stall"], |_| async {}).await;
+    assert_eq!(r.stdout, "disconnected=true\n");
+}
+
 /// Returns a CA key and a server config whose ECDSA host key has a host
 /// certificate signed by that CA.
 fn host_cert_config() -> (PrivateKey, server::Config) {

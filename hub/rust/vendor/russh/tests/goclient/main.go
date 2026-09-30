@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/crypto/ssh"
@@ -32,6 +33,10 @@ func main() {
 	}
 	if scenario == "hostkey-plain" {
 		hostKeyPlain(addr)
+		return
+	}
+	if scenario == "kex-stall" {
+		kexStall(addr)
 		return
 	}
 
@@ -231,6 +236,62 @@ func writeRaw(client *ssh.Client, msg any) {
 		log.Fatalf("write raw: %v", err)
 	}
 }
+
+// kexStall starts a key exchange and never finishes it. Its host key
+// callback blocks on the second call, after the server has sent its reply
+// and NEWKEYS, so the server's key exchange stays active. It then sends
+// global requests that want a reply until a write fails, and prints whether
+// the server ended the connection.
+func kexStall(addr string) {
+	stalled := make(chan struct{})
+	var calls atomic.Int32
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		Config: ssh.Config{RekeyThreshold: 256 * 1024},
+		User:   "agent",
+		HostKeyCallback: func(string, net.Addr, ssh.PublicKey) error {
+			if calls.Add(1) == 1 {
+				return nil
+			}
+			close(stalled)
+			select {}
+		},
+	})
+	if err != nil {
+		log.Fatalf("dial: %v", err)
+	}
+	ch, reqs, err := client.OpenChannel("teleport-heartbeat", nil)
+	if err != nil {
+		log.Fatalf("open teleport-heartbeat: %v", err)
+	}
+	go ssh.DiscardRequests(reqs)
+	// The rekey threshold is below this, so the client starts a key
+	// exchange.
+	go ch.Write(make([]byte, 1<<20))
+	<-stalled
+
+	// The key exchange goroutine is blocked, and x/crypto queues every
+	// other write, so nothing else writes to the transport.
+	transport := reflect.ValueOf(client.Conn).Elem().FieldByName("transport").Elem()
+	conn := transport.Elem().FieldByName("conn").Elem()
+	msg := globalRequestMsg{Type: "keepalive@openssh.com", WantReply: true}
+	// The server's limit is 4 MiB of queued replies, about 840,000 of
+	// them.
+	for range 1_200_000 {
+		if err := transportWritePacket(conn.UnsafePointer(), ssh.Marshal(msg)); err != nil {
+			fmt.Println("disconnected=true")
+			return
+		}
+	}
+	fmt.Println("disconnected=false")
+}
+
+type globalRequestMsg struct {
+	Type      string `sshtype:"80"`
+	WantReply bool
+}
+
+//go:linkname transportWritePacket golang.org/x/crypto/ssh.(*transport).writePacket
+func transportWritePacket(t unsafe.Pointer, p []byte) error
 
 // remoteID returns the server's ID for a channel, from x/crypto's
 // unexported channel struct. ch is an ssh.NewChannel or an ssh.Channel.

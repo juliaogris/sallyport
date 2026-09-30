@@ -489,6 +489,10 @@ impl Handle {
     }
 }
 
+/// sallyport: the most bytes of outgoing packets that `Session::flush` keeps
+/// in `enc.write` while a key exchange is active.
+const MAX_WRITE_DURING_KEX: usize = 4 << 20;
+
 impl Session {
     fn maybe_decompress(&mut self, buffer: &SSHBuffer) -> Result<IncomingSshPacket, Error> {
         if let Some(ref mut enc) = self.common.encrypted {
@@ -780,6 +784,14 @@ impl Session {
         // `enc.write` until the exchange is done. A disconnect still goes
         // out.
         if self.kex.active() && !self.common.disconnected {
+            // sallyport: there is no key exchange timeout, and the peer can
+            // keep sending requests that want a reply while it holds the
+            // exchange open. This limit ends that connection.
+            if let Some(ref enc) = self.common.encrypted {
+                if enc.write.len() > MAX_WRITE_DURING_KEX {
+                    return Err(Error::Kex);
+                }
+            }
             return Ok(());
         }
         if let Some(ref mut enc) = self.common.encrypted {
