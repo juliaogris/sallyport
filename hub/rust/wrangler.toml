@@ -4,7 +4,7 @@ compatibility_date = "2026-09-01"
 
 [build]
 # ring's C code needs a clang with a wasm32 target; Apple clang has none.
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release . --features spikes"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release . --features spikes"
 
 [[durable_objects.bindings]]
 name = "HUB"
@@ -41,7 +41,7 @@ routes = [
 
 # The same build without the `spikes` feature, so /spike/* answers 404.
 [env.edge.build]
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release"
 
 [env.edge.vars]
 CLUSTER_NAME = "sallyport"
@@ -72,7 +72,7 @@ routes = [
 ]
 
 [env.rust.build]
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release"
 
 [env.rust.vars]
 CLUSTER_NAME = "sallyport-rust"
@@ -97,7 +97,7 @@ routes = [
 ]
 
 [env.go.build]
-command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} worker-build --release"
 
 [env.go.vars]
 CLUSTER_NAME = "sallyport-go"
