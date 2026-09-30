@@ -63,9 +63,6 @@ class_name = "Hub"
 # with its own Durable Object namespace and secrets. Both run the Rust hub
 # until the Go hub exists.
 [env.rust]
-# A plain JavaScript Worker entry, to test whether the Rust entry drops
-# tunnels. See front.mjs.
-main = "front.mjs"
 routes = [
   { pattern = "rust.example.com", custom_domain = true },
   { pattern = "bench-rust.example.com", custom_domain = true },
