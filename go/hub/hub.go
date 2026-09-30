@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,7 +103,52 @@ func (h *hub) heartbeat() {
 		logf("hub: heartbeat, %d tunnels, app tunnel %s, auth streams %d open %d ready, %d passthroughs, discovery %s, linear %s, heap %s, sys %s, gc %d, goroutines %d, js values %d (%s)",
 			h.tunnels.Load(), app, open, ready, h.passthroughs.Load(), discovery,
 			mib(uint64(linearMem())), mib(m.HeapAlloc), mib(m.Sys), m.NumGC, runtime.NumGoroutine(), vals, mib(uint64(valBytes)))
+		if runtime.NumGoroutine() > goroutinesToReport {
+			logf("hub: goroutines by stack: %s", goroutineSummary(6))
+		}
 	}
+}
+
+// goroutinesToReport is the goroutine count above which the heartbeat
+// also logs where they wait. An idle hub with one agent has about 40.
+const goroutinesToReport = 60
+
+// goroutineSummary returns the n most common goroutine stacks, each as its
+// first few non-runtime frames, with their counts.
+func goroutineSummary(n int) string {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	counts := make(map[string]int)
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		var frames []string
+		for _, line := range strings.Split(g, "\n")[1:] {
+			if line == "" || line[0] == '\t' || strings.HasPrefix(line, "runtime.") || strings.HasPrefix(line, "sync.") || strings.HasPrefix(line, "created by") {
+				continue
+			}
+			if i := strings.LastIndex(line, "("); i > 0 {
+				line = line[:i]
+			}
+			frames = append(frames, line)
+			if len(frames) == 3 {
+				break
+			}
+		}
+		counts[strings.Join(frames, " < ")]++
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	var all []kv
+	for k, v := range counts {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].v > all[j].v })
+	var out []string
+	for i := 0; i < len(all) && i < n; i++ {
+		out = append(out, fmt.Sprintf("%d x %s", all[i].v, all[i].k))
+	}
+	return strings.Join(out, "; ")
 }
 
 func mib(b uint64) string {
