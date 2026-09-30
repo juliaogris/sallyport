@@ -412,3 +412,87 @@ async fn discovery_loop(handle: Handle, proxy_name: String) {
     }
     console_log!("ssh: discovery loop ended");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::keys::ssh_key::certificate::Builder;
+    use russh::keys::ssh_key::private::{Ed25519Keypair, PrivateKey};
+
+    const CLUSTER: &str = "example.com";
+    const USER: &str = "host-uuid.example.com";
+
+    fn key(seed: u8) -> PrivateKey {
+        PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
+    }
+
+    /// Returns a certificate of type `typ` for `USER` with the given role,
+    /// signed by `ca`, after `edit` changes the builder.
+    fn cert_of(typ: CertType, ca: &PrivateKey, role: Option<&str>, edit: impl FnOnce(&mut Builder)) -> Certificate {
+        let mut b = Builder::new([7; 16], key(2).public_key(), 0, u64::MAX).unwrap();
+        b.cert_type(typ).unwrap();
+        b.valid_principal(USER).unwrap();
+        b.extension(EXT_AUTHORITY, CLUSTER).unwrap();
+        if let Some(role) = role {
+            b.extension(EXT_ROLE, role).unwrap();
+        }
+        edit(&mut b);
+        b.sign(ca).unwrap()
+    }
+
+    fn cert(ca: &PrivateKey, role: Option<&str>, edit: impl FnOnce(&mut Builder)) -> Certificate {
+        cert_of(CertType::Host, ca, role, edit)
+    }
+
+    #[test]
+    fn reject_reason_accepts_app_and_instance() {
+        let ca = key(1);
+        for role in [ROLE_APP, ROLE_INSTANCE] {
+            let cert = cert(&ca, Some(role), |_| {});
+            assert_eq!(reject_reason(ca.public_key(), CLUSTER, USER, &cert), None, "{role}");
+        }
+    }
+
+    #[test]
+    fn reject_reason_rejects_bad_certificates() {
+        let ca = key(1);
+        let other_ca = key(3);
+        let cases: Vec<(Certificate, &str, &str)> = vec![
+            (cert_of(CertType::User, &ca, Some(ROLE_APP), |_| {}), USER, "not a host certificate"),
+            (cert(&ca, Some(ROLE_APP), |_| {}), "other.example.com", "not a certificate principal"),
+            (cert(&ca, Some(ROLE_APP), |b| {
+                b.critical_option("force-command", "true").unwrap();
+            }), USER, "critical options"),
+            (cert(&other_ca, Some(ROLE_APP), |_| {}), USER, "not signed by the cluster host CA"),
+            (cert(&ca, Some("Proxy"), |_| {}), USER, "role Some(\"Proxy\")"),
+            (cert(&ca, Some("Node"), |_| {}), USER, "role Some(\"Node\")"),
+            (cert(&ca, None, |_| {}), USER, "role None"),
+        ];
+        for (cert, user, want) in cases {
+            let got = reject_reason(ca.public_key(), CLUSTER, user, &cert).unwrap_or_default();
+            assert!(got.contains(want), "got {got:?}, want {want:?}");
+        }
+    }
+
+    #[test]
+    fn reject_reason_rejects_another_authority() {
+        let ca = key(1);
+        let cert = cert(&ca, Some(ROLE_APP), |_| {});
+        let got = reject_reason(ca.public_key(), "other.example", USER, &cert).unwrap_or_default();
+        assert!(got.starts_with("authority"), "got {got:?}");
+    }
+
+    #[test]
+    fn fail_auth_disconnects_on_the_third_failure() {
+        let shared = Shared {
+            passthroughs: Default::default(),
+            app_tunnel: Default::default(),
+            auth_pipe: Default::default(),
+        };
+        let (ticket, _, _) = crate::tunnel::Pending::default().admit(1);
+        let mut handler = AgentHandler::new(key(1).public_key().clone(), CLUSTER.into(), "hub".into(), shared, Default::default(), ticket);
+        assert!(matches!(handler.fail_auth(), Ok(Auth::Reject { .. })));
+        assert!(matches!(handler.fail_auth(), Ok(Auth::Reject { .. })));
+        assert!(matches!(handler.fail_auth(), Err(russh::Error::Disconnect)));
+    }
+}
