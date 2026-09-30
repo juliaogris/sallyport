@@ -36,11 +36,20 @@ const (
 // AliceDeviceAdded is when Alice's passkey was added.
 var AliceDeviceAdded = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
+// PrivilegeTokenTTL is how long a privilege token lives, as in auth.
+const PrivilegeTokenTTL = 5 * time.Minute
+
 // Device is one MFA device of a user. Every device is a passkey.
 type Device struct {
 	Name    string
 	CredID  string
 	AddedAt time.Time
+}
+
+// userToken is a privilege token: who it is for and when it expires.
+type userToken struct {
+	user    string
+	expires time.Time
 }
 
 // FakeAuth stands in for Teleport's auth service behind the callout. It
@@ -65,6 +74,8 @@ type FakeAuth struct {
 	// registering are the users with a register challenge issued and not
 	// yet finished. A finish needs one and uses it up.
 	registering map[string]struct{}
+	// tokens are the privilege tokens by ID. A user has at most one.
+	tokens map[string]*userToken
 	// LoginChallenge is the challenge in every login challenge.
 	LoginChallenge []byte
 	// RegisterChallenge is the challenge in every register challenge.
@@ -128,6 +139,7 @@ func NewFakeAuth(p *PKI) (*FakeAuth, error) {
 		devices:           map[string][]Device{Alice: {{Name: AliceDevice, CredID: AliceCredID, AddedAt: AliceDeviceAdded}}},
 		manageChallenges:  map[string]string{},
 		registering:       map[string]struct{}{},
+		tokens:            map[string]*userToken{},
 		LoginChallenge:    randomBytes(32),
 		RegisterChallenge: randomBytes(32),
 	}
@@ -226,6 +238,15 @@ func (a *FakeAuth) ExpireWebSessions() {
 	defer a.mu.Unlock()
 	for _, s := range a.web {
 		s.expires = time.Now().Add(-time.Minute)
+	}
+}
+
+// ExpireUserTokens makes every privilege token expired.
+func (a *FakeAuth) ExpireUserTokens() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, t := range a.tokens {
+		t.expires = time.Now().Add(-time.Minute)
 	}
 }
 
@@ -356,6 +377,8 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 		resp, code, message = a.addMFADeviceSync(client, req)
 	case "DeleteMFADeviceSync":
 		code, message = a.deleteMFADeviceSync(client, req)
+	case "CreatePrivilegeToken":
+		resp, code, message = a.createPrivilegeToken(client, req)
 	case "ChangeUserAuthentication":
 		cred := req.msg(3).msg(3)
 		if req.str(1) != BobInvite || string(cred.bytes(2)) != BobCredID {
@@ -458,16 +481,57 @@ func (a *FakeAuth) verifyAssertion(user string, resp pbFields) (int, string) {
 	return codePermissionDenied, fmt.Sprintf("MFA response validation failed: unknown credential %q", credID)
 }
 
-// createRegisterChallenge answers an invite's register challenge, or one
-// for the user in the client certificate after a manage-devices answer.
+// createPrivilegeToken answers with a new privilege token for the user in
+// the client certificate after a manage-devices answer. It replaces the
+// user's earlier token, as auth does.
+func (a *FakeAuth) createPrivilegeToken(client string, req pbFields) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.devices[client] == nil {
+		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+	}
+	if !req.has(1) {
+		return nil, codeInvalidArgument, "second factor authentication required"
+	}
+	if code, message := a.verifyAssertion(client, req.msg(1)); code != 0 {
+		return nil, code, message
+	}
+	for id, t := range a.tokens {
+		if t.user == client {
+			delete(a.tokens, id)
+		}
+	}
+	id := hex.EncodeToString(randomBytes(16))
+	t := &userToken{user: client, expires: time.Now().Add(PrivilegeTokenTTL).Truncate(time.Second)}
+	a.tokens[id] = t
+	meta := pbMsg(nil).str(1, id).msg(6, pbMsg(nil).int(1, t.expires.Unix()))
+	return pbMsg(nil).str(1, "user_token").str(2, "privilege").str(3, "v3").msg(4, meta).msg(5, pbMsg(nil).str(1, client)), 0, ""
+}
+
+// privilegeTokenUser returns the user of a privilege token that has not
+// expired, or "". The caller holds a.mu.
+func (a *FakeAuth) privilegeTokenUser(id string) string {
+	t := a.tokens[id]
+	if t == nil || t.expires.Before(time.Now()) {
+		return ""
+	}
+	return t.user
+}
+
+// createRegisterChallenge answers a register challenge for the user of an
+// invite or privilege token, or for the user in the client certificate
+// after a manage-devices answer. An unknown or expired token gets auth's
+// "invalid token".
 func (a *FakeAuth) createRegisterChallenge(client string, req pbFields) (pbMsg, int, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	user := Bob
 	switch {
+	case req.str(1) == BobInvite:
 	case req.str(1) != "":
-		if req.str(1) != BobInvite {
-			return nil, codeNotFound, "invite not found"
+		user = a.privilegeTokenUser(req.str(1))
+		if user == "" {
+			return nil, codePermissionDenied, "invalid token"
 		}
 	case req.has(4):
 		if a.devices[client] == nil {
@@ -508,21 +572,32 @@ func (a *FakeAuth) getMFADevices(client string) (pbMsg, int, string) {
 	return resp, 0, ""
 }
 
-// addMFADeviceSync adds a passkey for the user in the client certificate,
-// with the checks auth makes on the name and the credential ID, in auth's
-// order. A register challenge must have been issued and not finished.
+// addMFADeviceSync adds a passkey for the user of a privilege token, or for
+// the user in the client certificate, with the checks auth makes on the
+// name and the credential ID, in auth's order. A register challenge must
+// have been issued and not finished. The token stays valid until it
+// expires, as in auth.
 func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !req.has(5) || a.devices[client] == nil {
+	var user string
+	switch {
+	case req.str(1) != "":
+		user = a.privilegeTokenUser(req.str(1))
+		if user == "" {
+			return nil, codePermissionDenied, "invalid token"
+		}
+	case req.has(5) && a.devices[client] != nil:
+		user = client
+	default:
 		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
 	}
 	name := req.str(2)
 	if len(name) > 30 {
 		return nil, codeInvalidArgument, "device name must be 30 characters or less"
 	}
-	if _, ok := a.registering[client]; !ok {
-		return nil, codeNotFound, fmt.Sprintf("session data for user %q not found", client)
+	if _, ok := a.registering[user]; !ok {
+		return nil, codeNotFound, fmt.Sprintf("session data for user %q not found", user)
 	}
 	if name == "" {
 		return nil, codeInvalidArgument, "device name required"
@@ -531,7 +606,7 @@ func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, st
 	if credID == "" {
 		return nil, codeInvalidArgument, "credential required"
 	}
-	for _, d := range a.devices[client] {
+	for _, d := range a.devices[user] {
 		if d.Name == name {
 			return nil, codeAlreadyExists, fmt.Sprintf("MFA device with name %q already exists", name)
 		}
@@ -540,8 +615,8 @@ func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, st
 		}
 	}
 	d := Device{Name: name, CredID: credID, AddedAt: time.Now().Truncate(time.Second)}
-	a.devices[client] = append(a.devices[client], d)
-	delete(a.registering, client)
+	a.devices[user] = append(a.devices[user], d)
+	delete(a.registering, user)
 	return pbMsg(nil).msg(1, d.encode()), 0, ""
 }
 
