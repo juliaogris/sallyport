@@ -130,11 +130,17 @@ class program {
   cleanup() {
     this.exited = true;
     console.log('hub: go program exited');
+    let closed = 0;
+    let failed = '';
     for (const ws of this.sockets.values()) {
       try {
         ws.close(1012, 'service restart');
-      } catch {}
+        closed++;
+      } catch (e) {
+        failed = ' (' + e + ')';
+      }
     }
+    console.log('hub: closed ' + closed + ' of ' + this.sockets.size + ' WebSockets of the exited program' + failed);
     this.sockets.clear();
     for (const s of this.streams.values()) {
       try {
