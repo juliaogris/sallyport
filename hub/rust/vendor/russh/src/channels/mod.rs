@@ -142,6 +142,9 @@ impl WindowSizeRef {
 /// Allows you to read from a channel without borrowing the session
 pub struct ChannelReadHalf {
     pub(crate) receiver: Receiver<ChannelMsg>,
+    /// sallyport: see [`ChannelRef`]. The `AsyncRead` readers return an error
+    /// instead of end of stream when it is set.
+    pub(crate) reader_too_slow: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for ChannelReadHalf {
@@ -410,7 +413,11 @@ impl<S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static> Channel<S> {
     ) -> (Self, ChannelRef) {
         let (tx, rx) = tokio::sync::mpsc::channel(channel_buffer_size);
         let window_size = WindowSizeRef::new(window_size);
-        let read_half = ChannelReadHalf { receiver: rx };
+        let reader_too_slow: Arc<std::sync::atomic::AtomicBool> = Default::default();
+        let read_half = ChannelReadHalf {
+            receiver: rx,
+            reader_too_slow: reader_too_slow.clone(),
+        };
         let write_half = ChannelWriteHalf {
             id,
             sender,
@@ -426,6 +433,7 @@ impl<S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static> Channel<S> {
             ChannelRef {
                 sender: tx,
                 window_size,
+                reader_too_slow,
             },
         )
     }

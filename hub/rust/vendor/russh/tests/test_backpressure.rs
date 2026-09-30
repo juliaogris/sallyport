@@ -2,7 +2,7 @@
 //! channels on the connection keep flowing. Upstream instead blocked the
 //! whole connection until the slow reader caught up.
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +12,8 @@ use russh::keys::PrivateKeyWithHashAlg;
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{client, Channel, ChannelMsg};
 use ssh_key::PrivateKey;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -21,18 +22,8 @@ const CHUNK: usize = 16 * 1024;
 
 #[tokio::test]
 async fn slow_reader_is_closed_and_others_flow() -> Result<(), anyhow::Error> {
-    let addr = addr();
-    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
-    tokio::spawn(Server::run(addr, got_tx));
-    while TcpStream::connect(addr).is_err() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    let config = Arc::new(client::Config::default());
-    let key = Arc::new(PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap());
-    let mut session = client::connect(config, addr, Client).await?;
-    let hash = session.best_supported_rsa_hash().await.unwrap().flatten();
-    assert!(session.authenticate_publickey("user", PrivateKeyWithHashAlg::new(key, hash)).await?.success());
+    let (server, mut got_rx) = Server::start(false).await;
+    let session = server.connect(client::Config::default()).await?;
 
     // The server never reads the first channel.
     let mut slow = session.channel_open_session().await?;
@@ -45,20 +36,35 @@ async fn slow_reader_is_closed_and_others_flow() -> Result<(), anyhow::Error> {
             break;
         }
     }
-    let closed = timeout(Duration::from_secs(5), async {
-        loop {
-            match slow.wait().await {
-                Some(ChannelMsg::Close) | None => return,
-                _ => {}
-            }
-        }
-    })
-    .await;
-    assert!(closed.is_ok(), "slow channel was not closed");
+    drop(writer);
+    wait_closed(&mut slow).await;
 
     fast.data(&b"hello"[..]).await?;
     let got = timeout(Duration::from_secs(5), got_rx.recv()).await?;
     assert_eq!(got.as_deref(), Some(&b"hello"[..]));
+
+    server.assert_held_reader_fails().await;
+    Ok(())
+}
+
+/// The queue is full of data when the EOF arrives, so the EOF closes the
+/// channel.
+#[tokio::test]
+async fn slow_reader_is_closed_on_eof() -> Result<(), anyhow::Error> {
+    let (server, _got_rx) = Server::start(false).await;
+    let session = server.connect(client::Config::default()).await?;
+
+    let mut slow = session.channel_open_session().await?;
+    let mut writer = slow.make_writer();
+    let data = vec![7u8; CHUNK];
+    for _ in 0..CHANNEL_BUFFER_SIZE {
+        writer.write_all(&data).await?;
+    }
+    drop(writer);
+    slow.eof().await?;
+    wait_closed(&mut slow).await;
+
+    server.assert_held_reader_fails().await;
     Ok(())
 }
 
@@ -67,19 +73,13 @@ async fn slow_reader_is_closed_and_others_flow() -> Result<(), anyhow::Error> {
 /// Upstream blocked the session loop once that queue filled.
 #[tokio::test]
 async fn unread_writer_channel_does_not_stall() -> Result<(), anyhow::Error> {
-    let addr = addr();
-    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
-    tokio::spawn(Server::run_writer(addr, got_tx));
-    while TcpStream::connect(addr).is_err() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
+    let (server, mut got_rx) = Server::start(true).await;
     // A small client window makes the client send many window adjusts.
-    let config = Arc::new(client::Config { window_size: 4 * CHUNK as u32, ..Default::default() });
-    let key = Arc::new(PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap());
-    let mut session = client::connect(config, addr, Client).await?;
-    let hash = session.best_supported_rsa_hash().await.unwrap().flatten();
-    assert!(session.authenticate_publickey("user", PrivateKeyWithHashAlg::new(key, hash)).await?.success());
+    let config = client::Config {
+        window_size: 4 * CHUNK as u32,
+        ..Default::default()
+    };
+    let session = server.connect(config).await?;
 
     let mut writer_side = session.channel_open_session().await?;
     let fast = session.channel_open_session().await?;
@@ -104,13 +104,22 @@ async fn unread_writer_channel_does_not_stall() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Finds an unused local address to bind the server to.
-fn addr() -> SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap()
+async fn wait_closed(channel: &mut Channel<client::Msg>) {
+    let closed = timeout(Duration::from_secs(5), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Close) | None => return,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "slow channel was not closed");
 }
 
 #[derive(Clone)]
 struct Server {
+    addr: SocketAddr,
     opened: Arc<AtomicUsize>,
     got: mpsc::UnboundedSender<Vec<u8>>,
     /// Holds the unread channel open.
@@ -120,27 +129,54 @@ struct Server {
 }
 
 impl Server {
-    async fn run(addr: SocketAddr, got: mpsc::UnboundedSender<Vec<u8>>) {
+    /// Starts a server on a local port. The receiver gets the data of every
+    /// channel after the first.
+    async fn start(write_first: bool) -> (Server, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (got, got_rx) = mpsc::unbounded_channel();
+        let server = Server {
+            addr: listener.local_addr().unwrap(),
+            opened: Default::default(),
+            got,
+            held: Default::default(),
+            write_first,
+        };
         let config = Arc::new(server::Config {
             keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
             channel_buffer_size: CHANNEL_BUFFER_SIZE,
             ..Default::default()
         });
-        let mut sh = Server { opened: Default::default(), got, held: Default::default(), write_first: false };
-        sh.run_on_address(config, addr).await.unwrap();
+        let mut sh = server.clone();
+        tokio::spawn(async move { sh.run_on_socket(config, &listener).await });
+        (server, got_rx)
     }
-}
 
-impl Server {
-    /// Like `run`, but the first channel is a writer that never reads.
-    async fn run_writer(addr: SocketAddr, got: mpsc::UnboundedSender<Vec<u8>>) {
-        let config = Arc::new(server::Config {
-            keys: vec![PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap()],
-            channel_buffer_size: CHANNEL_BUFFER_SIZE,
-            ..Default::default()
-        });
-        let mut sh = Server { opened: Default::default(), got, held: Default::default(), write_first: true };
-        sh.run_on_address(config, addr).await.unwrap();
+    async fn connect(
+        &self,
+        config: client::Config,
+    ) -> Result<client::Handle<Client>, anyhow::Error> {
+        let key = Arc::new(PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap());
+        let mut session = client::connect(Arc::new(config), self.addr, Client).await?;
+        let hash = session.best_supported_rsa_hash().await.unwrap().flatten();
+        assert!(session
+            .authenticate_publickey("user", PrivateKeyWithHashAlg::new(key, hash))
+            .await?
+            .success());
+        Ok(session)
+    }
+
+    /// Reads the held channel after the server closed it. The reader gets
+    /// the full queue and then an error, not a clean end of stream.
+    async fn assert_held_reader_fails(&self) {
+        let mut channel = self.held.lock().unwrap().pop().unwrap();
+        let mut got = Vec::new();
+        let read = channel.make_reader().read_to_end(&mut got).await;
+        assert!(
+            read.is_err(),
+            "read ended cleanly after {} bytes",
+            got.len()
+        );
+        assert_eq!(got.len(), CHANNEL_BUFFER_SIZE * CHUNK);
     }
 }
 
@@ -155,11 +191,19 @@ impl russh::server::Server for Server {
 impl russh::server::Handler for Server {
     type Error = anyhow::Error;
 
-    async fn auth_publickey(&mut self, _: &str, _: &ssh_key::PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        _: &str,
+        _: &ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
 
-    async fn channel_open_session(&mut self, mut channel: Channel<Msg>, _session: &mut Session) -> Result<bool, Self::Error> {
+    async fn channel_open_session(
+        &mut self,
+        mut channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
         if self.opened.fetch_add(1, Ordering::Relaxed) == 0 {
             if self.write_first {
                 // Write without ever calling `wait`, so nothing drains

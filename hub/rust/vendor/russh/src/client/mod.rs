@@ -520,7 +520,11 @@ impl<H: Handler> Handle<H> {
                             max_packet_size,
                             window_size: window_size_ref,
                         },
-                        read_half: ChannelReadHalf { receiver },
+                        read_half: ChannelReadHalf {
+                            receiver,
+                            // The client does not close slow readers.
+                            reader_too_slow: Default::default(),
+                        },
                     });
                 }
                 Some(ChannelMsg::OpenFailure(reason)) => {

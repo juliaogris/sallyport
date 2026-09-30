@@ -241,13 +241,14 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenAgent { channel_ref })
             .await
             .map_err(|_| Error::SendError)?;
 
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -260,13 +261,14 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenSession { channel_ref })
             .await
             .map_err(|_| Error::SendError)?;
 
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -282,6 +284,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenCustom {
@@ -292,7 +295,7 @@ impl Handle {
             .await
             .map_err(|_| Error::SendError)?;
 
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -311,6 +314,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenDirectTcpIp {
@@ -322,7 +326,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::SendError)?;
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -334,6 +338,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenDirectStreamLocal {
@@ -342,7 +347,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::SendError)?;
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -356,6 +361,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenForwardedTcpIp {
@@ -367,7 +373,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::SendError)?;
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -378,6 +384,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenForwardedStreamLocal {
@@ -386,7 +393,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::SendError)?;
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -398,6 +405,7 @@ impl Handle {
         let (sender, receiver) = channel(self.channel_buffer_size);
         let channel_ref = ChannelRef::new(sender);
         let window_size_ref = channel_ref.window_size().clone();
+        let reader_too_slow = channel_ref.reader_too_slow();
 
         self.sender
             .send(Msg::ChannelOpenX11 {
@@ -407,7 +415,7 @@ impl Handle {
             })
             .await
             .map_err(|_| Error::SendError)?;
-        self.wait_channel_confirmation(receiver, window_size_ref)
+        self.wait_channel_confirmation(receiver, window_size_ref, reader_too_slow)
             .await
     }
 
@@ -415,6 +423,7 @@ impl Handle {
         &self,
         mut receiver: Receiver<ChannelMsg>,
         window_size_ref: WindowSizeRef,
+        reader_too_slow: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Channel<Msg>, Error> {
         loop {
             match receiver.recv().await {
@@ -432,7 +441,10 @@ impl Handle {
                             max_packet_size,
                             window_size: window_size_ref,
                         },
-                        read_half: ChannelReadHalf { receiver },
+                        read_half: ChannelReadHalf {
+                            receiver,
+                            reader_too_slow,
+                        },
                     });
                 }
                 Some(ChannelMsg::OpenFailure(reason)) => {

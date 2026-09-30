@@ -633,7 +633,9 @@ impl Session {
                 };
                 if full {
                     warn!("channel {channel_num:?}: reader too slow at eof, closing");
-                    self.channels.remove(&channel_num);
+                    if let Some(chan) = self.channels.remove(&channel_num) {
+                        chan.mark_reader_too_slow();
+                    }
                     self.close(channel_num)?;
                     return Ok(());
                 }
@@ -694,8 +696,9 @@ impl Session {
                 // window is adjusted on receipt, so a reader that stops
                 // reading would block this loop, and with it every other
                 // channel on the connection. A full queue closes that
-                // channel instead; its reader sees end of stream after
-                // draining what is queued.
+                // channel instead. Its reader gets what is queued, and then
+                // `wait` returns `None` and the `AsyncRead` readers return an
+                // error.
                 let full = match self.channels.get(&channel_num) {
                     Some(chan) => matches!(
                         chan.try_send(msg),
@@ -705,7 +708,9 @@ impl Session {
                 };
                 if full {
                     warn!("channel {channel_num:?}: reader too slow, closing");
-                    self.channels.remove(&channel_num);
+                    if let Some(chan) = self.channels.remove(&channel_num) {
+                        chan.mark_reader_too_slow();
+                    }
                     self.close(channel_num)?;
                     return Ok(());
                 }

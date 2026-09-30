@@ -1,6 +1,7 @@
 use std::borrow::BorrowMut;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::task::{ready, Context, Poll};
 
 use tokio::io::AsyncRead;
@@ -38,6 +39,18 @@ where
             Some(msg) => msg,
             None => match ready!(self.channel.borrow_mut().receiver.poll_recv(cx)) {
                 Some(msg) => (msg, 0),
+                // sallyport: data after the full queue was lost, so this is
+                // not a clean end of stream.
+                None if self
+                    .channel
+                    .borrow_mut()
+                    .reader_too_slow
+                    .load(Ordering::Acquire) =>
+                {
+                    return Poll::Ready(Err(io::Error::other(
+                        "channel closed because its reader was too slow",
+                    )))
+                }
                 None => return Poll::Ready(Ok(())),
             },
         };
