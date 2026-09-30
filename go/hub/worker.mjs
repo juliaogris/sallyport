@@ -32,14 +32,20 @@ export default {
         // Reject before waking the Durable Object when the request is not a
         // WebSocket upgrade at all.
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
-          return new Response('upgrade required', { status: 426 });
+          return textError('upgrade required', 426);
         }
         return hub(env).fetch(req);
     }
     if (kind === 'login') return hub(env).fetch(req);
-    return new Response('not found', { status: 404 });
+    return textError('not found', 404);
   },
 };
+
+// Returns an error with the message as a body of bytes, so that it has no
+// Content-Type, like the Rust hub's errors.
+function textError(msg, status) {
+  return new Response(new TextEncoder().encode(msg), { status });
+}
 
 function hub(env) {
   return env.HUB.get(env.HUB.idFromName(HUB_INSTANCE));
@@ -254,6 +260,7 @@ export class Hub extends DurableObject {
 
 // Builds the Response Go described. head is "name: value" lines. Bit 1 of
 // flags asks for the body to go out as is, because it is already encoded.
+// Bit 2 sends a string body as bytes, with no Content-Type.
 function respond(status, head, body, flags, ws, stream) {
   const h = new Headers();
   if (head) {
@@ -265,5 +272,6 @@ function respond(status, head, body, flags, ws, stream) {
   const init = { status, headers: h };
   if (ws) init.webSocket = ws;
   if (flags & 1) init.encodeBody = 'manual';
+  if (flags & 2) body = new TextEncoder().encode(body);
   return new Response(stream || body || null, init);
 }

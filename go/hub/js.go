@@ -126,6 +126,9 @@ func (r *response) send(done js.Value) {
 	if r.manual {
 		flags |= 1
 	}
+	if r.raw && r.body != "" {
+		flags |= 2
+	}
 	ws, stream := js.Null(), js.Null()
 	if r.ws != nil {
 		ws = r.ws.client

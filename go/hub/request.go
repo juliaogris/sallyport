@@ -24,6 +24,8 @@ type response struct {
 	ws     *wsConn
 	// manual sends the body as is, for a body that is already encoded.
 	manual bool
+	// raw sends body as bytes, so the runtime adds no Content-Type.
+	raw bool
 }
 
 func (r *response) add(name, value string) *response {
@@ -31,10 +33,10 @@ func (r *response) add(name, value string) *response {
 	return r
 }
 
-// textError is the Rust hub's `Response::error`: the message as a text
-// body.
+// textError is the Rust hub's `Response::error`: the message as a body
+// with no Content-Type.
 func textError(msg string, status int) *response {
-	return &response{status: status, body: msg}
+	return &response{status: status, body: msg, raw: true}
 }
 
 func html(body string) *response {
