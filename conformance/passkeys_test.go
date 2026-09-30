@@ -95,23 +95,33 @@ func TestPasskeys(t *testing.T) {
 		require.True(t, strings.HasPrefix(c.Value, Alice+":"), "cookie %q", c.Value)
 	})
 
+	t.Run("remove", func(t *testing.T) {
+		answer := s.passkeyAnswer(t, session, AliceCredID)
+		resp := s.post(t, LoginHost, "/webapi/passkeys/delete", origin(LoginHost), passkeyDelete("laptop", answer), session)
+		body := readBody(t, resp)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
+		require.JSONEq(t, `{"ok": true}`, string(body))
+		names, _ := s.passkeyList(t, session)
+		require.Equal(t, []string{"passkey"}, names)
+	})
+
 	t.Run("finish without begin", func(t *testing.T) {
 		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential("tablet", "cred-alice-3"), session)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode, "body %s", body)
 		require.Equal(t, `session data for user "alice" not found`, string(body))
-		require.Len(t, s.auth.Devices(Alice), 2)
+		require.Len(t, s.auth.Devices(Alice), 1)
 	})
 
 	t.Run("used name", func(t *testing.T) {
 		s.passkeyBegin(t, session)
-		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential("laptop", "cred-alice-3"), session)
+		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), passkeyCredential(AliceDevice, "cred-alice-3"), session)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
-		require.Equal(t, `MFA device with name "laptop" already exists`, string(body))
+		require.Equal(t, `MFA device with name "`+AliceDevice+`" already exists`, string(body))
 		require.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
 		require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
-		require.Len(t, s.auth.Devices(Alice), 2)
+		require.Len(t, s.auth.Devices(Alice), 1)
 	})
 
 	t.Run("name too long", func(t *testing.T) {
@@ -138,16 +148,6 @@ func TestPasskeys(t *testing.T) {
 		resp = s.post(t, LoginHost, "/webapi/passkeys/begin", origin(LoginHost), answer, session)
 		readBody(t, resp)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	})
-
-	t.Run("remove", func(t *testing.T) {
-		answer := s.passkeyAnswer(t, session, AliceCredID)
-		resp := s.post(t, LoginHost, "/webapi/passkeys/delete", origin(LoginHost), passkeyDelete("laptop", answer), session)
-		body := readBody(t, resp)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
-		require.JSONEq(t, `{"ok": true}`, string(body))
-		names, _ := s.passkeyList(t, session)
-		require.Equal(t, []string{"passkey"}, names)
 	})
 
 	t.Run("remove unknown", func(t *testing.T) {
