@@ -125,7 +125,12 @@ impl Pool {
 
     /// Returns the number of verified streams waiting.
     pub fn ready(&self) -> usize {
-        self.ready.lock().unwrap().iter().filter(|s| s.alive.load(Ordering::Relaxed)).count()
+        self.ready
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.alive.load(Ordering::Relaxed))
+            .count()
     }
 
     /// Returns the number of verified WebSockets from auth, waiting or in
@@ -152,7 +157,9 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
     }
     let key = secret_bytes(env, "AUTH_CALLOUT_PUBKEY")?;
     if key.len() != 32 {
-        return Err(Error::RustError("AUTH_CALLOUT_PUBKEY is not 32 bytes".into()));
+        return Err(Error::RustError(
+            "AUTH_CALLOUT_PUBKEY is not 32 bytes".into(),
+        ));
     }
     let host = env.var("CALLOUT_HOST")?.to_string();
 
@@ -182,7 +189,14 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
 /// Runs the challenge on `ws`, and then adds it to `pool`. `ticket` is the
 /// socket's place among the sockets in the challenge, and `evicted`
 /// resolves when a newer socket takes that place.
-async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool, ticket: Ticket, mut evicted: oneshot::Receiver<()>) {
+async fn serve(
+    ws: WebSocket,
+    key: Vec<u8>,
+    host: String,
+    pool: &Pool,
+    ticket: Ticket,
+    mut evicted: oneshot::Receiver<()>,
+) {
     let mut events = match crate::wsevents::events(&ws) {
         Ok(e) => e,
         Err(err) => {
@@ -239,7 +253,12 @@ async fn serve(ws: WebSocket, key: Vec<u8>, host: String, pool: &Pool, ticket: T
 /// Checks auth's reply to the challenge `nonce`: auth's own nonce and an
 /// Ed25519 signature, by `key`, over [`DOMAIN`], `host`, `nonce` and auth's
 /// nonce. The error says which part is wrong.
-fn verify_reply(key: &[u8], host: &str, nonce: &[u8; NONCE], reply: &[u8]) -> std::result::Result<(), &'static str> {
+fn verify_reply(
+    key: &[u8],
+    host: &str,
+    nonce: &[u8; NONCE],
+    reply: &[u8],
+) -> std::result::Result<(), &'static str> {
     if reply.len() != NONCE + SIGNATURE {
         return Err("bad reply length");
     }
@@ -268,7 +287,10 @@ mod tests {
         let (hub_side, far) = tokio::io::duplex(64);
         let alive = Arc::new(AtomicBool::new(true));
         pool.open.fetch_add(1, Ordering::Relaxed);
-        let closed = pool.push(Stream { pipe: hub_side, alive: alive.clone() });
+        let closed = pool.push(Stream {
+            pipe: hub_side,
+            alive: alive.clone(),
+        });
         (far, alive, closed)
     }
 
@@ -282,7 +304,10 @@ mod tests {
         let _far = add(&pool).0;
         // Polled again without a wake-up from the deadline, so only the
         // notification from `push` can make it ready.
-        assert!(matches!(take.as_mut().poll(&mut cx), std::task::Poll::Ready(Some(_))));
+        assert!(matches!(
+            take.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Some(_))
+        ));
     }
 
     #[test]
@@ -346,7 +371,12 @@ mod tests {
         (pair, nonce, reply)
     }
 
-    fn sign(pair: &Ed25519KeyPair, host: &str, nonce: &[u8; NONCE], auth_nonce: &[u8; NONCE]) -> Vec<u8> {
+    fn sign(
+        pair: &Ed25519KeyPair,
+        host: &str,
+        nonce: &[u8; NONCE],
+        auth_nonce: &[u8; NONCE],
+    ) -> Vec<u8> {
         let msg = [DOMAIN, host.as_bytes(), nonce, auth_nonce].concat();
         [auth_nonce.as_slice(), pair.sign(&msg).as_ref()].concat()
     }
@@ -354,7 +384,10 @@ mod tests {
     #[test]
     fn verify_reply_accepts_a_valid_reply() {
         let (pair, nonce, reply) = challenge();
-        assert_eq!(verify_reply(pair.public_key().as_ref(), HOST, &nonce, &reply), Ok(()));
+        assert_eq!(
+            verify_reply(pair.public_key().as_ref(), HOST, &nonce, &reply),
+            Ok(())
+        );
     }
 
     #[test]
@@ -368,13 +401,43 @@ mod tests {
         type Case<'a> = (&'a str, &'a [u8], &'a str, [u8; NONCE], Vec<u8>);
         let cases: &[Case] = &[
             ("wrong host", key, "evil.example", nonce, reply.clone()),
-            ("signed for another host", key, HOST, nonce, sign(&pair, "evil.example", &nonce, &[2; NONCE])),
-            ("swapped nonces", key, HOST, nonce, sign(&pair, HOST, &[2; NONCE], &nonce)),
+            (
+                "signed for another host",
+                key,
+                HOST,
+                nonce,
+                sign(&pair, "evil.example", &nonce, &[2; NONCE]),
+            ),
+            (
+                "swapped nonces",
+                key,
+                HOST,
+                nonce,
+                sign(&pair, HOST, &[2; NONCE], &nonce),
+            ),
             ("other hub nonce", key, HOST, [3; NONCE], reply.clone()),
-            ("95 bytes", key, HOST, nonce, reply[..NONCE + SIGNATURE - 1].to_vec()),
-            ("97 bytes", key, HOST, nonce, [reply.as_slice(), &[0]].concat()),
+            (
+                "95 bytes",
+                key,
+                HOST,
+                nonce,
+                reply[..NONCE + SIGNATURE - 1].to_vec(),
+            ),
+            (
+                "97 bytes",
+                key,
+                HOST,
+                nonce,
+                [reply.as_slice(), &[0]].concat(),
+            ),
             ("empty", key, HOST, nonce, Vec::new()),
-            ("wrong key", other.public_key().as_ref(), HOST, nonce, reply.clone()),
+            (
+                "wrong key",
+                other.public_key().as_ref(),
+                HOST,
+                nonce,
+                reply.clone(),
+            ),
             ("tampered signature", key, HOST, nonce, tampered),
         ];
         for (name, key, host, nonce, reply) in cases {

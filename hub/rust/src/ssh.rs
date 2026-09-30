@@ -117,7 +117,14 @@ pub struct AgentHandler {
 }
 
 impl AgentHandler {
-    pub fn new(host_ca: PublicKey, cluster: String, proxy_name: String, shared: Shared, authed: Arc<AtomicBool>, ticket: crate::tunnel::Ticket) -> Self {
+    pub fn new(
+        host_ca: PublicKey,
+        cluster: String,
+        proxy_name: String,
+        shared: Shared,
+        authed: Arc<AtomicBool>,
+        ticket: crate::tunnel::Ticket,
+    ) -> Self {
         Self {
             conn: CONNECTIONS.fetch_add(1, Ordering::Relaxed),
             host_ca,
@@ -151,8 +158,12 @@ impl AgentHandler {
     /// `data` is one the hub serves and the passthrough limits allow it.
     /// The error says why the dial is refused.
     fn passthrough_stream(&self, data: &[u8]) -> std::result::Result<DuplexStream, String> {
-        let req: serde_json::Value = serde_json::from_slice(data).map_err(|e| format!("bad dial request: {e}"))?;
-        let addr = req.get("address").and_then(|a| a.as_str()).unwrap_or_default();
+        let req: serde_json::Value =
+            serde_json::from_slice(data).map_err(|e| format!("bad dial request: {e}"))?;
+        let addr = req
+            .get("address")
+            .and_then(|a| a.as_str())
+            .unwrap_or_default();
         if addr != ADDR_REMOTE_AUTH {
             return Err(format!("rejected dial to {addr:?}"));
         }
@@ -172,7 +183,12 @@ impl AgentHandler {
 /// SSH user `user`, or None if it is. The certificate must be signed by
 /// `host_ca` for `cluster`. russh has already checked the validity window
 /// and the certificate's own signature.
-fn reject_reason(host_ca: &PublicKey, cluster: &str, user: &str, cert: &Certificate) -> Option<String> {
+fn reject_reason(
+    host_ca: &PublicKey,
+    cluster: &str,
+    user: &str,
+    cert: &Certificate,
+) -> Option<String> {
     if cert.cert_type() != CertType::Host {
         return Some("not a host certificate".into());
     }
@@ -199,7 +215,9 @@ fn reject_reason(host_ca: &PublicKey, cluster: &str, user: &str, cert: &Certific
     // authenticate to itself.
     match ext.get(EXT_ROLE) {
         Some(r) if r == ROLE_APP || r == ROLE_INSTANCE => None,
-        other => Some(format!("role {other:?}, want {ROLE_APP:?} or {ROLE_INSTANCE:?}")),
+        other => Some(format!(
+            "role {other:?}, want {ROLE_APP:?} or {ROLE_INSTANCE:?}"
+        )),
     }
 }
 
@@ -227,12 +245,20 @@ impl Drop for AgentHandler {
 impl russh::server::Handler for AgentHandler {
     type Error = russh::Error;
 
-    async fn auth_publickey(&mut self, user: &str, _key: &PublicKey) -> std::result::Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _key: &PublicKey,
+    ) -> std::result::Result<Auth, Self::Error> {
         console_log!("ssh: rejected plain key for {user:?}");
         self.fail_auth()
     }
 
-    async fn auth_openssh_certificate(&mut self, user: &str, cert: &Certificate) -> std::result::Result<Auth, Self::Error> {
+    async fn auth_openssh_certificate(
+        &mut self,
+        user: &str,
+        cert: &Certificate,
+    ) -> std::result::Result<Auth, Self::Error> {
         if let Some(reason) = reject_reason(&self.host_ca, &self.cluster, user, cert) {
             console_log!("ssh: rejected certificate for {user:?}: {reason}");
             return self.fail_auth();
@@ -246,7 +272,12 @@ impl russh::server::Handler for AgentHandler {
         Ok(Auth::Accept)
     }
 
-    async fn channel_open_unknown(&mut self, typ: &str, channel: Channel<Msg>, _session: &mut Session) -> std::result::Result<bool, Self::Error> {
+    async fn channel_open_unknown(
+        &mut self,
+        typ: &str,
+        channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
         if self.agent_channels.len() >= MAX_AGENT_CHANNELS {
             console_log!("ssh: rejected channel, {MAX_AGENT_CHANNELS} open");
             return Ok(false);
@@ -286,7 +317,14 @@ impl russh::server::Handler for AgentHandler {
         Ok(true)
     }
 
-    async fn channel_request_unknown(&mut self, channel: ChannelId, typ: &str, _want_reply: bool, data: &[u8], session: &mut Session) -> std::result::Result<bool, Self::Error> {
+    async fn channel_request_unknown(
+        &mut self,
+        channel: ChannelId,
+        typ: &str,
+        _want_reply: bool,
+        data: &[u8],
+        session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
         match typ {
             REQ_PING if Some(channel) == self.heartbeat => {
                 if !self.pinged {
@@ -294,7 +332,10 @@ impl russh::server::Handler for AgentHandler {
                     console_log!("ssh: first ping {:?}", String::from_utf8_lossy(data));
                     if let Some(host_id) = self.host_id.clone() {
                         // The SSH user is already `<host UUID>.<cluster>`.
-                        wasm_bindgen_futures::spawn_local(probe_dial(session.handle(), host_id.clone()));
+                        wasm_bindgen_futures::spawn_local(probe_dial(
+                            session.handle(),
+                            host_id.clone(),
+                        ));
                         *self.shared.app_tunnel.lock().unwrap() = Some(AppTunnel {
                             handle: session.handle(),
                             server_id: host_id,
@@ -302,7 +343,10 @@ impl russh::server::Handler for AgentHandler {
                             forwards: Default::default(),
                         });
                     }
-                    wasm_bindgen_futures::spawn_local(discovery_loop(session.handle(), self.proxy_name.clone()));
+                    wasm_bindgen_futures::spawn_local(discovery_loop(
+                        session.handle(),
+                        self.proxy_name.clone(),
+                    ));
                 }
                 Ok(true)
             }
@@ -321,13 +365,18 @@ impl russh::server::Handler for AgentHandler {
                 // The bytes are the agent's own mTLS to auth. The hub only
                 // copies them.
                 console_log!("ssh: passthrough to auth over the callout");
-                let (conn_count, total_count) = (self.conn_passthroughs.clone(), self.shared.passthroughs.clone());
+                let (conn_count, total_count) = (
+                    self.conn_passthroughs.clone(),
+                    self.shared.passthroughs.clone(),
+                );
                 conn_count.fetch_add(1, Ordering::Relaxed);
                 total_count.fetch_add(1, Ordering::Relaxed);
                 wasm_bindgen_futures::spawn_local(async move {
                     let mut stream = ch.into_stream();
                     match tokio::io::copy_bidirectional(&mut stream, &mut pipe).await {
-                        Ok((up, down)) => console_log!("ssh: passthrough closed, {up} up, {down} down"),
+                        Ok((up, down)) => {
+                            console_log!("ssh: passthrough closed, {up} up, {down} down")
+                        }
                         Err(err) => console_log!("ssh: passthrough error: {err}"),
                     }
                     conn_count.fetch_sub(1, Ordering::Relaxed);
@@ -342,13 +391,23 @@ impl russh::server::Handler for AgentHandler {
         }
     }
 
-    async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> std::result::Result<(), Self::Error> {
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
         self.transports.lock().unwrap().remove(&channel);
         self.agent_channels.remove(&channel);
         Ok(())
     }
 
-    async fn global_request_unknown(&mut self, typ: &str, _want_reply: bool, _data: &[u8], _session: &mut Session) -> std::result::Result<bool, Self::Error> {
+    async fn global_request_unknown(
+        &mut self,
+        typ: &str,
+        _want_reply: bool,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> std::result::Result<bool, Self::Error> {
         Ok(typ == GLOBAL_KEEPALIVE)
     }
 }
@@ -368,7 +427,9 @@ async fn probe_dial(handle: Handle, server_id: String) {
             "server_id": server_id,
             "conn_type": "app",
         });
-        let res = ch.request_custom(REQ_DIAL, true, req.to_string().into_bytes()).await;
+        let res = ch
+            .request_custom(REQ_DIAL, true, req.to_string().into_bytes())
+            .await;
         let _ = ch.close().await;
         res.map_err(|e| format!("request failed: {e}"))
     };
@@ -395,7 +456,10 @@ async fn discovery_loop(handle: Handle, proxy_name: String) {
     })
     .to_string();
     loop {
-        if let Err(err) = ch.request_custom(REQ_DISCOVERY, false, req.clone().into_bytes()).await {
+        if let Err(err) = ch
+            .request_custom(REQ_DISCOVERY, false, req.clone().into_bytes())
+            .await
+        {
             console_log!("ssh: discovery failed: {err}");
             break;
         }
@@ -432,7 +496,12 @@ mod tests {
 
     /// Returns a certificate of type `typ` for `USER` with the given role,
     /// signed by `ca`, after `edit` changes the builder.
-    fn cert_of(typ: CertType, ca: &PrivateKey, role: Option<&str>, edit: impl FnOnce(&mut Builder)) -> Certificate {
+    fn cert_of(
+        typ: CertType,
+        ca: &PrivateKey,
+        role: Option<&str>,
+        edit: impl FnOnce(&mut Builder),
+    ) -> Certificate {
         let mut b = Builder::new([7; 16], key(2).public_key(), 0, u64::MAX).unwrap();
         b.cert_type(typ).unwrap();
         b.valid_principal(USER).unwrap();
@@ -453,7 +522,11 @@ mod tests {
         let ca = key(1);
         for role in [ROLE_APP, ROLE_INSTANCE] {
             let cert = cert(&ca, Some(role), |_| {});
-            assert_eq!(reject_reason(ca.public_key(), CLUSTER, USER, &cert), None, "{role}");
+            assert_eq!(
+                reject_reason(ca.public_key(), CLUSTER, USER, &cert),
+                None,
+                "{role}"
+            );
         }
     }
 
@@ -462,13 +535,33 @@ mod tests {
         let ca = key(1);
         let other_ca = key(3);
         let cases: Vec<(Certificate, &str, &str)> = vec![
-            (cert_of(CertType::User, &ca, Some(ROLE_APP), |_| {}), USER, "not a host certificate"),
-            (cert(&ca, Some(ROLE_APP), |_| {}), "other.example.com", "not a certificate principal"),
-            (cert(&ca, Some(ROLE_APP), |b| {
-                b.critical_option("force-command", "true").unwrap();
-            }), USER, "critical options"),
-            (cert(&other_ca, Some(ROLE_APP), |_| {}), USER, "not signed by the cluster host CA"),
-            (cert(&ca, Some("Proxy"), |_| {}), USER, "role Some(\"Proxy\")"),
+            (
+                cert_of(CertType::User, &ca, Some(ROLE_APP), |_| {}),
+                USER,
+                "not a host certificate",
+            ),
+            (
+                cert(&ca, Some(ROLE_APP), |_| {}),
+                "other.example.com",
+                "not a certificate principal",
+            ),
+            (
+                cert(&ca, Some(ROLE_APP), |b| {
+                    b.critical_option("force-command", "true").unwrap();
+                }),
+                USER,
+                "critical options",
+            ),
+            (
+                cert(&other_ca, Some(ROLE_APP), |_| {}),
+                USER,
+                "not signed by the cluster host CA",
+            ),
+            (
+                cert(&ca, Some("Proxy"), |_| {}),
+                USER,
+                "role Some(\"Proxy\")",
+            ),
             (cert(&ca, Some("Node"), |_| {}), USER, "role Some(\"Node\")"),
             (cert(&ca, None, |_| {}), USER, "role None"),
         ];
@@ -494,7 +587,14 @@ mod tests {
             auth_pipe: Default::default(),
         };
         let (ticket, _, _) = crate::tunnel::Pending::default().admit(1);
-        let mut handler = AgentHandler::new(key(1).public_key().clone(), CLUSTER.into(), "hub".into(), shared, Default::default(), ticket);
+        let mut handler = AgentHandler::new(
+            key(1).public_key().clone(),
+            CLUSTER.into(),
+            "hub".into(),
+            shared,
+            Default::default(),
+            ticket,
+        );
         assert!(matches!(handler.fail_auth(), Ok(Auth::Reject { .. })));
         assert!(matches!(handler.fail_auth(), Ok(Auth::Reject { .. })));
         assert!(matches!(handler.fail_auth(), Err(russh::Error::Disconnect)));

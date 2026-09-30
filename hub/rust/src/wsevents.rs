@@ -48,20 +48,26 @@ pub fn events(ws: &WebSocket) -> Result<Events> {
     let queued = Rc::new(Cell::new(0usize));
     let t = tx.clone();
     let (q, sock) = (queued.clone(), ws.clone());
-    let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
-        if t.is_closed() {
-            return;
-        }
-        let n = message_len(&e.data());
-        if q.get() + n > MAX_QUEUED_BYTES {
-            let _ = sock.close_with_code_and_reason(TOO_BIG, "reader too slow");
-            let _ = t.unbounded_send((0, Err(Error::RustError(format!("more than {MAX_QUEUED_BYTES} bytes queued")))));
-            t.close_channel();
-            return;
-        }
-        q.set(q.get() + n);
-        let _ = t.unbounded_send((n, Ok(WebsocketEvent::Message(e.into()))));
-    });
+    let message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
+            if t.is_closed() {
+                return;
+            }
+            let n = message_len(&e.data());
+            if q.get() + n > MAX_QUEUED_BYTES {
+                let _ = sock.close_with_code_and_reason(TOO_BIG, "reader too slow");
+                let _ = t.unbounded_send((
+                    0,
+                    Err(Error::RustError(format!(
+                        "more than {MAX_QUEUED_BYTES} bytes queued"
+                    ))),
+                ));
+                t.close_channel();
+                return;
+            }
+            q.set(q.get() + n);
+            let _ = t.unbounded_send((n, Ok(WebsocketEvent::Message(e.into()))));
+        });
     let t = tx.clone();
     let close = Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |e: web_sys::CloseEvent| {
         let _ = t.unbounded_send((0, Ok(WebsocketEvent::Close(e.into()))));
@@ -112,13 +118,20 @@ fn message_len(data: &worker::wasm_bindgen::JsValue) -> usize {
     if let Some(buf) = data.dyn_ref::<js_sys::ArrayBuffer>() {
         return buf.byte_length() as usize;
     }
-    data.dyn_ref::<js_sys::JsString>().map_or(0, |s| s.length() as usize)
+    data.dyn_ref::<js_sys::JsString>()
+        .map_or(0, |s| s.length() as usize)
 }
 
 impl Drop for Events {
     fn drop(&mut self) {
-        let _ = self.ws.remove_event_listener_with_callback("message", self.message.as_ref().unchecked_ref());
-        let _ = self.ws.remove_event_listener_with_callback("close", self.close.as_ref().unchecked_ref());
-        let _ = self.ws.remove_event_listener_with_callback("error", self.error.as_ref().unchecked_ref());
+        let _ = self
+            .ws
+            .remove_event_listener_with_callback("message", self.message.as_ref().unchecked_ref());
+        let _ = self
+            .ws
+            .remove_event_listener_with_callback("close", self.close.as_ref().unchecked_ref());
+        let _ = self
+            .ws
+            .remove_event_listener_with_callback("error", self.error.as_ref().unchecked_ref());
     }
 }

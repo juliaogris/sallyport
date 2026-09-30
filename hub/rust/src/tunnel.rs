@@ -17,8 +17,8 @@ use base64::Engine as _;
 use futures::channel::oneshot;
 use futures::future::{select, Either};
 use futures::StreamExt;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use russh::keys::ssh_key::{Certificate, PrivateKey, PublicKey};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use crate::app::TunnelSlot;
@@ -99,7 +99,10 @@ impl DurableObject for Hub {
         // The login host is also the agents' `PUBLIC_ADDR` and auth's
         // `CALLOUT_HOST`, so the agent and auth reach these paths on it.
         // They are not browser requests.
-        let peer_path = matches!(req.path().as_str(), "/webapi/connectionupgrade" | authpipe::PATH);
+        let peer_path = matches!(
+            req.path().as_str(),
+            "/webapi/connectionupgrade" | authpipe::PATH
+        );
         if let Some(kind) = crate::web::classify(&self.env, &host) {
             let cx = crate::web::Ctx {
                 env: &self.env,
@@ -108,8 +111,12 @@ impl DurableObject for Hub {
                 tunnel: &self.app_tunnel,
             };
             match kind {
-                crate::web::Host::App(app) => return crate::web::app_host_request(req, &cx, &app).await,
-                crate::web::Host::Login if !peer_path => return crate::web::login_host_request(req, &cx).await,
+                crate::web::Host::App(app) => {
+                    return crate::web::app_host_request(req, &cx, &app).await
+                }
+                crate::web::Host::Login if !peer_path => {
+                    return crate::web::login_host_request(req, &cx).await
+                }
                 crate::web::Host::Login => {}
             }
         }
@@ -120,7 +127,9 @@ impl DurableObject for Hub {
             #[cfg(feature = "spikes")]
             crate::s5::PATH => return crate::s5::handle(&self.env, &self.auth_pipe).await,
             #[cfg(feature = "spikes")]
-            p if p.starts_with(crate::s5login::LOGIN) => return crate::s5login::handle(req, &self.env, &self.auth_pipe).await,
+            p if p.starts_with(crate::s5login::LOGIN) => {
+                return crate::s5login::handle(req, &self.env, &self.auth_pipe).await
+            }
             _ => {}
         }
         let protocols = req
@@ -137,7 +146,10 @@ impl DurableObject for Hub {
         if req.headers().get("Origin")?.is_some() {
             return Response::error("origin not allowed", 403);
         }
-        let authenticated = self.connections.get().saturating_sub(self.unauthenticated.waiting());
+        let authenticated = self
+            .connections
+            .get()
+            .saturating_sub(self.unauthenticated.waiting());
         if authenticated >= MAX_CONNECTIONS {
             console_log!("tunnel: connection limit reached");
             return Response::error("too many connections", 503);
@@ -160,7 +172,9 @@ impl DurableObject for Hub {
 
         let (ticket, evicted, evicted_one) = self.unauthenticated.admit(MAX_UNAUTHENTICATED);
         if evicted_one {
-            console_log!("tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the oldest");
+            console_log!(
+                "tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the oldest"
+            );
         }
         let (ws_side, tls_side) = tokio::io::duplex(PIPE_BYTES);
         let connections = self.connections.clone();
@@ -177,7 +191,8 @@ impl DurableObject for Hub {
             auth_pipe: self.auth_pipe.clone(),
         };
         let authed = Arc::new(AtomicBool::new(false));
-        let handler = AgentHandler::new(host_ca, cluster, proxy_name, shared, authed.clone(), ticket);
+        let handler =
+            AgentHandler::new(host_ca, cluster, proxy_name, shared, authed.clone(), ticket);
         wasm_bindgen_futures::spawn_local(async move {
             let session = pin!(serve(tls_side, tls, ssh, handler));
             // Resolves at the deadline, when a newer connection evicts this
@@ -185,7 +200,9 @@ impl DurableObject for Hub {
             let watch = pin!(async {
                 match select(pin!(crate::sockets::sleep(AUTH_DEADLINE)), evicted).await {
                     Either::Left(_) => format!("not authenticated after {AUTH_DEADLINE:?}"),
-                    Either::Right(_) => "closed for a newer connection that is not authenticated".to_string(),
+                    Either::Right(_) => {
+                        "closed for a newer connection that is not authenticated".to_string()
+                    }
                 }
             });
             let res = match select(session, watch).await {
@@ -212,14 +229,23 @@ impl DurableObject for Hub {
 
 /// Logs the hub's counters every [`HEARTBEAT_EVERY`], so that `wrangler
 /// tail` shows whether the object is alive and what it holds.
-async fn heartbeat(connections: Rc<Cell<usize>>, unauthenticated: Pending, passthroughs: Arc<AtomicUsize>, app_tunnel: TunnelSlot, auth_pipe: authpipe::Pool) {
+async fn heartbeat(
+    connections: Rc<Cell<usize>>,
+    unauthenticated: Pending,
+    passthroughs: Arc<AtomicUsize>,
+    app_tunnel: TunnelSlot,
+    auth_pipe: authpipe::Pool,
+) {
     loop {
         crate::sockets::sleep(HEARTBEAT_EVERY).await;
         let last = crate::ssh::LAST_DISCOVERY_MS.load(Ordering::Relaxed);
         let discovery = if last == 0 {
             "never".to_string()
         } else {
-            format!("{}s ago", Date::now().as_millis().saturating_sub(last) / 1000)
+            format!(
+                "{}s ago",
+                Date::now().as_millis().saturating_sub(last) / 1000
+            )
         };
         console_log!(
             "hub: heartbeat, {} tunnels ({} not authenticated), app tunnel {}, auth streams {} open {} ready {} in the challenge, {} passthroughs, discovery {discovery}, memory {} MiB",
@@ -321,9 +347,17 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
 }
 
 /// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
-async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>, ssh: Arc<russh::server::Config>, handler: AgentHandler) -> std::result::Result<(), String> {
+async fn serve(
+    pipe: DuplexStream,
+    tls: Arc<rustls::ServerConfig>,
+    ssh: Arc<russh::server::Config>,
+    handler: AgentHandler,
+) -> std::result::Result<(), String> {
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-    let stream = acceptor.accept(pipe).await.map_err(|e| format!("tls accept: {e}"))?;
+    let stream = acceptor
+        .accept(pipe)
+        .await
+        .map_err(|e| format!("tls accept: {e}"))?;
     let alpn = stream
         .get_ref()
         .1
@@ -346,8 +380,10 @@ async fn serve(pipe: DuplexStream, tls: Arc<rustls::ServerConfig>, ssh: Arc<russ
 fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
     let key = secret_string(env, "HUB_SSH_KEY")?;
     let cert = secret_string(env, "HUB_SSH_CERT")?;
-    let key = PrivateKey::from_openssh(rewrap_openssh(&key)).map_err(|e| Error::RustError(format!("HUB_SSH_KEY: {e}")))?;
-    let cert = Certificate::from_openssh(cert.trim()).map_err(|e| Error::RustError(format!("HUB_SSH_CERT: {e}")))?;
+    let key = PrivateKey::from_openssh(rewrap_openssh(&key))
+        .map_err(|e| Error::RustError(format!("HUB_SSH_KEY: {e}")))?;
+    let cert = Certificate::from_openssh(cert.trim())
+        .map_err(|e| Error::RustError(format!("HUB_SSH_CERT: {e}")))?;
     let cluster = env.var("CLUSTER_NAME")?.to_string();
     let proxy_name = cert
         .valid_principals()
@@ -377,10 +413,7 @@ fn ssh_config(env: &Env) -> Result<(russh::server::Config, String)> {
 /// Re-wraps an OpenSSH private key at 70 columns. Go's PEM encoder wraps
 /// at 64, and the ssh-key crate only accepts OpenSSH's own 70.
 fn rewrap_openssh(pem: &str) -> String {
-    let body: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     let mut out = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
     for chunk in body.as_bytes().chunks(70) {
         out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
@@ -421,7 +454,8 @@ fn server_tls_config(env: &Env) -> Result<rustls::ServerConfig> {
 
 /// Reads a base64-encoded secret that is UTF-8 text.
 fn secret_string(env: &Env, name: &str) -> Result<String> {
-    String::from_utf8(secret_bytes(env, name)?).map_err(|e| Error::RustError(format!("{name}: {e}")))
+    String::from_utf8(secret_bytes(env, name)?)
+        .map_err(|e| Error::RustError(format!("{name}: {e}")))
 }
 
 /// Connections that have not proved who they are, oldest first. Each one
@@ -464,7 +498,14 @@ impl Pending {
         let id = inner.next;
         inner.next += 1;
         inner.queue.push_back((id, tx));
-        (Ticket { id, pending: self.clone() }, rx, evicted)
+        (
+            Ticket {
+                id,
+                pending: self.clone(),
+            },
+            rx,
+            evicted,
+        )
     }
 
     /// Returns the number of connections waiting.
@@ -475,7 +516,12 @@ impl Pending {
 
 impl Drop for Ticket {
     fn drop(&mut self) {
-        self.pending.inner.lock().unwrap().queue.retain(|(id, _)| *id != self.id);
+        self.pending
+            .inner
+            .lock()
+            .unwrap()
+            .queue
+            .retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -528,7 +574,9 @@ mod tests {
 
     #[test]
     fn rewrap_openssh_wraps_at_70_columns() {
-        let body: String = (0..150).map(|i| char::from(b'A' + (i % 26) as u8)).collect();
+        let body: String = (0..150)
+            .map(|i| char::from(b'A' + (i % 26) as u8))
+            .collect();
         let wrap = |width: usize, eol: &str| {
             let mut pem = format!("-----BEGIN OPENSSH PRIVATE KEY-----{eol}");
             for chunk in body.as_bytes().chunks(width) {

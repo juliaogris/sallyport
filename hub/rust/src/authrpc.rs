@@ -15,7 +15,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::future::{select, Either};
 use futures::FutureExt;
 use h2::client::SendRequest;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use tokio::io::DuplexStream;
 use worker::*;
 
@@ -333,13 +333,21 @@ pub struct ChangeUserAuthenticationResponse {
 /// Builds a TLS client config toward auth, with the client cert and key in
 /// the named base64 PEM secrets.
 pub fn tls_config(env: &Env, cert_secret: &str, key_secret: &str) -> Result<rustls::ClientConfig> {
-    tls_config_from_pem(env, &secret_bytes(env, cert_secret)?, &secret_bytes(env, key_secret)?)
-        .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))
+    tls_config_from_pem(
+        env,
+        &secret_bytes(env, cert_secret)?,
+        &secret_bytes(env, key_secret)?,
+    )
+    .map_err(|e| Error::RustError(format!("{cert_secret}: {e}")))
 }
 
 /// Builds a TLS client config toward auth from a PEM cert and key, with
 /// ALPN `h2`.
-pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ClientConfig> {
+pub fn tls_config_from_pem(
+    env: &Env,
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<rustls::ClientConfig> {
     let mut config = client_tls(env, cert_pem, key_pem)?;
     config.alpn_protocols = vec![ALPN_H2.to_vec()];
     Ok(config)
@@ -359,7 +367,8 @@ pub fn client_tls(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::
     let certs = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::RustError(format!("cert: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| Error::RustError(format!("key: {e}")))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| Error::RustError(format!("key: {e}")))?;
     rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .map_err(|e| Error::RustError(e.to_string()))?
@@ -370,7 +379,10 @@ pub fn client_tls(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::
 
 /// Runs `fut` until it finishes or [`CALL_DEADLINE`] passes. On the
 /// deadline, it drops `fut` and returns an error that names `what`.
-async fn with_deadline<T, E: From<String>>(what: &str, fut: impl Future<Output = std::result::Result<T, E>>) -> std::result::Result<T, E> {
+async fn with_deadline<T, E: From<String>>(
+    what: &str,
+    fut: impl Future<Output = std::result::Result<T, E>>,
+) -> std::result::Result<T, E> {
     match select(pin!(fut), pin!(crate::sockets::sleep(CALL_DEADLINE))).await {
         Either::Left((res, _)) => res,
         Either::Right(_) => Err(format!("{what}: no answer within {CALL_DEADLINE:?}").into()),
@@ -380,11 +392,17 @@ async fn with_deadline<T, E: From<String>>(what: &str, fut: impl Future<Output =
 /// Runs TLS and the HTTP/2 handshake on an auth pipe stream within
 /// [`CALL_DEADLINE`]. The returned sender makes calls until the stream
 /// closes.
-pub async fn connect(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> std::result::Result<SendRequest<Bytes>, String> {
+pub async fn connect(
+    stream: DuplexStream,
+    tls: Arc<rustls::ClientConfig>,
+) -> std::result::Result<SendRequest<Bytes>, String> {
     with_deadline("connect to auth", connect_inner(stream, tls)).await
 }
 
-async fn connect_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> std::result::Result<SendRequest<Bytes>, String> {
+async fn connect_inner(
+    stream: DuplexStream,
+    tls: Arc<rustls::ClientConfig>,
+) -> std::result::Result<SendRequest<Bytes>, String> {
     let name = ServerName::try_from(AUTH_SNI).map_err(|e| e.to_string())?;
     let tls = tokio_rustls::TlsConnector::from(tls)
         .connect(name, stream)
@@ -392,9 +410,14 @@ async fn connect_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> 
         .map_err(|e| format!("tls to auth: {e}"))?;
     let alpn = tls.get_ref().1.alpn_protocol().unwrap_or_default().to_vec();
     if alpn != ALPN_H2 {
-        return Err(format!("auth chose ALPN {:?}, want h2", String::from_utf8_lossy(&alpn)));
+        return Err(format!(
+            "auth chose ALPN {:?}, want h2",
+            String::from_utf8_lossy(&alpn)
+        ));
     }
-    let (send, conn) = h2::client::handshake(tls).await.map_err(|e| format!("h2 handshake: {e}"))?;
+    let (send, conn) = h2::client::handshake(tls)
+        .await
+        .map_err(|e| format!("h2 handshake: {e}"))?;
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(err) = conn.await {
             console_log!("authrpc: h2 connection ended: {err}");
@@ -407,7 +430,12 @@ async fn connect_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> 
 #[derive(Debug)]
 pub enum CallError {
     /// Auth answered with a gRPC status other than OK.
-    Status { path: String, http: u16, code: String, message: String },
+    Status {
+        path: String,
+        http: u16,
+        code: String,
+        message: String,
+    },
     /// Any other failure: the transport, the deadline, or a response the hub
     /// cannot decode.
     Other(String),
@@ -427,7 +455,12 @@ impl CallError {
 impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CallError::Status { path, http, code, message } => write!(f, "{path}: http {http}, grpc-status {code:?}: {message}"),
+            CallError::Status {
+                path,
+                http,
+                code,
+                message,
+            } => write!(f, "{path}: http {http}, grpc-status {code:?}: {message}"),
             CallError::Other(err) => f.write_str(err),
         }
     }
@@ -452,11 +485,19 @@ impl From<CallError> for String {
 }
 
 /// Makes one unary call within [`CALL_DEADLINE`].
-pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(send: &SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
+pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(
+    send: &SendRequest<Bytes>,
+    path: &str,
+    req: &Req,
+) -> std::result::Result<Resp, CallError> {
     with_deadline(path, unary_inner(send.clone(), path, req)).await
 }
 
-async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
+async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(
+    send: SendRequest<Bytes>,
+    path: &str,
+    req: &Req,
+) -> std::result::Result<Resp, CallError> {
     let mut frame = BytesMut::with_capacity(5 + req.encoded_len());
     frame.put_u8(0);
     frame.put_u32(req.encoded_len() as u32);
@@ -470,8 +511,12 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
         .body(())
         .map_err(|e| format!("{path}: {e}"))?;
     let mut send = send.ready().await.map_err(|e| format!("{path}: {e}"))?;
-    let (response, mut body_tx) = send.send_request(request, false).map_err(|e| format!("{path}: {e}"))?;
-    body_tx.send_data(frame.freeze(), true).map_err(|e| format!("{path}: {e}"))?;
+    let (response, mut body_tx) = send
+        .send_request(request, false)
+        .map_err(|e| format!("{path}: {e}"))?;
+    body_tx
+        .send_data(frame.freeze(), true)
+        .map_err(|e| format!("{path}: {e}"))?;
 
     let response = response.await.map_err(|e| format!("{path}: {e}"))?;
     let (parts, mut body) = response.into_parts();
@@ -484,9 +529,15 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
     let trailers = body.trailers().await.map_err(|e| format!("{path}: {e}"))?;
     // A call that fails before any data sends its status in the headers.
     let status_from = trailers.as_ref().unwrap_or(&parts.headers);
-    let status = status_from.get("grpc-status").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let status = status_from
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if status != "0" {
-        let message = status_from.get("grpc-message").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let message = status_from
+            .get("grpc-message")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         return Err(CallError::Status {
             path: path.to_string(),
             http: parts.status.as_u16(),
@@ -512,13 +563,23 @@ fn unframe(data: &[u8]) -> std::result::Result<&[u8], String> {
 /// within [`CALL_DEADLINE`]. Auth's TLS offers only `h2`, and `h2` goes to
 /// gRPC, so this runs TLS with no ALPN and HTTP/1.1. Returns the HTTP status
 /// and the body.
-pub async fn post_json(stream: DuplexStream, tls: &rustls::ClientConfig, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
+pub async fn post_json(
+    stream: DuplexStream,
+    tls: &rustls::ClientConfig,
+    path: &str,
+    body: Vec<u8>,
+) -> std::result::Result<(u16, Vec<u8>), String> {
     let mut tls = tls.clone();
     tls.alpn_protocols.clear();
     with_deadline(path, post_json_inner(stream, Arc::new(tls), path, body)).await
 }
 
-async fn post_json_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>, path: &str, body: Vec<u8>) -> std::result::Result<(u16, Vec<u8>), String> {
+async fn post_json_inner(
+    stream: DuplexStream,
+    tls: Arc<rustls::ClientConfig>,
+    path: &str,
+    body: Vec<u8>,
+) -> std::result::Result<(u16, Vec<u8>), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let name = ServerName::try_from(AUTH_SNI).map_err(|e| e.to_string())?;
     let mut tls = tokio_rustls::TlsConnector::from(tls)
@@ -529,8 +590,12 @@ async fn post_json_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>, p
         "POST {path} HTTP/1.1\r\nHost: {AUTH_SNI}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    tls.write_all(head.as_bytes()).await.map_err(|e| format!("{path}: {e}"))?;
-    tls.write_all(&body).await.map_err(|e| format!("{path}: {e}"))?;
+    tls.write_all(head.as_bytes())
+        .await
+        .map_err(|e| format!("{path}: {e}"))?;
+    tls.write_all(&body)
+        .await
+        .map_err(|e| format!("{path}: {e}"))?;
     let mut resp = Vec::new();
     match tls.read_to_end(&mut resp).await {
         Ok(_) => {}
@@ -549,7 +614,11 @@ async fn post_json_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>, p
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| format!("{path}: bad status line"))?;
     let body = &resp[end + 4..];
-    let body = if head.contains("transfer-encoding: chunked") { dechunk(body)? } else { body.to_vec() };
+    let body = if head.contains("transfer-encoding: chunked") {
+        dechunk(body)?
+    } else {
+        body.to_vec()
+    };
     Ok((status, body))
 }
 
@@ -559,13 +628,17 @@ fn dechunk(mut b: &[u8]) -> std::result::Result<Vec<u8>, String> {
     loop {
         let line = b.windows(2).position(|w| w == b"\r\n").ok_or("bad chunk")?;
         let size = std::str::from_utf8(&b[..line]).map_err(|e| e.to_string())?;
-        let size = usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16).map_err(|e| e.to_string())?;
+        let size = usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|e| e.to_string())?;
         b = &b[line + 2..];
         if size == 0 {
             return Ok(out);
         }
         // `size` comes from the peer, so `size + 2` can wrap on wasm32.
-        let (Some(chunk), Some(rest)) = (b.get(..size), size.checked_add(2).and_then(|end| b.get(end..))) else {
+        let (Some(chunk), Some(rest)) = (
+            b.get(..size),
+            size.checked_add(2).and_then(|end| b.get(end..)),
+        ) else {
             return Err("short chunk".into());
         };
         out.extend_from_slice(chunk);
@@ -620,7 +693,12 @@ impl HubAuth {
     /// closed. When `broken` names the cached generation, that connection
     /// failed, so a new one is opened. A caller whose broken connection
     /// another caller already replaced gets the replacement.
-    async fn conn(&self, env: &Env, pool: &crate::authpipe::Pool, broken: Option<u64>) -> std::result::Result<(u64, SendRequest<Bytes>), String> {
+    async fn conn(
+        &self,
+        env: &Env,
+        pool: &crate::authpipe::Pool,
+        broken: Option<u64>,
+    ) -> std::result::Result<(u64, SendRequest<Bytes>), String> {
         let mut cached = self.cached.lock().await;
         if let Some(send) = cached.send.clone() {
             // `ready` waits when the connection is at its stream limit, so
@@ -633,7 +711,8 @@ impl HubAuth {
             }
         }
         cached.send = None;
-        let tls = Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
+        let tls =
+            Arc::new(tls_config(env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?);
         let send = connect(pool.take_wait().await?, tls).await?;
         cached.generation += 1;
         cached.send = Some(send.clone());
@@ -641,7 +720,13 @@ impl HubAuth {
     }
 
     /// Makes one unary call with the hub identity.
-    pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(&self, env: &Env, pool: &crate::authpipe::Pool, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
+    pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(
+        &self,
+        env: &Env,
+        pool: &crate::authpipe::Pool,
+        path: &str,
+        req: &Req,
+    ) -> std::result::Result<Resp, CallError> {
         let (generation, send) = self.conn(env, pool, None).await?;
         match unary(&send, path, req).await {
             Err(err @ CallError::Other(_)) => {
@@ -660,16 +745,27 @@ mod tests {
 
     #[test]
     fn call_error_rate_limit_is_status_8() {
-        let status = |code: &str| CallError::Status { path: "/p".into(), http: 200, code: code.into(), message: "m".into() };
+        let status = |code: &str| CallError::Status {
+            path: "/p".into(),
+            http: 200,
+            code: code.into(),
+            message: "m".into(),
+        };
         assert!(status("8").is_rate_limited());
         assert!(!status("14").is_rate_limited());
         assert!(!CallError::Other("grpc-status \"8\"".into()).is_rate_limited());
-        assert_eq!(status("8").to_string(), "/p: http 200, grpc-status \"8\": m");
+        assert_eq!(
+            status("8").to_string(),
+            "/p: http 200, grpc-status \"8\": m"
+        );
     }
 
     #[test]
     fn dechunk_joins_chunks() {
-        assert_eq!(dechunk(b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap(), b"abcde");
+        assert_eq!(
+            dechunk(b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").unwrap(),
+            b"abcde"
+        );
     }
 
     #[test]
@@ -685,7 +781,10 @@ mod tests {
             ("size past the body", b"10\r\nabc\r\n0\r\n\r\n"),
             ("no CRLF after the data", b"3\r\nabc"),
             ("32-bit maximum size", b"ffffffff\r\nabc\r\n0\r\n\r\n"),
-            ("64-bit maximum size", b"ffffffffffffffff\r\nabc\r\n0\r\n\r\n"),
+            (
+                "64-bit maximum size",
+                b"ffffffffffffffff\r\nabc\r\n0\r\n\r\n",
+            ),
         ];
         for (name, input) in cases {
             assert!(dechunk(input).is_err(), "{name}");

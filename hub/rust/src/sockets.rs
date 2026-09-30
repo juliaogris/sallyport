@@ -109,7 +109,9 @@ pub fn close_all() -> u32 {
         if let Ok(list) = list.dyn_into::<Array>() {
             for pair in list.iter() {
                 let pair: Array = pair.unchecked_into();
-                if let (Some(typ), Ok(f)) = (pair.get(0).as_string(), pair.get(1).dyn_into::<Function>()) {
+                if let (Some(typ), Ok(f)) =
+                    (pair.get(0).as_string(), pair.get(1).dyn_into::<Function>())
+                {
                     let _ = ws.remove_event_listener_with_callback(&typ, &f);
                 }
             }
@@ -183,7 +185,10 @@ impl Future for Sleep {
                 }
             });
             let global: WorkerGlobalScope = js_sys::global().unchecked_into();
-            match global.set_timeout_with_callback_and_timeout_and_arguments_0(callback.as_ref().unchecked_ref(), this.millis) {
+            match global.set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                this.millis,
+            ) {
                 Ok(id) => {
                     this.state.id.set(Some(id));
                     if let Some(set) = timers() {
@@ -217,7 +222,11 @@ impl Drop for Sleep {
 /// Keeps `msg` on the global object, so that the next Wasm instance can log
 /// why the previous one stopped.
 pub fn set_last_panic(msg: &str) {
-    let _ = Reflect::set(&js_sys::global(), &JsValue::from_str(PANIC_KEY), &JsValue::from_str(msg));
+    let _ = Reflect::set(
+        &js_sys::global(),
+        &JsValue::from_str(PANIC_KEY),
+        &JsValue::from_str(msg),
+    );
 }
 
 /// Returns and clears the message that [`set_last_panic`] kept.
