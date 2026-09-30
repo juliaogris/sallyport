@@ -432,9 +432,10 @@ fn name_public_addr(name: &Name) -> Option<&str> {
         atv.value.tag(),
         Tag::PrintableString | Tag::Utf8String | Tag::Ia5String
     );
-    is_string
-        .then(|| std::str::from_utf8(atv.value.value()).ok())
-        .flatten()
+    if !is_string {
+        return None;
+    }
+    std::str::from_utf8(atv.value.value()).ok()
 }
 
 /// Returns the logged-in user and the web session, if the session cookie
