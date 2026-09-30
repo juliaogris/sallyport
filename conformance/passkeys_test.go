@@ -109,6 +109,8 @@ func TestPasskeys(t *testing.T) {
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusConflict, resp.StatusCode, "body %s", body)
 		require.Equal(t, `MFA device with name "laptop" already exists`, string(body))
+		require.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
+		require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 		require.Len(t, s.auth.Devices(Alice), 2)
 	})
 

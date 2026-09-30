@@ -44,6 +44,12 @@ var clientStatus = map[string]int{"3": 400, "5": 404, "6": 409, "7": 403, "16": 
 // with the request body.
 type passkeyHandler func(cert tls.Certificate, body []byte) *response
 
+// passkeyError is an error on a passkey route: msg as plain text that the
+// browser must not sniff, because auth's messages can hold a device name.
+func passkeyError(msg string, status int) *response {
+	return textError(msg, status).add("content-type", "text/plain; charset=utf-8").add("x-content-type-options", "nosniff")
+}
+
 // assertion is the browser's answer to an authenticate challenge, as the
 // pages send it.
 type assertion struct {
@@ -113,18 +119,18 @@ func (h *hub) showPasskeys(req *request) *response {
 func (h *hub) passkeyAPI(req *request, action string) *response {
 	handle := h.passkeyRoute(req.method, action)
 	if handle == nil {
-		return textError("not found", 404)
+		return passkeyError("not found", 404)
 	}
 	_, s, err := h.webSession(req)
 	if err != nil && !notFound(err) {
-		return textError("auth unavailable", 503)
+		return passkeyError("auth unavailable", 503)
 	}
 	if s == nil {
-		return textError("not logged in", 401)
+		return passkeyError("not logged in", 401)
 	}
 	cert, err := h.sessionCert(s)
 	if err != nil {
-		return textError(err.Error(), 500)
+		return passkeyError(err.Error(), 500)
 	}
 	return handle(cert, req.body)
 }
@@ -178,11 +184,11 @@ func (h *hub) passkeyChallenge(cert tls.Certificate, _ []byte) *response {
 func (h *hub) passkeyBegin(cert tls.Certificate, body []byte) *response {
 	var a assertion
 	if err := json.Unmarshal(body, &a); err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	existing, err := a.proto()
 	if err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	resp, err := h.callAs(cert, createRegisterChallenge, passkeyRegisterChallengeRequest(existing))
 	if err != nil {
@@ -201,11 +207,11 @@ func (h *hub) passkeyFinish(cert tls.Certificate, body []byte) *response {
 		Credential credential `json:"credential"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	cred, err := in.Credential.proto()
 	if err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	_, err = h.callAs(cert, addMFADeviceSync, addMFADeviceSyncRequest(in.Name, cred))
 	if err != nil {
@@ -224,18 +230,18 @@ func (h *hub) passkeyDelete(cert tls.Certificate, body []byte) *response {
 		Assertion assertion `json:"assertion"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	existing, err := in.Assertion.proto()
 	if err != nil {
-		return textError("bad request", 400)
+		return passkeyError("bad request", 400)
 	}
 	devices, err := h.callAs(cert, getMFADevices, getMFADevicesRequest())
 	if err != nil {
 		return authError(err)
 	}
 	if len(passkeysOf(devices)) <= 1 {
-		return textError("cannot remove the last passkey", 409)
+		return passkeyError("cannot remove the last passkey", 409)
 	}
 	_, err = h.callAs(cert, deleteMFADeviceSync, deleteMFADeviceSyncRequest(in.Name, existing))
 	if err != nil {
@@ -255,12 +261,12 @@ func authError(err error) *response {
 	var ge *grpcError
 	if errors.As(err, &ge) {
 		if ge.status == "8" {
-			return textError("too many requests, try again in a minute", 429)
+			return passkeyError("too many requests, try again in a minute", 429)
 		}
 		if status, ok := clientStatus[ge.status]; ok {
-			return textError(cmp.Or(ge.message, "request refused"), status)
+			return passkeyError(cmp.Or(ge.message, "request refused"), status)
 		}
 	}
 	logf("web: passkeys: %v", err)
-	return textError("request failed", 502)
+	return passkeyError("request failed", 502)
 }
