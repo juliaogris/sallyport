@@ -604,8 +604,10 @@ impl Session {
                 // adjust and request arms ignore messages for it until then.
                 // The handlers expect a confirmed channel, and
                 // `channel_success` and `channel_failure` panic on an
-                // unconfirmed one.
-                if !self.common.is_established_channel(channel_num) {
+                // unconfirmed one. A close for a channel this side already
+                // closed is the peer's reply, so it still reaches the
+                // handler, which frees what it holds for the channel.
+                if self.common.is_unconfirmed_channel(channel_num) {
                     return Ok(());
                 }
                 if let Some(ref mut enc) = self.common.encrypted {

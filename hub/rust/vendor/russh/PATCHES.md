@@ -110,7 +110,16 @@ lists the changes to the vendored ssh-key crate in `../ssh-key`.
   `CHANNEL_WINDOW_ADJUST` and `CHANNEL_REQUEST` arms ignore a message for a
   channel that the peer has not confirmed. Without this, a peer that
   answers the server's `CHANNEL_OPEN` with a `CHANNEL_REQUEST` reaches
-  `assert!(channel.confirmed)` in `Session::channel_failure`.
+  `assert!(channel.confirmed)` in `Session::channel_failure`. The other
+  arms also ignore a message for a channel this side has already closed.
+- `src/session.rs`, `src/server/encrypted.rs`: New
+  `CommonSession::is_unconfirmed_channel`. The `CHANNEL_CLOSE` arm uses it
+  instead of `is_established_channel`, so it ignores a close only for a
+  channel this side opened and the peer has not confirmed. When this side
+  closes first, the peer's close is the reply, and it still reaches
+  `Handler::channel_close`. Upstream v0.63.3 drops that reply, so a handler
+  that frees state in `channel_close` never frees it for channels the
+  server closed.
 - `src/server/encrypted.rs`: A `CHANNEL_OPEN_CONFIRMATION` or
   `CHANNEL_OPEN_FAILURE` for a channel that is already confirmed ends the
   connection with `Error::Inconsistent`, as x/crypto does.

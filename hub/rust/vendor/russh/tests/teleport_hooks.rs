@@ -47,6 +47,7 @@ enum Event {
         want_reply: bool,
         data: Vec<u8>,
     },
+    ChannelClose,
 }
 
 struct Handler {
@@ -108,6 +109,15 @@ impl server::Handler for Handler {
             data: data.to_vec(),
         });
         Ok(typ == "keepalive@openssh.com")
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let _ = self.events.send(Event::ChannelClose);
+        Ok(())
     }
 }
 
@@ -189,6 +199,7 @@ async fn unknown_channel_open_follows_handler() {
         r.events,
         vec![
             Event::ChannelOpen("teleport-heartbeat".into()),
+            Event::ChannelClose,
             Event::ChannelOpen("teleport-refused".into()),
         ]
     );
@@ -280,7 +291,9 @@ async fn server_opens_custom_channel_and_sends_custom_requests() {
          request=teleport-quiet:03\n"
     );
     assert_eq!(results_rx.await.unwrap(), (true, false, true));
-    assert_eq!(r.events, vec![]);
+    // The server closed first, so the client's close is the reply, and the
+    // handler must still see it to free the channel.
+    assert_eq!(r.events, vec![Event::ChannelClose]);
 }
 
 #[tokio::test]
@@ -307,7 +320,7 @@ async fn messages_on_unconfirmed_channel_are_ignored() {
     .await;
     assert_eq!(r.stdout, "request=teleport-transport-dial:\n");
     assert_eq!(results_rx.await.unwrap(), (true, vec![]));
-    assert_eq!(r.events, vec![]);
+    assert_eq!(r.events, vec![Event::ChannelClose]);
 }
 
 #[tokio::test]
