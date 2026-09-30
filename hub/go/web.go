@@ -179,30 +179,31 @@ func (h *hub) handoff(body []byte) *response {
 
 // webSession returns the logged-in user and the web session, if the
 // session cookie names a web session that auth has and that has not
-// expired.
-func (h *hub) webSession(req *request) (string, *webSession) {
+// expired. The error is the failed call to auth, when the session is nil
+// because of one.
+func (h *hub) webSession(req *request) (string, *webSession, error) {
 	value, ok := req.cookie(sessionCookie)
 	if !ok {
-		return "", nil
+		return "", nil, nil
 	}
 	user, sid, ok := strings.Cut(value, ":")
 	if !ok {
-		return "", nil
+		return "", nil, nil
 	}
 	resp, err := h.auth.call(getWebSession, getWebSessionRequest(user, sid))
 	if err != nil {
 		logf("web: GetWebSession: %v", err)
-		return "", nil
+		return "", nil, err
 	}
 	s := sessionOf(resp)
 	if s == nil || !s.unexpired() {
-		return "", nil
+		return "", nil, nil
 	}
-	return user, s
+	return user, s, nil
 }
 
 func (h *hub) dashboard(req *request) *response {
-	user, s := h.webSession(req)
+	user, s, _ := h.webSession(req)
 	if s == nil {
 		return redirect("/web/login")
 	}
@@ -224,7 +225,7 @@ func (h *hub) launch(req *request, name string) *response {
 	if start == "" {
 		return textError("not found", 404)
 	}
-	user, s := h.webSession(req)
+	user, s, _ := h.webSession(req)
 	if s == nil {
 		return redirect("/web/login")
 	}

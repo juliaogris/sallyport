@@ -30,7 +30,8 @@ import (
 //     a fresh answer to a challenge, and removes the passkey. The last
 //     passkey is not removed: 409 "cannot remove the last passkey".
 //
-// The JSON routes answer 401 "not logged in" without a valid session, and
+// The JSON routes answer 401 "not logged in" without a valid session, 503
+// "auth unavailable" when auth could not be asked for the session, and
 // {"ok": true} when a finish or delete worked. Errors from auth are mapped
 // by [authError].
 
@@ -101,7 +102,7 @@ func decodeAll(values ...string) ([][]byte, error) {
 
 // showPasskeys serves the passkeys page, or sends the browser to log in.
 func (h *hub) showPasskeys(req *request) *response {
-	if _, s := h.webSession(req); s == nil {
+	if _, s, _ := h.webSession(req); s == nil {
 		return redirect("/web/login")
 	}
 	return html(passkeysPage)
@@ -114,7 +115,10 @@ func (h *hub) passkeyAPI(req *request, action string) *response {
 	if handle == nil {
 		return textError("not found", 404)
 	}
-	_, s := h.webSession(req)
+	_, s, err := h.webSession(req)
+	if err != nil && !notFound(err) {
+		return textError("auth unavailable", 503)
+	}
 	if s == nil {
 		return textError("not logged in", 401)
 	}
@@ -123,6 +127,12 @@ func (h *hub) passkeyAPI(req *request, action string) *response {
 		return textError(err.Error(), 500)
 	}
 	return handle(cert, req.body)
+}
+
+// notFound reports whether err is auth's NotFound.
+func notFound(err error) bool {
+	var ge *grpcError
+	return errors.As(err, &ge) && ge.status == "5"
 }
 
 // passkeyRoute returns the handler of a /webapi/passkeys route, or nil for

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -243,6 +244,15 @@ func TestPasskeys(t *testing.T) {
 		resp = s.get(t, LoginHost, "/web/passkeys", session)
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	})
+
+	// Last, because it closes the fake auth.
+	t.Run("auth unavailable", func(t *testing.T) {
+		s.auth.Close()
+		time.Sleep(time.Second)
+		resp := s.get(t, LoginHost, "/webapi/passkeys", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	})
 }
 
