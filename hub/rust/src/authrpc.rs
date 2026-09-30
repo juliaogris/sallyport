@@ -293,10 +293,22 @@ pub struct ChangeUserAuthenticationResponse {
     pub web_session: Option<WebSessionV2>,
 }
 
-/// Builds a TLS client config toward auth, with the client cert and key in
-/// the named base64 PEM secrets.
+/// Builds a TLS client config toward auth with ALPN `h2`, with the client
+/// cert and key in the named base64 PEM secrets.
 pub fn tls_config(env: &Env, cert_secret: &str, key_secret: &str) -> Result<rustls::ClientConfig> {
-    tls_config_from_pem(
+    let mut config = http1_tls_config(env, cert_secret, key_secret)?;
+    config.alpn_protocols = vec![ALPN_H2.to_vec()];
+    Ok(config)
+}
+
+/// Builds the TLS client config for [`post_json`]: like [`tls_config`], but
+/// with no ALPN.
+pub fn http1_tls_config(
+    env: &Env,
+    cert_secret: &str,
+    key_secret: &str,
+) -> Result<rustls::ClientConfig> {
+    client_tls(
         env,
         &secret_bytes(env, cert_secret)?,
         &secret_bytes(env, key_secret)?,
@@ -518,17 +530,15 @@ fn unframe(data: &[u8]) -> std::result::Result<&[u8], String> {
 
 /// Sends one JSON `POST` to auth's legacy HTTP API on its own stream,
 /// within [`CALL_DEADLINE`]. Auth's TLS offers only `h2`, and `h2` goes to
-/// gRPC, so this runs TLS with no ALPN and HTTP/1.1. Returns the HTTP status
-/// and the body.
+/// gRPC, so this runs HTTP/1.1, and `tls` must have no ALPN, as from
+/// [`http1_tls_config`]. Returns the HTTP status and the body.
 pub async fn post_json(
     stream: DuplexStream,
-    tls: &rustls::ClientConfig,
+    tls: Arc<rustls::ClientConfig>,
     path: &str,
     body: Vec<u8>,
 ) -> std::result::Result<(u16, Vec<u8>), String> {
-    let mut tls = tls.clone();
-    tls.alpn_protocols.clear();
-    with_deadline(path, post_json_inner(stream, Arc::new(tls), path, body)).await
+    with_deadline(path, post_json_inner(stream, tls, path, body)).await
 }
 
 async fn post_json_inner(

@@ -662,14 +662,19 @@ async fn login_finish(
     if a.id.is_empty() || a.r#type != "public-key" {
         return Err("assertion: not a public-key credential".into());
     }
-    let tls =
-        authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
+    let tls = authrpc::http1_tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY")
+        .map_err(|e| e.to_string())?;
     let body = json!({ "username": "", "webauthn": assertion })
         .to_string()
         .into_bytes();
     let stream = cx.pool.take_wait().await?;
-    let (status, body) =
-        authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
+    let (status, body) = authrpc::post_json(
+        stream,
+        Arc::new(tls),
+        AUTHENTICATE_WEB_USER_PASSWORDLESS,
+        body,
+    )
+    .await?;
     if status != 200 {
         return Err(format!(
             "AuthenticateWebUser: http {status}: {}",
