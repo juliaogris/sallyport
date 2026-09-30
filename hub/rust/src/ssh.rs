@@ -57,7 +57,13 @@ pub const MAX_PASSTHROUGHS_TOTAL: usize = 4;
 pub struct AppTunnel {
     pub handle: Handle,
     pub server_id: String,
+    /// The ID of the connection, so that it clears the slot only while the
+    /// slot still holds it.
+    conn: u64,
 }
+
+/// Counts agent connections, for [`AgentHandler::conn`].
+static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// State shared by every connection in the Durable Object.
 #[derive(Clone)]
@@ -72,6 +78,8 @@ pub struct Shared {
 
 /// Per-connection state for one agent SSH connection.
 pub struct AgentHandler {
+    /// This connection's ID.
+    conn: u64,
     host_ca: PublicKey,
     cluster: String,
     shared: Shared,
@@ -100,6 +108,7 @@ pub struct AgentHandler {
 impl AgentHandler {
     pub fn new(host_ca: PublicKey, cluster: String, proxy_name: String, shared: Shared, authed: Arc<AtomicBool>, ticket: crate::tunnel::Ticket) -> Self {
         Self {
+            conn: CONNECTIONS.fetch_add(1, Ordering::Relaxed),
             shared,
             authed,
             ticket: Some(ticket),
@@ -161,6 +170,19 @@ impl AgentHandler {
             return Err(russh::Error::Disconnect);
         }
         Ok(Auth::reject())
+    }
+}
+
+/// russh drops the handler when the connection ends. If this connection is
+/// the app tunnel, the slot is cleared, so app requests get "app service
+/// offline" until the agent's next connection pings.
+impl Drop for AgentHandler {
+    fn drop(&mut self) {
+        let mut slot = self.shared.app_tunnel.lock().unwrap();
+        if slot.as_ref().is_some_and(|t| t.conn == self.conn) {
+            console_log!("ssh: app tunnel connection ended");
+            *slot = None;
+        }
     }
 }
 
@@ -234,6 +256,7 @@ impl russh::server::Handler for AgentHandler {
                         *self.shared.app_tunnel.lock().unwrap() = Some(AppTunnel {
                             handle: session.handle(),
                             server_id: host_id,
+                            conn: self.conn,
                         });
                     }
                     wasm_bindgen_futures::spawn_local(discovery_loop(session.handle(), self.discovery.clone(), self.proxy_name.clone()));

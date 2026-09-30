@@ -38,14 +38,15 @@ const SP_COOKIE_PREFIX: &str = "__Host-sp_";
 /// streams back as it arrives.
 ///
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
-/// service's connection, this returns a 502 response rather than an error.
+/// service's connection, this logs the error and returns a 502 response
+/// with a fixed body.
 pub async fn forward(tunnel: &crate::ssh::AppTunnel, tls: std::sync::Arc<rustls::ClientConfig>, cluster: &str, host: &str, req: worker::Request) -> worker::Result<worker::Response> {
     let mut req = req;
     match forward_inner(tunnel, tls, cluster, host, &mut req).await {
         Ok(resp) => Ok(resp),
         Err(err) => {
             console_error!("appproxy: {err}");
-            Response::error(err, 502)
+            Response::error("app service unreachable", 502)
         }
     }
 }
