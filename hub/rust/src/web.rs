@@ -29,9 +29,6 @@ const SESSION_COOKIE: &str = "__Host-sp_session";
 const APP_COOKIE: &str = "__Host-sp_app";
 const SUBJECT_COOKIE: &str = "__Host-sp_subject";
 const AUTH_PATH: &str = "/x-teleport-auth";
-/// How [`authrpc::unary`] reports gRPC status `RESOURCE_EXHAUSTED`, which
-/// auth returns when a client address makes too many login or invite calls.
-const RATE_LIMITED: &str = "grpc-status \"8\"";
 
 /// What the hub needs to answer a browser request.
 pub struct Ctx<'a> {
@@ -116,7 +113,7 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
     };
     match res {
         Ok(v) => Response::from_json(&v),
-        Err(err) if err.contains(RATE_LIMITED) => {
+        Err(err) if err.is_rate_limited() => {
             console_error!("web: {err}");
             Response::error("too many requests, try again in a minute", 429)
         }
@@ -171,7 +168,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         return to_login();
     };
     // Auth is asked on every request, and any error denies.
-    let got: std::result::Result<AppSessionResponse, String> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid }).await;
+    let got: std::result::Result<AppSessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid }).await;
     let spec = match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => spec,
         Ok(_) => return to_login(),
@@ -196,7 +193,7 @@ async fn handoff(cx: &Ctx<'_>, body: &Value) -> Result<Response> {
     if sid.is_empty() || subject.is_empty() {
         return Response::error("bad handoff", 400);
     }
-    let got: std::result::Result<AppSessionResponse, String> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
+    let got: std::result::Result<AppSessionResponse, CallError> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => {}
         Ok(_) => return Response::error("bad handoff", 403),
@@ -220,7 +217,7 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, Stri
     let Some((user, sid)) = value.split_once(':') else {
         return Ok(None);
     };
-    let got: std::result::Result<AppSessionResponse, String> = cx
+    let got: std::result::Result<AppSessionResponse, CallError> = cx
         .auth
         .call(cx.env, cx.pool, GET_WEB_SESSION, &GetWebSessionRequest { user: user.to_string(), session_id: sid.to_string() })
         .await;
@@ -307,7 +304,7 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     }
 }
 
-async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, String> {
+async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
     let chal: MfaAuthenticateChallenge = cx
         .auth
         .call(
@@ -349,7 +346,7 @@ async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> Result<Response> {
     session_response(res)
 }
 
-async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, String> {
+async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, CallError> {
     let chal: MfaRegisterChallenge = cx
         .auth
         .call(

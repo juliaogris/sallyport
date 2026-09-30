@@ -362,10 +362,10 @@ pub fn tls_config_from_pem(env: &Env, cert_pem: &[u8], key_pem: &[u8]) -> Result
 
 /// Runs `fut` until it finishes or [`CALL_DEADLINE`] passes. On the
 /// deadline, it drops `fut` and returns an error that names `what`.
-async fn with_deadline<T>(what: &str, fut: impl Future<Output = std::result::Result<T, String>>) -> std::result::Result<T, String> {
+async fn with_deadline<T, E: From<String>>(what: &str, fut: impl Future<Output = std::result::Result<T, E>>) -> std::result::Result<T, E> {
     match select(pin!(fut), pin!(Delay::from(CALL_DEADLINE))).await {
         Either::Left((res, _)) => res,
-        Either::Right(_) => Err(format!("{what}: no answer within {CALL_DEADLINE:?}")),
+        Either::Right(_) => Err(format!("{what}: no answer within {CALL_DEADLINE:?}").into()),
     }
 }
 
@@ -395,17 +395,64 @@ async fn connect_inner(stream: DuplexStream, tls: Arc<rustls::ClientConfig>) -> 
     Ok(send)
 }
 
-/// Makes one unary call within [`CALL_DEADLINE`]. The error is the gRPC
-/// status and message, or the transport error.
-pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(send: &SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, String> {
+/// The error of a call to auth.
+#[derive(Debug)]
+pub enum CallError {
+    /// Auth answered with a gRPC status other than OK.
+    Status { path: String, http: u16, code: String, message: String },
+    /// Any other failure: the transport, the deadline, or a response the hub
+    /// cannot decode.
+    Other(String),
+}
+
+/// gRPC status `RESOURCE_EXHAUSTED`, which auth returns when a client
+/// address makes too many login or invite calls.
+const GRPC_RESOURCE_EXHAUSTED: &str = "8";
+
+impl CallError {
+    /// Returns true when auth refused the call because of its rate limit.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, CallError::Status { code, .. } if code == GRPC_RESOURCE_EXHAUSTED)
+    }
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::Status { path, http, code, message } => write!(f, "{path}: http {http}, grpc-status {code:?}: {message}"),
+            CallError::Other(err) => f.write_str(err),
+        }
+    }
+}
+
+impl From<String> for CallError {
+    fn from(err: String) -> Self {
+        CallError::Other(err)
+    }
+}
+
+impl From<&str> for CallError {
+    fn from(err: &str) -> Self {
+        CallError::Other(err.to_string())
+    }
+}
+
+impl From<CallError> for String {
+    fn from(err: CallError) -> Self {
+        err.to_string()
+    }
+}
+
+/// Makes one unary call within [`CALL_DEADLINE`].
+pub async fn unary<Req: prost::Message, Resp: prost::Message + Default>(send: &SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
     with_deadline(path, unary_inner(send.clone(), path, req)).await
 }
 
-async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, String> {
+async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: SendRequest<Bytes>, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
     let mut frame = BytesMut::with_capacity(5 + req.encoded_len());
     frame.put_u8(0);
     frame.put_u32(req.encoded_len() as u32);
-    req.encode(&mut frame).map_err(|e| e.to_string())?;
+    req.encode(&mut frame).map_err(|e| format!("{path}: {e}"))?;
 
     let request = http::Request::builder()
         .method("POST")
@@ -413,7 +460,7 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
         .header("content-type", "application/grpc")
         .header("te", "trailers")
         .body(())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{path}: {e}"))?;
     let mut send = send.ready().await.map_err(|e| format!("{path}: {e}"))?;
     let (response, mut body_tx) = send.send_request(request, false).map_err(|e| format!("{path}: {e}"))?;
     body_tx.send_data(frame.freeze(), true).map_err(|e| format!("{path}: {e}"))?;
@@ -432,10 +479,15 @@ async fn unary_inner<Req: prost::Message, Resp: prost::Message + Default>(send: 
     let status = status_from.get("grpc-status").and_then(|v| v.to_str().ok()).unwrap_or("");
     if status != "0" {
         let message = status_from.get("grpc-message").and_then(|v| v.to_str().ok()).unwrap_or("");
-        return Err(format!("{path}: http {}, grpc-status {status:?}: {}", parts.status, percent_decode(message)));
+        return Err(CallError::Status {
+            path: path.to_string(),
+            http: parts.status.as_u16(),
+            code: status.to_string(),
+            message: percent_decode(message),
+        });
     }
     let msg = unframe(&data).map_err(|e| format!("{path}: {e}"))?;
-    Resp::decode(msg).map_err(|e| format!("{path}: {e}"))
+    Resp::decode(msg).map_err(|e| format!("{path}: {e}").into())
 }
 
 /// Returns the message in the first gRPC frame of `data`: a zero
@@ -581,10 +633,10 @@ impl HubAuth {
     }
 
     /// Makes one unary call with the hub identity.
-    pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(&self, env: &Env, pool: &crate::authpipe::Pool, path: &str, req: &Req) -> std::result::Result<Resp, String> {
+    pub async fn call<Req: prost::Message, Resp: prost::Message + Default>(&self, env: &Env, pool: &crate::authpipe::Pool, path: &str, req: &Req) -> std::result::Result<Resp, CallError> {
         let (generation, send) = self.conn(env, pool, None).await?;
         match unary(&send, path, req).await {
-            Err(err) if !err.contains("grpc-status") => {
+            Err(err @ CallError::Other(_)) => {
                 console_log!("authrpc: {err}, reconnecting");
                 let (_, send) = self.conn(env, pool, Some(generation)).await?;
                 unary(&send, path, req).await
@@ -597,6 +649,15 @@ impl HubAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_error_rate_limit_is_status_8() {
+        let status = |code: &str| CallError::Status { path: "/p".into(), http: 200, code: code.into(), message: "m".into() };
+        assert!(status("8").is_rate_limited());
+        assert!(!status("14").is_rate_limited());
+        assert!(!CallError::Other("grpc-status \"8\"".into()).is_rate_limited());
+        assert_eq!(status("8").to_string(), "/p: http 200, grpc-status \"8\": m");
+    }
 
     #[test]
     fn dechunk_joins_chunks() {
