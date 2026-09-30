@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use crate::app::TunnelSlot;
 use crate::authpipe;
 use crate::ssh::{AgentHandler, Shared};
+use crate::web;
 use worker::*;
 
 /// The WebSocket subprotocol a stock agent asks for on reverse tunnel
@@ -105,21 +106,17 @@ impl DurableObject for Hub {
             req.path().as_str(),
             "/webapi/connectionupgrade" | authpipe::PATH
         );
-        if let Some(kind) = crate::web::classify(&self.env, &host) {
-            let cx = crate::web::Ctx {
+        if let Some(kind) = web::classify(&self.env, &host) {
+            let cx = web::Ctx {
                 env: &self.env,
                 pool: &self.auth_pipe,
                 auth: &self.hub_auth,
                 tunnel: &self.app_tunnel,
             };
             match kind {
-                crate::web::Host::App(app) => {
-                    return crate::web::app_host_request(req, &cx, &app).await
-                }
-                crate::web::Host::Login if !peer_path => {
-                    return crate::web::login_host_request(req, &cx).await
-                }
-                crate::web::Host::Login => {}
+                web::Host::App(app) => return web::app_host_request(req, &cx, &app).await,
+                web::Host::Login if !peer_path => return web::login_host_request(req, &cx).await,
+                web::Host::Login => {}
             }
         }
         if req.path() == authpipe::PATH {
