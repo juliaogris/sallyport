@@ -336,10 +336,8 @@ async fn valid_app_session(cx: &Ctx<'_>, sid: &str, subject: &str, host: &str) -
     Ok(spec.filter(|spec| spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) && cert_for_host(&spec.tls_cert, host)))
 }
 
-/// Returns true when the first certificate in `cert_pem` parses, and its
-/// app public address is `host` or it has none. Teleport always writes the
-/// address in an app session certificate. The conformance suite's auth
-/// does not, so a certificate without it passes.
+/// Returns true when the first certificate in `cert_pem` parses and its
+/// app public address is `host`. A certificate with no address is refused.
 fn cert_for_host(cert_pem: &[u8], host: &str) -> bool {
     let Some(Ok(der)) = CertificateDer::pem_slice_iter(cert_pem).next() else {
         return false;
@@ -347,20 +345,17 @@ fn cert_for_host(cert_pem: &[u8], host: &str) -> bool {
     let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
         return false;
     };
-    match name_public_addr(&cert.tbs_certificate.subject) {
-        None => true,
-        Some(addr) => addr == Some(host),
-    }
+    name_public_addr(&cert.tbs_certificate.subject) == Some(host)
 }
 
-/// Returns None when `name` has no [`APP_PUBLIC_ADDR_OID`] attribute, and
-/// otherwise its value, or Some(None) when the value is not a string. Go's
+/// Returns the value of the [`APP_PUBLIC_ADDR_OID`] attribute in `name`,
+/// or None when it has none or the value is not a string. Go's
 /// `encoding/asn1` writes a string as `PrintableString` when it can, and as
 /// `UTF8String` otherwise.
-fn name_public_addr(name: &Name) -> Option<Option<&str>> {
+fn name_public_addr(name: &Name) -> Option<&str> {
     let atv = name.0.iter().flat_map(|rdn| rdn.0.iter()).find(|atv| atv.oid == APP_PUBLIC_ADDR_OID)?;
     let is_string = matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String);
-    Some(is_string.then(|| std::str::from_utf8(atv.value.value()).ok()).flatten())
+    is_string.then(|| std::str::from_utf8(atv.value.value()).ok()).flatten()
 }
 
 /// Returns the logged-in user and the web session, if the session cookie
@@ -911,7 +906,7 @@ mod tests {
         let host = "bench-julia.example.com";
         assert!(cert_for_host(&app_cert(&[(name, utf8("bench")), (addr, printable(host))]), host));
         assert!(cert_for_host(&app_cert(&[(addr, utf8(host))]), host));
-        assert!(cert_for_host(&app_cert(&[(name, utf8("bench"))]), host));
+        assert!(!cert_for_host(&app_cert(&[(name, utf8("bench"))]), host));
         assert!(!cert_for_host(&app_cert(&[(addr, printable("octo-julia.example.com"))]), host));
         assert!(!cert_for_host(&app_cert(&[(addr, printable("bench-julia.example.com.evil"))]), host));
         assert!(!cert_for_host(&app_cert(&[(addr, bmp(host))]), host));
