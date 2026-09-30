@@ -39,8 +39,9 @@ import (
 // Unauthenticated.
 var clientStatus = map[string]int{"3": 400, "5": 404, "6": 409, "7": 403, "16": 401}
 
-// passkeyActions are the POST routes under /webapi/passkeys/.
-var passkeyActions = map[string]struct{}{"challenge": {}, "begin": {}, "finish": {}, "delete": {}}
+// passkeyHandler answers one /webapi/passkeys route as the user of cert,
+// with the request body.
+type passkeyHandler func(cert tls.Certificate, body []byte) *response
 
 // assertion is the browser's answer to an authenticate challenge, as the
 // pages send it.
@@ -109,9 +110,8 @@ func (h *hub) showPasskeys(req *request) *response {
 // passkeyAPI answers the /webapi/passkeys routes. action is the path after
 // /webapi/passkeys/, or "" for the list.
 func (h *hub) passkeyAPI(req *request, action string) *response {
-	_, isAction := passkeyActions[action]
-	list := req.method == "GET" && action == ""
-	if !list && !(req.method == "POST" && isAction) {
+	handle := h.passkeyRoute(req.method, action)
+	if handle == nil {
 		return textError("not found", 404)
 	}
 	_, s := h.webSession(req)
@@ -122,20 +122,30 @@ func (h *hub) passkeyAPI(req *request, action string) *response {
 	if err != nil {
 		return textError(err.Error(), 500)
 	}
-	switch action {
-	case "challenge":
-		return h.passkeyChallenge(cert)
-	case "begin":
-		return h.passkeyBegin(cert, req.body)
-	case "finish":
-		return h.passkeyFinish(cert, req.body)
-	case "delete":
-		return h.passkeyDelete(cert, req.body)
-	}
-	return h.listPasskeys(cert)
+	return handle(cert, req.body)
 }
 
-func (h *hub) listPasskeys(cert tls.Certificate) *response {
+// passkeyRoute returns the handler of a /webapi/passkeys route, or nil for
+// a method and action that is no route.
+func (h *hub) passkeyRoute(method, action string) passkeyHandler {
+	switch {
+	case method == "GET" && action == "":
+		return h.listPasskeys
+	case method != "POST":
+		return nil
+	case action == "challenge":
+		return h.passkeyChallenge
+	case action == "begin":
+		return h.passkeyBegin
+	case action == "finish":
+		return h.passkeyFinish
+	case action == "delete":
+		return h.passkeyDelete
+	}
+	return nil
+}
+
+func (h *hub) listPasskeys(cert tls.Certificate, _ []byte) *response {
 	resp, err := h.callAs(cert, getMFADevices, getMFADevicesRequest())
 	if err != nil {
 		return authError(err)
@@ -143,7 +153,7 @@ func (h *hub) listPasskeys(cert tls.Certificate) *response {
 	return jsonResponse(map[string]any{"passkeys": passkeysOf(resp)})
 }
 
-func (h *hub) passkeyChallenge(cert tls.Certificate) *response {
+func (h *hub) passkeyChallenge(cert tls.Certificate, _ []byte) *response {
 	resp, err := h.callAs(cert, createAuthenticateChallenge, manageDevicesChallengeRequest())
 	if err != nil {
 		return authError(err)
