@@ -171,6 +171,15 @@ func TestPasskeys(t *testing.T) {
 		}
 	})
 
+	t.Run("body too large", func(t *testing.T) {
+		resp := s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), strings.Repeat("x", bodyLimit), session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "a body of the limit did not reach the hub")
+		resp = s.post(t, LoginHost, "/webapi/passkeys/finish", origin(LoginHost), strings.Repeat("x", bodyLimit+1), session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+	})
+
 	t.Run("rate limited", func(t *testing.T) {
 		s.auth.SetRateLimited(true)
 		defer s.auth.SetRateLimited(false)
@@ -229,6 +238,9 @@ func TestPasskeys(t *testing.T) {
 
 // passkeyPosts are the POST routes for managing passkeys.
 var passkeyPosts = []string{"/webapi/passkeys/challenge", "/webapi/passkeys/begin", "/webapi/passkeys/finish", "/webapi/passkeys/delete"}
+
+// bodyLimit is the most bytes a login host request body may have.
+const bodyLimit = 64 * 1024
 
 // requestOptions is the JSON a challenge route returns, as the pages read
 // it.

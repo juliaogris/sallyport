@@ -17,6 +17,10 @@ import mod from './build/hub.wasm';
 
 const HUB_INSTANCE = 'hub';
 
+// The most bytes a login host request body may have. A WebAuthn answer or
+// credential is a few KB, and the body is held in JavaScript and in Go.
+const LOGIN_BODY_LIMIT = 64 * 1024;
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -287,7 +291,9 @@ export class Hub extends DurableObject {
     const url = new URL(req.url);
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-      body = new Uint8Array(await req.arrayBuffer());
+      const limit = classify(this.env, url.hostname) === 'login' ? LOGIN_BODY_LIMIT : Infinity;
+      body = await readBody(req, limit);
+      if (body === null) return textError('request body too large', 413);
     }
     const headers = [];
     for (const [k, v] of req.headers) headers.push(k + ': ' + v);
@@ -313,6 +319,29 @@ export class Hub extends DurableObject {
       });
     });
   }
+}
+
+// Reads the whole body of req into one Uint8Array, or returns null when it
+// is longer than limit bytes. The rest of a long body is read and dropped,
+// because a response before the body is read closes the connection.
+async function readBody(req, limit) {
+  const reader = req.body.getReader();
+  const chunks = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n <= limit) chunks.push(value);
+  }
+  if (n > limit) return null;
+  const body = new Uint8Array(n);
+  let off = 0;
+  for (const c of chunks) {
+    body.set(c, off);
+    off += c.byteLength;
+  }
+  return body;
 }
 
 // Builds the Response Go described. head is "name: value" lines. Bit 1 of
