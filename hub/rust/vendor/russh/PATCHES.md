@@ -56,8 +56,7 @@ lists the changes to the vendored ssh-key crate in `../ssh-key`.
   `russh_util` reads the clock with `chrono::Utc::now`, and its
   `duration_since` panics with "Duration is negative" when the clock goes
   back. The Workers clock can go back between events. The panic trapped the
-  hub's Wasm instance, which dropped every tunnel and auth pipe stream,
-  several times an hour.
+  hub's Wasm instance, which dropped every tunnel and auth pipe stream.
 
 ## Building the server on wasm
 
@@ -133,7 +132,9 @@ lists the changes to the vendored ssh-key crate in `../ssh-key`.
   the same. Before this, russh ignored data past the window and checked no
   length except the 256 KiB transport packet limit, so a channel queue of
   256 messages could hold about 64 MiB. It now holds at most
-  `channel_buffer_size * maximum_packet_size` bytes.
+  `channel_buffer_size * maximum_packet_size` bytes when the maximum packet
+  size is a power of two. `CryptoVec` rounds each message's capacity up to
+  a power of two, so another size can take up to about twice that.
 - `src/server/encrypted.rs`: `CHANNEL_DATA`, `CHANNEL_EXTENDED_DATA` and
   `CHANNEL_EOF` are queued on the channel with `try_send` instead of
   `send().await`. russh adjusts the window when data arrives, not when it is
