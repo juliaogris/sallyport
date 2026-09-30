@@ -66,7 +66,6 @@ class_name = "Hub"
 routes = [
   { pattern = "rust.example.com", custom_domain = true },
   { pattern = "bench-rust.example.com", custom_domain = true },
-  { pattern = "cam-rust.example.com", custom_domain = true },
   { pattern = "octo-rust.example.com", custom_domain = true },
   { pattern = "octocam-rust.example.com", custom_domain = true },
 ]
@@ -81,7 +80,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "rust.example.com"
 DOMAIN = "example.com"
 OWNER = "rust"
-APPS = "bench,cam:/stream,octo,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.rust.durable_objects.bindings]]
 name = "HUB"
@@ -91,7 +90,6 @@ class_name = "Hub"
 routes = [
   { pattern = "go.example.com", custom_domain = true },
   { pattern = "bench-go.example.com", custom_domain = true },
-  { pattern = "cam-go.example.com", custom_domain = true },
   { pattern = "octo-go.example.com", custom_domain = true },
   { pattern = "octocam-go.example.com", custom_domain = true },
 ]
@@ -106,7 +104,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "go.example.com"
 DOMAIN = "example.com"
 OWNER = "go"
-APPS = "bench,cam:/stream,octo,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.go.durable_objects.bindings]]
 name = "HUB"

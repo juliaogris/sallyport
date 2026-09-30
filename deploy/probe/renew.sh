@@ -47,7 +47,7 @@ failed=0
 renew julia "$HOME/sallyport/deploy/auth.yaml" 127.0.0.1:3025 sallyport "$base/secrets/julia/proxy" \
   bench=bench-julia.example.com octo=octo-julia.example.com octocam=octocam-julia.example.com || failed=1
 renew rust "$HOME/sallyport-rust/deploy/auth.yaml" 127.0.0.1:3126 sallyport-rust "$HOME/sallyport-rust/hub-identity" \
-  bench=bench-rust.example.com cam=cam-rust.example.com octo=octo-rust.example.com octocam=octocam-rust.example.com || failed=1
+  bench=bench-rust.example.com octo=octo-rust.example.com octocam=octocam-rust.example.com || failed=1
 renew go "$HOME/sallyport-go/deploy/auth.yaml" 127.0.0.1:3226 sallyport-go "$HOME/sallyport-go/hub-identity" \
-  bench=bench-go.example.com cam=cam-go.example.com octo=octo-go.example.com octocam=octocam-go.example.com || failed=1
+  bench=bench-go.example.com octo=octo-go.example.com octocam=octocam-go.example.com || failed=1
 exit "$failed"
