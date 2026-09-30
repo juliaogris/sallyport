@@ -21,7 +21,7 @@ func TestAppProxy(t *testing.T) {
 	host := appHost("bench")
 
 	t.Run("static", func(t *testing.T) {
-		resp := s.get(host, "/static", cookies...)
+		resp := s.get(t, host, "/static", cookies...)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Equal(t, staticBody, body)
@@ -37,7 +37,7 @@ func TestAppProxy(t *testing.T) {
 
 	for _, code := range []int{204, 205, 304} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
-			resp := s.get(host, "/status/"+itoa(code), cookies...)
+			resp := s.get(t, host, "/status/"+itoa(code), cookies...)
 			body := readBody(t, resp)
 			require.Equal(t, code, resp.StatusCode)
 			require.Empty(t, body)
@@ -88,7 +88,7 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("hub cookies dropped from the app's response", func(t *testing.T) {
-		resp := s.get(host, "/setcookie", cookies...)
+		resp := s.get(t, host, "/setcookie", cookies...)
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Nil(t, cookie(resp, "__Host-sp_app"))
@@ -97,7 +97,7 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("post", func(t *testing.T) {
-		resp := s.post(host, "/echo", origin(host), "posted", cookies...)
+		resp := s.post(t, host, "/echo", origin(host), "posted", cookies...)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		var e echo
@@ -108,7 +108,7 @@ func TestAppProxy(t *testing.T) {
 
 	t.Run("post from another site", func(t *testing.T) {
 		for _, o := range []string{origin(appHost("cam")), origin(LoginHost), "https://other.test"} {
-			resp := s.post(host, "/echo", o, "posted", cookies...)
+			resp := s.post(t, host, "/echo", o, "posted", cookies...)
 			readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "origin %s", o)
 		}
@@ -124,7 +124,7 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("no cookies", func(t *testing.T) {
-		resp := s.get(host, "/static")
+		resp := s.get(t, host, "/static")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
@@ -132,14 +132,14 @@ func TestAppProxy(t *testing.T) {
 
 	t.Run("wrong subject", func(t *testing.T) {
 		bad := []*http.Cookie{cookies[0], {Name: "__Host-sp_subject", Value: "nope"}}
-		resp := s.get(host, "/static", bad...)
+		resp := s.get(t, host, "/static", bad...)
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	})
 
 	t.Run("16 MiB streamed", func(t *testing.T) {
 		const n = 16 << 20
-		resp := s.get(host, "/big?n="+itoa(n), cookies...)
+		resp := s.get(t, host, "/big?n="+itoa(n), cookies...)
 		defer resp.Body.Close()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		want := sha256.New()
@@ -184,7 +184,7 @@ func TestAppProxyExpired(t *testing.T) {
 	s := newStack(t)
 	cookies := s.appCookies(t, "bench")
 	s.auth.ExpireAppSessions()
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
@@ -196,7 +196,7 @@ func TestAppProxyOffline(t *testing.T) {
 	cookies := s.appCookies(t, "bench")
 	s.agent.Close()
 	time.Sleep(time.Second)
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
@@ -209,7 +209,7 @@ func TestAuthUnavailable(t *testing.T) {
 	s.auth.Close()
 	time.Sleep(time.Second)
 	start := time.Now()
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	require.Less(t, time.Since(start), 15*time.Second)

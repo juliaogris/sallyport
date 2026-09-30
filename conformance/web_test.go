@@ -17,7 +17,7 @@ func TestWeb(t *testing.T) {
 	b64 := base64.RawURLEncoding.EncodeToString
 
 	t.Run("login begin", func(t *testing.T) {
-		resp := s.post(LoginHost, "/webapi/login/begin", origin(LoginHost), "")
+		resp := s.post(t, LoginHost, "/webapi/login/begin", origin(LoginHost), "")
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 		require.JSONEq(t, `{
@@ -36,7 +36,7 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("login finish refused", func(t *testing.T) {
-		resp := s.post(LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-mallory"}`)
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-mallory"}`)
 		readBody(t, resp)
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 		require.Nil(t, cookie(resp, "__Host-sp_session"))
@@ -47,7 +47,7 @@ func TestWeb(t *testing.T) {
 		// the scheme of Origin to its own.
 		for _, o := range []string{"", "https://other.test", origin(appHost("bench"))} {
 			t.Run("origin "+o+" "+path, func(t *testing.T) {
-				resp := s.post(LoginHost, path, o, `{"id":"`+AliceCredID+`"}`)
+				resp := s.post(t, LoginHost, path, o, `{"id":"`+AliceCredID+`"}`)
 				readBody(t, resp)
 				require.Equal(t, http.StatusForbidden, resp.StatusCode)
 				require.Nil(t, cookie(resp, "__Host-sp_session"))
@@ -56,7 +56,7 @@ func TestWeb(t *testing.T) {
 	}
 
 	t.Run("invite", func(t *testing.T) {
-		resp := s.post(LoginHost, "/webapi/invite/"+BobInvite+"/begin", origin(LoginHost), "")
+		resp := s.post(t, LoginHost, "/webapi/invite/"+BobInvite+"/begin", origin(LoginHost), "")
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 		require.JSONEq(t, `{
@@ -78,7 +78,7 @@ func TestWeb(t *testing.T) {
 				"attestationObject": b64([]byte("attestation")),
 			},
 		})
-		resp = s.post(LoginHost, "/webapi/invite/"+BobInvite+"/finish", origin(LoginHost), string(cred))
+		resp = s.post(t, LoginHost, "/webapi/invite/"+BobInvite+"/finish", origin(LoginHost), string(cred))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		c := cookie(resp, "__Host-sp_session")
@@ -88,18 +88,18 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("invite unknown token", func(t *testing.T) {
-		resp := s.post(LoginHost, "/webapi/invite/tok-nobody/begin", origin(LoginHost), "")
+		resp := s.post(t, LoginHost, "/webapi/invite/tok-nobody/begin", origin(LoginHost), "")
 		readBody(t, resp)
 		require.Equal(t, http.StatusBadGateway, resp.StatusCode)
 	})
 
 	t.Run("dashboard", func(t *testing.T) {
-		resp := s.get(LoginHost, "/")
+		resp := s.get(t, LoginHost, "/")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "/web/login", resp.Header.Get("Location"))
 
-		resp = s.get(LoginHost, "/", s.login(t))
+		resp = s.get(t, LoginHost, "/", s.login(t))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Contains(t, string(body), `action="/web/launch/bench"`)
@@ -107,7 +107,7 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("logout", func(t *testing.T) {
-		resp := s.post(LoginHost, "/web/logout", origin(LoginHost), "", s.login(t))
+		resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", s.login(t))
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		c := cookie(resp, "__Host-sp_session")
@@ -136,13 +136,13 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("launch unknown app", func(t *testing.T) {
-		resp := s.post(LoginHost, "/web/launch/nope", origin(LoginHost), "", s.login(t))
+		resp := s.post(t, LoginHost, "/web/launch/nope", origin(LoginHost), "", s.login(t))
 		readBody(t, resp)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 
 	t.Run("launch without session", func(t *testing.T) {
-		resp := s.post(LoginHost, "/web/launch/bench", origin(LoginHost), "")
+		resp := s.post(t, LoginHost, "/web/launch/bench", origin(LoginHost), "")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "/web/login", resp.Header.Get("Location"))
@@ -172,7 +172,7 @@ func TestWeb(t *testing.T) {
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
-				resp := s.post(appHost("bench"), "/x-teleport-auth", c.origin, c.body)
+				resp := s.post(t, appHost("bench"), "/x-teleport-auth", c.origin, c.body)
 				readBody(t, resp)
 				require.Equal(t, c.status, resp.StatusCode)
 				require.Nil(t, cookie(resp, "__Host-sp_app"))
@@ -183,7 +183,7 @@ func TestWeb(t *testing.T) {
 	t.Run("expired web session", func(t *testing.T) {
 		session := s.login(t)
 		s.auth.ExpireWebSessions()
-		resp := s.get(LoginHost, "/", session)
+		resp := s.get(t, LoginHost, "/", session)
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "/web/login", resp.Header.Get("Location"))

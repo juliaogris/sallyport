@@ -56,7 +56,8 @@ func newStack(t *testing.T) *stack {
 func appHost(app string) string { return app + "-" + LoginHost }
 
 // post sends a POST with Origin set to origin, unless origin is "".
-func (s *stack) post(host, path, origin, body string, cookies ...*http.Cookie) *http.Response {
+func (s *stack) post(t *testing.T, host, path, origin, body string, cookies ...*http.Cookie) *http.Response {
+	t.Helper()
 	req, _ := http.NewRequest("POST", "https://"+host+path, strings.NewReader(body))
 	if origin != "" {
 		req.Header.Set("Origin", origin)
@@ -66,22 +67,19 @@ func (s *stack) post(host, path, origin, body string, cookies ...*http.Cookie) *
 		req.AddCookie(c)
 	}
 	resp, err := s.hub.Do(req)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return resp
 }
 
 // get sends a GET with cookies.
-func (s *stack) get(host, path string, cookies ...*http.Cookie) *http.Response {
+func (s *stack) get(t *testing.T, host, path string, cookies ...*http.Cookie) *http.Response {
+	t.Helper()
 	req, _ := http.NewRequest("GET", "https://"+host+path, nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
 	resp, err := s.hub.Do(req)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return resp
 }
 
@@ -108,7 +106,7 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 // login logs Alice in and returns the session cookie.
 func (s *stack) login(t *testing.T) *http.Cookie {
 	t.Helper()
-	resp := s.post(LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"`+AliceCredID+`","type":"public-key"}`)
+	resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"`+AliceCredID+`","type":"public-key"}`)
 	readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	c := cookie(resp, "__Host-sp_session")
@@ -120,7 +118,7 @@ func (s *stack) login(t *testing.T) *http.Cookie {
 // and the start path from the handoff URL.
 func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bearer, start string) {
 	t.Helper()
-	resp := s.post(LoginHost, "/web/launch/"+app, origin(LoginHost), "", session)
+	resp := s.post(t, LoginHost, "/web/launch/"+app, origin(LoginHost), "", session)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	loc, err := url.Parse(resp.Header.Get("Location"))
@@ -139,7 +137,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp := s.post(appHost(app), "/x-teleport-auth", origin(appHost(app)), string(body))
+	resp := s.post(t, appHost(app), "/x-teleport-auth", origin(appHost(app)), string(body))
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")
@@ -200,6 +198,16 @@ func testApp() http.Handler {
 			w.WriteHeader(code)
 		})
 	}
+	// A 101 with no Upgrade in the request, which no hub can forward.
+	mux.HandleFunc("/status/101", func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		buf.Flush()
+		conn.Close()
+	})
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		client := ""
