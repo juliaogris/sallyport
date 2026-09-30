@@ -56,5 +56,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
 /// Returns the stub of the single Durable Object that holds all state.
 fn hub(env: &Env) -> Result<Stub> {
-    env.durable_object("HUB")?.id_from_name(HUB_INSTANCE)?.get_stub()
+    env.durable_object("HUB")?
+        .id_from_name(HUB_INSTANCE)?
+        .get_stub()
 }

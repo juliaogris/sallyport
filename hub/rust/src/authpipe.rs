@@ -172,8 +172,9 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
     ws.accept()?;
     console_log!("tunnel/auth: connection accepted");
 
-    let (ticket, evict_rx, evicted_other) =
-        pool.unverified.admit(MAX_UNVERIFIED, &crate::tunnel::client_key(req)?);
+    let (ticket, evict_rx, evicted_other) = pool
+        .unverified
+        .admit(MAX_UNVERIFIED, &crate::tunnel::client_key(req)?);
     if evicted_other {
         console_log!("tunnel/auth: {MAX_UNVERIFIED} sockets in the challenge, closed the oldest");
     }

@@ -161,8 +161,9 @@ impl DurableObject for Hub {
             .map_err(|_| Error::RustError("setting binaryType".into()))?;
         ws.accept()?;
 
-        let (ticket, evict_rx, evicted_other) =
-            self.unauthenticated.admit(MAX_UNAUTHENTICATED, &client_key(&req)?);
+        let (ticket, evict_rx, evicted_other) = self
+            .unauthenticated
+            .admit(MAX_UNAUTHENTICATED, &client_key(&req)?);
         if evicted_other {
             console_log!(
                 "tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the oldest"
@@ -604,7 +605,10 @@ mod tests {
 
     #[test]
     fn ipv6_prefix_cuts_to_64() {
-        assert_eq!(ipv6_prefix("2001:db8:1:2:3:4:5:6").as_deref(), Some("2001:db8:1:2::/64"));
+        assert_eq!(
+            ipv6_prefix("2001:db8:1:2:3:4:5:6").as_deref(),
+            Some("2001:db8:1:2::/64")
+        );
         assert_eq!(ipv6_prefix("192.0.2.1"), None);
         assert_eq!(ipv6_prefix(""), None);
     }

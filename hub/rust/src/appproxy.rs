@@ -26,7 +26,15 @@ use crate::ssh::AppTunnel;
 /// Header names that describe one hop of the connection, per RFC 7230 6.1,
 /// plus the handful browsers and proxies add in practice. None of these are
 /// forwarded in either direction.
-const HOP_BY_HOP: &[&str] = &["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade"];
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+];
 
 /// The prefix of the session cookies the hub itself sets. The app service
 /// never needs to see them, so they are stripped from the `Cookie` header
@@ -50,7 +58,13 @@ const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this logs the error and returns a 502 "app
 /// unavailable" response.
-pub async fn forward(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str, host: &str, mut req: Request) -> Result<Response> {
+pub async fn forward(
+    tunnel: &AppTunnel,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+    host: &str,
+    mut req: Request,
+) -> Result<Response> {
     match forward_inner(tunnel, tls, cluster, host, &mut req).await {
         Ok(resp) => Ok(resp),
         Err(err) => {
@@ -60,7 +74,13 @@ pub async fn forward(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster
     }
 }
 
-async fn forward_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str, host: &str, req: &mut Request) -> std::result::Result<Response, String> {
+async fn forward_inner(
+    tunnel: &AppTunnel,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+    host: &str,
+    req: &mut Request,
+) -> std::result::Result<Response, String> {
     let stream = dial_app(tunnel, tls, cluster).await?;
     let (mut send, conn) = hyper::client::conn::http1::handshake(HyperIo::new(stream))
         .await
@@ -76,14 +96,20 @@ async fn forward_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, clust
     });
 
     let request = build_request(req, host).await?;
-    let response = send.send_request(request).await.map_err(|e| format!("app request: {e}"))?;
+    let response = send
+        .send_request(request)
+        .await
+        .map_err(|e| format!("app request: {e}"))?;
     build_response(response, abort)
 }
 
 /// Builds the request the hub sends upstream: `req`'s method and path, its
 /// headers with the hop-by-hop, `Host` and `cf-*` ones dropped, `Host` set
 /// to `host`, and the hub's own session cookies removed from `Cookie`.
-async fn build_request(req: &mut Request, host: &str) -> std::result::Result<http::Request<RequestBody>, String> {
+async fn build_request(
+    req: &mut Request,
+    host: &str,
+) -> std::result::Result<http::Request<RequestBody>, String> {
     let method = req.method();
     let url = req.url().map_err(|e| format!("request url: {e}"))?;
     let mut target = url.path().to_string();
@@ -93,7 +119,10 @@ async fn build_request(req: &mut Request, host: &str) -> std::result::Result<htt
     }
 
     let mut builder = http::Request::builder()
-        .method(http::Method::from_bytes(method.as_ref().as_bytes()).map_err(|e| format!("method {method}: {e}"))?)
+        .method(
+            http::Method::from_bytes(method.as_ref().as_bytes())
+                .map_err(|e| format!("method {method}: {e}"))?,
+        )
         .uri(target);
     for (name, value) in req.headers().entries() {
         if name == "host" || name.starts_with("cf-") || HOP_BY_HOP.contains(&name.as_str()) {
@@ -116,42 +145,74 @@ async fn build_request(req: &mut Request, host: &str) -> std::result::Result<htt
         Either::Left(Empty::new())
     } else {
         let stream = req.stream().map_err(|e| format!("request body: {e}"))?;
-        Either::Right(StreamBody::new(stream.map(|chunk| chunk.map(|b| Frame::data(Bytes::from(b))).map_err(|e| std::io::Error::other(e.to_string()))).boxed_local()))
+        Either::Right(StreamBody::new(
+            stream
+                .map(|chunk| {
+                    chunk
+                        .map(|b| Frame::data(Bytes::from(b)))
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                })
+                .boxed_local(),
+        ))
     };
-    builder.body(body).map_err(|e| format!("build request: {e}"))
+    builder
+        .body(body)
+        .map_err(|e| format!("build request: {e}"))
 }
 
 /// The body of a request to the app service: empty, or the browser's body
 /// as it arrives.
-type RequestBody = Either<Empty<Bytes>, StreamBody<LocalBoxStream<'static, std::result::Result<Frame<Bytes>, std::io::Error>>>>;
+type RequestBody = Either<
+    Empty<Bytes>,
+    StreamBody<LocalBoxStream<'static, std::result::Result<Frame<Bytes>, std::io::Error>>>,
+>;
 
 /// Removes every cookie whose name starts with [`SP_COOKIE_PREFIX`] from a
 /// `Cookie` header value. Returns `None` when nothing is left to send.
 fn strip_sp_cookies(value: &str) -> Option<String> {
-    let kept: Vec<&str> = value.split(';').map(str::trim).filter(|c| !c.is_empty() && !c.starts_with(SP_COOKIE_PREFIX)).collect();
-    if kept.is_empty() { None } else { Some(kept.join("; ")) }
+    let kept: Vec<&str> = value
+        .split(';')
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && !c.starts_with(SP_COOKIE_PREFIX))
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join("; "))
+    }
 }
 
 /// Turns the app service's HTTP/1.1 response into a `worker::Response`,
 /// with the hop-by-hop headers dropped and the body streamed as it arrives.
 /// `conn` aborts the app service connection when the body is idle for
 /// [`STREAM_IDLE`].
-fn build_response(response: http::Response<hyper::body::Incoming>, conn: AbortHandle) -> std::result::Result<Response, String> {
+fn build_response(
+    response: http::Response<hyper::body::Incoming>,
+    conn: AbortHandle,
+) -> std::result::Result<Response, String> {
     let (parts, incoming) = response.into_parts();
     if parts.status.is_server_error() {
-        console_error!("appproxy: upstream {} {:?}", parts.status, parts.headers.get(http::header::SERVER));
+        console_error!(
+            "appproxy: upstream {} {:?}",
+            parts.status,
+            parts.headers.get(http::header::SERVER)
+        );
     }
     let headers = Headers::new();
     for (name, value) in parts.headers.iter() {
         if HOP_BY_HOP.contains(&name.as_str()) {
             continue;
         }
-        let value = value.to_str().map_err(|e| format!("response header {name}: {e}"))?;
+        let value = value
+            .to_str()
+            .map_err(|e| format!("response header {name}: {e}"))?;
         // The app must not replace or clear the hub's own session cookies.
         if name == http::header::SET_COOKIE && value.trim_start().starts_with(SP_COOKIE_PREFIX) {
             continue;
         }
-        headers.append(name.as_str(), value).map_err(|e| format!("response header {name}: {e}"))?;
+        headers
+            .append(name.as_str(), value)
+            .map_err(|e| format!("response header {name}: {e}"))?;
     }
     // The runtime accepts a 101 only with a WebSocket attached, and the hub
     // does not forward WebSockets.
@@ -166,7 +227,8 @@ fn build_response(response: http::Response<hyper::body::Incoming>, conn: AbortHa
         let res = Response::empty().map_err(|e| format!("response: {e}"))?;
         return Ok(res.with_headers(headers).with_status(status));
     }
-    let mut body = Response::from_stream(body_stream(incoming, conn)).map_err(|e| format!("response body: {e}"))?;
+    let mut body = Response::from_stream(body_stream(incoming, conn))
+        .map_err(|e| format!("response body: {e}"))?;
     // The runtime compresses a body to match `Content-Encoding` by
     // default, so an app's gzipped body would be compressed twice.
     if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
@@ -179,7 +241,10 @@ fn build_response(response: http::Response<hyper::body::Incoming>, conn: AbortHa
 /// wants, keeping only the data frames and skipping any trailers. When the
 /// runtime does not pull the next chunk for [`STREAM_IDLE`], it aborts
 /// `conn`.
-fn body_stream(incoming: hyper::body::Incoming, conn: AbortHandle) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
+fn body_stream(
+    incoming: hyper::body::Incoming,
+    conn: AbortHandle,
+) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
     // The time the stream last handed a chunk to the runtime, or None while
     // the stream waits on the app service. Only the wait for a pull counts,
     // not a slow app service.
@@ -245,7 +310,11 @@ impl<T> HyperIo<T> {
 }
 
 impl<T: tokio::io::AsyncRead + Unpin> hyper::rt::Read for HyperIo<T> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, mut buf: hyper::rt::ReadBufCursor<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         // SAFETY: `read_buf` only wraps the uninitialized memory `buf`
         // already lent us, and it is never read before `poll_read` fills it.
@@ -264,7 +333,11 @@ impl<T: tokio::io::AsyncRead + Unpin> hyper::rt::Read for HyperIo<T> {
 }
 
 impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
 
@@ -283,8 +356,14 @@ mod tests {
 
     #[test]
     fn strip_sp_cookies_cases() {
-        assert_eq!(strip_sp_cookies("__Host-sp_app=s; __Host-sp_subject=t"), None);
-        assert_eq!(strip_sp_cookies("a=1; __Host-sp_subject=t; b=2"), Some("a=1; b=2".into()));
+        assert_eq!(
+            strip_sp_cookies("__Host-sp_app=s; __Host-sp_subject=t"),
+            None
+        );
+        assert_eq!(
+            strip_sp_cookies("a=1; __Host-sp_subject=t; b=2"),
+            Some("a=1; b=2".into())
+        );
         assert_eq!(strip_sp_cookies("a=1;; ;b=2"), Some("a=1; b=2".into()));
         assert_eq!(strip_sp_cookies(""), None);
     }

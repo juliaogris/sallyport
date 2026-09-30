@@ -33,10 +33,14 @@ use x509_cert::name::Name;
 use crate::app::TunnelSlot;
 use crate::authpipe::Pool;
 use crate::authrpc::{
-    self, unary, AttestationResponse, CallError, ChallengeExtensions, ChangeUserAuthenticationRequest, ChangeUserAuthenticationResponse, CreateAppSessionRequest,
-    CreateAuthenticateChallengeRequest, CreateRegisterChallengeRequest, CredentialCreationResponse, GetAppSessionRequest, GetWebSessionRequest, HubAuth, MfaAuthenticateChallenge,
-    MfaRegisterChallenge, MfaRegisterResponse, Passwordless, SessionResponse, WebSessionSpecV2, AUTHENTICATE_WEB_USER_PASSWORDLESS, CHANGE_USER_AUTHENTICATION, CREATE_APP_SESSION,
-    CREATE_AUTHENTICATE_CHALLENGE, CREATE_REGISTER_CHALLENGE, DEVICE_TYPE_WEBAUTHN, DEVICE_USAGE_PASSWORDLESS, GET_APP_SESSION, GET_WEB_SESSION, SCOPE_PASSWORDLESS_LOGIN,
+    self, unary, AttestationResponse, CallError, ChallengeExtensions,
+    ChangeUserAuthenticationRequest, ChangeUserAuthenticationResponse, CreateAppSessionRequest,
+    CreateAuthenticateChallengeRequest, CreateRegisterChallengeRequest, CredentialCreationResponse,
+    GetAppSessionRequest, GetWebSessionRequest, HubAuth, MfaAuthenticateChallenge,
+    MfaRegisterChallenge, MfaRegisterResponse, Passwordless, SessionResponse, WebSessionSpecV2,
+    AUTHENTICATE_WEB_USER_PASSWORDLESS, CHANGE_USER_AUTHENTICATION, CREATE_APP_SESSION,
+    CREATE_AUTHENTICATE_CHALLENGE, CREATE_REGISTER_CHALLENGE, DEVICE_TYPE_WEBAUTHN,
+    DEVICE_USAGE_PASSWORDLESS, GET_APP_SESSION, GET_WEB_SESSION, SCOPE_PASSWORDLESS_LOGIN,
 };
 
 const SESSION_COOKIE: &str = "__Host-sp_session";
@@ -76,14 +80,19 @@ impl BeginLimit {
     /// there is none. It also returns false for a new address when
     /// [`BEGIN_CLIENTS`] addresses have tokens missing.
     fn allow(&mut self, client: &str, now_ms: u64) -> bool {
-        let refill = |(tokens, at): (f64, u64)| (tokens + now_ms.saturating_sub(at) as f64 / BEGIN_REFILL_MS).min(BEGIN_BURST);
+        let refill = |(tokens, at): (f64, u64)| {
+            (tokens + now_ms.saturating_sub(at) as f64 / BEGIN_REFILL_MS).min(BEGIN_BURST)
+        };
         if !self.buckets.contains_key(client) && self.buckets.len() >= BEGIN_CLIENTS {
             self.buckets.retain(|_, b| refill(*b) < BEGIN_BURST);
             if self.buckets.len() >= BEGIN_CLIENTS {
                 return false;
             }
         }
-        let bucket = self.buckets.entry(client.to_string()).or_insert((BEGIN_BURST, now_ms));
+        let bucket = self
+            .buckets
+            .entry(client.to_string())
+            .or_insert((BEGIN_BURST, now_ms));
         let tokens = refill(*bucket);
         if tokens < 1.0 {
             return false;
@@ -152,7 +161,11 @@ fn owner_domain(env: &Env) -> Result<(String, String)> {
 /// bytes.
 pub fn valid_name(name: &str) -> bool {
     let b = name.as_bytes();
-    !b.is_empty() && b.len() <= 30 && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    !b.is_empty()
+        && b.len() <= 30
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 fn login_host(env: &Env) -> Result<String> {
@@ -196,7 +209,8 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
         }
         (Method::Post, "/web/logout") => {
             let mut res = redirect("/web/login")?;
-            res.headers_mut().append("Set-Cookie", &expire_cookie(SESSION_COOKIE))?;
+            res.headers_mut()
+                .append("Set-Cookie", &expire_cookie(SESSION_COOKIE))?;
             Ok(res)
         }
         _ => Response::error("not found", 404),
@@ -271,8 +285,10 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
     }
     let to_login = || -> Result<Response> {
         let mut res = redirect(&format!("https://{}/", login_host(cx.env)?))?;
-        res.headers_mut().append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
-        res.headers_mut().append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
+        res.headers_mut()
+            .append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
+        res.headers_mut()
+            .append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
         Ok(res)
     };
     if path == "/teleport-logout" {
@@ -288,10 +304,13 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
     // Every `<app>-<owner>.<domain>` is the same site, so SameSite=Lax still
     // sends the app cookies on a POST from a sibling app host. Only this
     // host may send a request that can change state.
-    if !matches!(req.method(), Method::Get | Method::Head | Method::Options) && !same_origin_fetch(&req, &host)? {
+    if !matches!(req.method(), Method::Get | Method::Head | Method::Options)
+        && !same_origin_fetch(&req, &host)?
+    {
         return Response::error("bad origin", 403);
     }
-    let (Some(sid), Some(subject)) = (cookie(&req, APP_COOKIE)?, cookie(&req, SUBJECT_COOKIE)?) else {
+    let (Some(sid), Some(subject)) = (cookie(&req, APP_COOKIE)?, cookie(&req, SUBJECT_COOKIE)?)
+    else {
         return to_login();
     };
     // Auth is asked on every request, and any error denies.
@@ -323,7 +342,9 @@ struct Handoff {
 /// Returns the handoff in `body`, or None when it is not JSON or either
 /// field is missing or empty.
 fn parse_handoff(body: &[u8]) -> Option<Handoff> {
-    serde_json::from_slice::<Handoff>(body).ok().filter(|h| !h.sid.is_empty() && !h.subject.is_empty())
+    serde_json::from_slice::<Handoff>(body)
+        .ok()
+        .filter(|h| !h.sid.is_empty() && !h.subject.is_empty())
 }
 
 /// Checks the handoff from the launcher for the app host `host` and sets
@@ -338,8 +359,10 @@ async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff, host: &str) ->
         }
     }
     let mut res = Response::empty()?.with_status(204);
-    res.headers_mut().append("Set-Cookie", &set_cookie(APP_COOKIE, &sid))?;
-    res.headers_mut().append("Set-Cookie", &set_cookie(SUBJECT_COOKIE, &subject))?;
+    res.headers_mut()
+        .append("Set-Cookie", &set_cookie(APP_COOKIE, &sid))?;
+    res.headers_mut()
+        .append("Set-Cookie", &set_cookie(SUBJECT_COOKIE, &subject))?;
     Ok(res)
 }
 
@@ -347,10 +370,29 @@ async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff, host: &str) ->
 /// bearer token is `subject`, and [`cert_for_host`] accepts its certificate
 /// for the app host `host`. It returns Ok(None) when any of these checks
 /// fails, and an error when auth cannot be asked.
-async fn valid_app_session(cx: &Ctx<'_>, sid: &str, subject: &str, host: &str) -> std::result::Result<Option<WebSessionSpecV2>, String> {
-    let got: std::result::Result<SessionResponse, _> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.to_string() }).await;
+async fn valid_app_session(
+    cx: &Ctx<'_>,
+    sid: &str,
+    subject: &str,
+    host: &str,
+) -> std::result::Result<Option<WebSessionSpecV2>, String> {
+    let got: std::result::Result<SessionResponse, _> = cx
+        .auth
+        .call(
+            cx.env,
+            cx.pool,
+            GET_APP_SESSION,
+            &GetAppSessionRequest {
+                session_id: sid.to_string(),
+            },
+        )
+        .await;
     let spec = got.map_err(|e| e.to_string())?.session.and_then(|s| s.spec);
-    Ok(spec.filter(|spec| spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) && cert_for_host(&spec.tls_cert, host)))
+    Ok(spec.filter(|spec| {
+        spec.unexpired()
+            && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes())
+            && cert_for_host(&spec.tls_cert, host)
+    }))
 }
 
 /// Returns true when the first certificate in `cert_pem` parses and its
@@ -370,9 +412,18 @@ fn cert_for_host(cert_pem: &[u8], host: &str) -> bool {
 /// `encoding/asn1` writes a string as `PrintableString` when it can, and as
 /// `UTF8String` otherwise.
 fn name_public_addr(name: &Name) -> Option<&str> {
-    let atv = name.0.iter().flat_map(|rdn| rdn.0.iter()).find(|atv| atv.oid == APP_PUBLIC_ADDR_OID)?;
-    let is_string = matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String);
-    is_string.then(|| std::str::from_utf8(atv.value.value()).ok()).flatten()
+    let atv = name
+        .0
+        .iter()
+        .flat_map(|rdn| rdn.0.iter())
+        .find(|atv| atv.oid == APP_PUBLIC_ADDR_OID)?;
+    let is_string = matches!(
+        atv.value.tag(),
+        Tag::PrintableString | Tag::Utf8String | Tag::Ia5String
+    );
+    is_string
+        .then(|| std::str::from_utf8(atv.value.value()).ok())
+        .flatten()
 }
 
 /// Returns the logged-in user and the web session, if the session cookie
@@ -386,7 +437,15 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, WebS
     };
     let got: std::result::Result<SessionResponse, CallError> = cx
         .auth
-        .call(cx.env, cx.pool, GET_WEB_SESSION, &GetWebSessionRequest { user: user.to_string(), session_id: sid.to_string() })
+        .call(
+            cx.env,
+            cx.pool,
+            GET_WEB_SESSION,
+            &GetWebSessionRequest {
+                user: user.to_string(),
+                session_id: sid.to_string(),
+            },
+        )
         .await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
         Ok(Some(spec)) if spec.unexpired() => Ok(Some((user.to_string(), spec))),
@@ -404,7 +463,9 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
     };
     let buttons: String = app_list(cx.env)?
         .iter()
-        .map(|(a, _)| format!(r#"<form method="post" action="/web/launch/{a}"><button>{a}</button></form>"#))
+        .map(|(a, _)| {
+            format!(r#"<form method="post" action="/web/launch/{a}"><button>{a}</button></form>"#)
+        })
         .collect();
     let user = html_escape(&user);
     Response::from_html(format!(
@@ -446,11 +507,20 @@ fn start_path_ok(path: &str) -> bool {
 /// `//host`, which names another host.
 fn has_dot_segment(path: &str) -> bool {
     let end = path.find(['?', '#']).unwrap_or(path.len());
-    path[..end].split('/').any(|seg| matches!(seg.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | ".."))
+    path[..end].split('/').any(|seg| {
+        matches!(
+            seg.to_ascii_lowercase().replace("%2e", ".").as_str(),
+            "." | ".."
+        )
+    })
 }
 
 async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
-    let Some(start) = app_list(cx.env)?.into_iter().find(|(a, _)| a == app).map(|(_, p)| p) else {
+    let Some(start) = app_list(cx.env)?
+        .into_iter()
+        .find(|(a, _)| a == app)
+        .map(|(_, p)| p)
+    else {
         return Response::error("not found", 404);
     };
     let Some((user, spec)) = web_session(req, cx).await? else {
@@ -461,7 +531,13 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     match create_app_session(cx, &user, &spec, app, &public_addr).await {
         Ok((sid, bearer)) => {
             let mut res = Response::empty()?.with_status(303);
-            res.headers_mut().set("Location", &format!("https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}", b64(start.as_bytes())))?;
+            res.headers_mut().set(
+                "Location",
+                &format!(
+                    "https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}",
+                    b64(start.as_bytes())
+                ),
+            )?;
             // The URL has the session ID and bearer token in its fragment.
             // Browsers leave fragments out of `Referer`, and `no-referrer`
             // keeps the rest of the URL from leaving the page too.
@@ -477,9 +553,21 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
 
 /// Creates an app session for `app` at `public_addr` as `user`, with the
 /// user's web session `spec`, and returns its ID and bearer token.
-async fn create_app_session(cx: &Ctx<'_>, user: &str, spec: &WebSessionSpecV2, app: &str, public_addr: &str) -> std::result::Result<(String, String), String> {
-    let key = if spec.tls_priv.is_empty() { &spec.priv_key } else { &spec.tls_priv };
-    let tls = Arc::new(authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?);
+async fn create_app_session(
+    cx: &Ctx<'_>,
+    user: &str,
+    spec: &WebSessionSpecV2,
+    app: &str,
+    public_addr: &str,
+) -> std::result::Result<(String, String), String> {
+    let key = if spec.tls_priv.is_empty() {
+        &spec.priv_key
+    } else {
+        &spec.tls_priv
+    };
+    let tls = Arc::new(
+        authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?,
+    );
     let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
     let created: SessionResponse = unary(
         &as_user,
@@ -487,14 +575,37 @@ async fn create_app_session(cx: &Ctx<'_>, user: &str, spec: &WebSessionSpecV2, a
         &CreateAppSessionRequest {
             username: user.to_string(),
             public_addr: public_addr.to_string(),
-            cluster_name: cx.env.var("CLUSTER_NAME").map_err(|e| e.to_string())?.to_string(),
+            cluster_name: cx
+                .env
+                .var("CLUSTER_NAME")
+                .map_err(|e| e.to_string())?
+                .to_string(),
             app_name: app.to_string(),
         },
     )
     .await?;
-    let sid = created.session.and_then(|s| s.metadata).map(|m| m.name).ok_or("no app session name")?;
-    let got: SessionResponse = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await?;
-    let bearer = got.session.and_then(|s| s.spec).map(|s| s.bearer_token).filter(|b| !b.is_empty()).ok_or("no bearer token")?;
+    let sid = created
+        .session
+        .and_then(|s| s.metadata)
+        .map(|m| m.name)
+        .ok_or("no app session name")?;
+    let got: SessionResponse = cx
+        .auth
+        .call(
+            cx.env,
+            cx.pool,
+            GET_APP_SESSION,
+            &GetAppSessionRequest {
+                session_id: sid.clone(),
+            },
+        )
+        .await?;
+    let bearer = got
+        .session
+        .and_then(|s| s.spec)
+        .map(|s| s.bearer_token)
+        .filter(|b| !b.is_empty())
+        .ok_or("no bearer token")?;
     Ok((sid, bearer))
 }
 
@@ -507,11 +618,16 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
             CREATE_AUTHENTICATE_CHALLENGE,
             &CreateAuthenticateChallengeRequest {
                 passwordless: Some(Passwordless {}),
-                challenge_extensions: Some(ChallengeExtensions { scope: SCOPE_PASSWORDLESS_LOGIN }),
+                challenge_extensions: Some(ChallengeExtensions {
+                    scope: SCOPE_PASSWORDLESS_LOGIN,
+                }),
             },
         )
         .await?;
-    let o = chal.webauthn.and_then(|w| w.public_key).ok_or("no WebAuthn challenge")?;
+    let o = chal
+        .webauthn
+        .and_then(|w| w.public_key)
+        .ok_or("no WebAuthn challenge")?;
     Ok(json!({
         "challenge": b64(&o.challenge),
         "rpId": o.rp_id,
@@ -523,20 +639,32 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
 
 /// Logs in with the passkey assertion in `assertion`, and returns the user
 /// and the new web session ID.
-async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> std::result::Result<(String, String), String> {
+async fn login_finish(
+    cx: &Ctx<'_>,
+    assertion: Vec<u8>,
+) -> std::result::Result<(String, String), String> {
     // Each call takes a pool stream, so a body that is not an assertion
     // is refused before one is taken.
-    let assertion: Value = serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
-    let a: Assertion = serde_json::from_value(assertion.clone()).map_err(|e| format!("assertion: {e}"))?;
+    let assertion: Value =
+        serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
+    let a: Assertion =
+        serde_json::from_value(assertion.clone()).map_err(|e| format!("assertion: {e}"))?;
     if a.id.is_empty() || a.r#type != "public-key" {
         return Err("assertion: not a public-key credential".into());
     }
-    let tls = authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
-    let body = json!({ "username": "", "webauthn": assertion }).to_string().into_bytes();
+    let tls =
+        authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
+    let body = json!({ "username": "", "webauthn": assertion })
+        .to_string()
+        .into_bytes();
     let stream = cx.pool.take_wait().await?;
-    let (status, body) = authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
+    let (status, body) =
+        authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
     if status != 200 {
-        return Err(format!("AuthenticateWebUser: http {status}: {}", String::from_utf8_lossy(&body)));
+        return Err(format!(
+            "AuthenticateWebUser: http {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
     parse_web_session(&body)
 }
@@ -555,7 +683,10 @@ async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, C
             },
         )
         .await?;
-    let o = chal.webauthn.and_then(|w| w.public_key).ok_or("no WebAuthn creation options")?;
+    let o = chal
+        .webauthn
+        .and_then(|w| w.public_key)
+        .ok_or("no WebAuthn creation options")?;
     let rp = o.rp.unwrap_or_default();
     let user = o.user.unwrap_or_default();
     let sel = o.authenticator_selection.unwrap_or_default();
@@ -581,7 +712,11 @@ async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, C
 
 /// Registers the passkey credential in `body` for the invite `token`, and
 /// returns the user and the new web session ID.
-async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> std::result::Result<(String, String), String> {
+async fn invite_finish(
+    cx: &Ctx<'_>,
+    token: &str,
+    body: Vec<u8>,
+) -> std::result::Result<(String, String), String> {
     let resp = parse_credential(&body)?;
     let changed: ChangeUserAuthenticationResponse = cx
         .auth
@@ -591,7 +726,9 @@ async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> std::result:
             CHANGE_USER_AUTHENTICATION,
             &ChangeUserAuthenticationRequest {
                 token_id: token.to_string(),
-                new_mfa_register_response: Some(MfaRegisterResponse { webauthn: Some(resp) }),
+                new_mfa_register_response: Some(MfaRegisterResponse {
+                    webauthn: Some(resp),
+                }),
                 new_device_name: "passkey".into(),
             },
         )
@@ -630,7 +767,8 @@ struct WebSessionUser {
 /// Returns the user and the web session ID from auth's
 /// `AuthenticateWebUser` reply.
 fn parse_web_session(body: &[u8]) -> std::result::Result<(String, String), String> {
-    let web: WebSessionJson = serde_json::from_slice(body).map_err(|e| format!("web session: {e}"))?;
+    let web: WebSessionJson =
+        serde_json::from_slice(body).map_err(|e| format!("web session: {e}"))?;
     if web.metadata.name.is_empty() || web.spec.user.is_empty() {
         return Err("web session has no name or user".into());
     }
@@ -663,8 +801,13 @@ fn public_key() -> String {
 /// Returns the credential the invite page posted in `body`, decoded for
 /// `ChangeUserAuthentication`.
 fn parse_credential(body: &[u8]) -> std::result::Result<CredentialCreationResponse, String> {
-    let cred: CredentialJson = serde_json::from_slice(body).map_err(|e| format!("credential: {e}"))?;
-    let field = |name: &str, v: &str| URL_SAFE_NO_PAD.decode(v).map_err(|e| format!("credential {name}: {e}"));
+    let cred: CredentialJson =
+        serde_json::from_slice(body).map_err(|e| format!("credential: {e}"))?;
+    let field = |name: &str, v: &str| {
+        URL_SAFE_NO_PAD
+            .decode(v)
+            .map_err(|e| format!("credential {name}: {e}"))
+    };
     Ok(CredentialCreationResponse {
         r#type: cred.r#type,
         raw_id: field("rawId", &cred.raw_id)?,
@@ -681,7 +824,10 @@ fn session_response(res: std::result::Result<(String, String), String>) -> Resul
         Ok((user, sid)) => {
             console_log!("web: web session for {user:?}");
             let mut res = Response::from_json(&json!({ "ok": true }))?;
-            res.headers_mut().append("Set-Cookie", &set_cookie(SESSION_COOKIE, &format!("{user}:{sid}")))?;
+            res.headers_mut().append(
+                "Set-Cookie",
+                &set_cookie(SESSION_COOKIE, &format!("{user}:{sid}")),
+            )?;
             Ok(res)
         }
         Err(err) => {
@@ -695,7 +841,10 @@ fn session_response(res: std::result::Result<(String, String), String>) -> Resul
 /// when the body is over [`MAX_BODY`].
 async fn read_body(req: &mut Request) -> Result<Option<Vec<u8>>> {
     let length = req.headers().get("Content-Length")?;
-    if length.and_then(|l| l.trim().parse::<usize>().ok()).is_some_and(|l| l > MAX_BODY) {
+    if length
+        .and_then(|l| l.trim().parse::<usize>().ok())
+        .is_some_and(|l| l > MAX_BODY)
+    {
         return Ok(None);
     }
     if req.inner().body().is_none() {
@@ -726,7 +875,11 @@ fn origin_is(origin: Option<&str>, host: &str) -> bool {
 /// origin. A request with neither `Sec-Fetch-Site` nor `Origin` is not from
 /// a browser page and passes.
 fn same_origin_fetch(req: &Request, host: &str) -> Result<bool> {
-    Ok(fetch_is_same_origin(req.headers().get("Sec-Fetch-Site")?.as_deref(), req.headers().get("Origin")?.as_deref(), host))
+    Ok(fetch_is_same_origin(
+        req.headers().get("Sec-Fetch-Site")?.as_deref(),
+        req.headers().get("Origin")?.as_deref(),
+        host,
+    ))
 }
 
 /// Returns the [`same_origin_fetch`] answer for the `Sec-Fetch-Site` and
@@ -745,7 +898,11 @@ fn cookie(req: &Request, name: &str) -> Result<Option<String>> {
 
 /// Returns the value of the cookie `name` in a `Cookie` header value.
 fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
-    header.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
+    header
+        .split(';')
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v)
 }
 
 fn set_cookie(name: &str, value: &str) -> String {
@@ -926,17 +1083,32 @@ mod tests {
     fn parse_handoff_cases() {
         let h = parse_handoff(br#"{"sid":"s","subject":"t"}"#).unwrap();
         assert_eq!((h.sid.as_str(), h.subject.as_str()), ("s", "t"));
-        for body in [&b""[..], b"not json", br#"{"sid":"s"}"#, br#"{"sid":"","subject":"t"}"#, br#"{"sid":"s","subject":""}"#, br#"{"sid":1,"subject":"t"}"#] {
-            assert!(parse_handoff(body).is_none(), "{:?}", String::from_utf8_lossy(body));
+        for body in [
+            &b""[..],
+            b"not json",
+            br#"{"sid":"s"}"#,
+            br#"{"sid":"","subject":"t"}"#,
+            br#"{"sid":"s","subject":""}"#,
+            br#"{"sid":1,"subject":"t"}"#,
+        ] {
+            assert!(
+                parse_handoff(body).is_none(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
     fn app_cert(attrs: &[(&[u64], rcgen::DnValue)]) -> Vec<u8> {
         let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = rcgen::DistinguishedName::new();
-        params.distinguished_name.push(rcgen::DnType::CommonName, "alice");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "alice");
         for (oid, value) in attrs {
-            params.distinguished_name.push(rcgen::DnType::CustomDnType(oid.to_vec()), value.clone());
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CustomDnType(oid.to_vec()), value.clone());
         }
         let key = rcgen::KeyPair::generate().unwrap();
         params.self_signed(&key).unwrap().pem().into_bytes()
@@ -950,44 +1122,79 @@ mod tests {
         let printable = |v: &str| rcgen::DnValue::PrintableString(v.try_into().unwrap());
         let bmp = |v: &str| rcgen::DnValue::BmpString(v.try_into().unwrap());
         let host = "bench-julia.example.com";
-        assert!(cert_for_host(&app_cert(&[(name, utf8("bench")), (addr, printable(host))]), host));
+        assert!(cert_for_host(
+            &app_cert(&[(name, utf8("bench")), (addr, printable(host))]),
+            host
+        ));
         assert!(cert_for_host(&app_cert(&[(addr, utf8(host))]), host));
         assert!(!cert_for_host(&app_cert(&[(name, utf8("bench"))]), host));
-        assert!(!cert_for_host(&app_cert(&[(addr, printable("octo-julia.example.com"))]), host));
-        assert!(!cert_for_host(&app_cert(&[(addr, printable("bench-julia.example.com.evil"))]), host));
+        assert!(!cert_for_host(
+            &app_cert(&[(addr, printable("octo-julia.example.com"))]),
+            host
+        ));
+        assert!(!cert_for_host(
+            &app_cert(&[(addr, printable("bench-julia.example.com.evil"))]),
+            host
+        ));
         assert!(!cert_for_host(&app_cert(&[(addr, bmp(host))]), host));
         assert!(!cert_for_host(b"not a pem", host));
-        assert!(!cert_for_host(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", host));
+        assert!(!cert_for_host(
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+            host
+        ));
     }
 
     #[test]
     fn html_escape_cases() {
         assert_eq!(html_escape("alice"), "alice");
-        assert_eq!(html_escape(r#"<a href="x">'&'</a>"#), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
+        assert_eq!(
+            html_escape(r#"<a href="x">'&'</a>"#),
+            "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;"
+        );
     }
 
     #[test]
     fn parse_web_session_cases() {
         assert_eq!(parse_web_session(br#"{"kind":"web_session","metadata":{"name":"s1"},"spec":{"user":"alice","pub":"x"}}"#), Ok(("alice".into(), "s1".into())));
-        for body in [&b"null"[..], b"{}", br#"{"metadata":{"name":"s1"}}"#, br#"{"metadata":{"name":""},"spec":{"user":"alice"}}"#, br#"{"metadata":{"name":1},"spec":{"user":"alice"}}"#] {
-            assert!(parse_web_session(body).is_err(), "{:?}", String::from_utf8_lossy(body));
+        for body in [
+            &b"null"[..],
+            b"{}",
+            br#"{"metadata":{"name":"s1"}}"#,
+            br#"{"metadata":{"name":""},"spec":{"user":"alice"}}"#,
+            br#"{"metadata":{"name":1},"spec":{"user":"alice"}}"#,
+        ] {
+            assert!(
+                parse_web_session(body).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
     #[test]
     fn parse_credential_cases() {
-        let got = parse_credential(br#"{"rawId":"AQI","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#).unwrap();
+        let got = parse_credential(
+            br#"{"rawId":"AQI","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+        )
+        .unwrap();
         assert_eq!(got.r#type, "public-key");
         assert_eq!(got.raw_id, vec![1, 2]);
         let att = got.response.unwrap();
-        assert_eq!((att.client_data_json, att.attestation_object), (vec![3], vec![4, 5]));
+        assert_eq!(
+            (att.client_data_json, att.attestation_object),
+            (vec![3], vec![4, 5])
+        );
         for body in [
             &b"[]"[..],
             br#"{"response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
             br#"{"rawId":"AQI","response":{"attestationObject":"BAU"}}"#,
             br#"{"rawId":"AQ==","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
         ] {
-            assert!(parse_credential(body).is_err(), "{:?}", String::from_utf8_lossy(body));
+            assert!(
+                parse_credential(body).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
@@ -1022,11 +1229,23 @@ mod tests {
 
     #[test]
     fn origin_is_cases() {
-        assert!(origin_is(Some("https://julia.example.com"), "julia.example.com"));
+        assert!(origin_is(
+            Some("https://julia.example.com"),
+            "julia.example.com"
+        ));
         assert!(!origin_is(None, "julia.example.com"));
-        assert!(!origin_is(Some("http://julia.example.com"), "julia.example.com"));
-        assert!(!origin_is(Some("https://bench-julia.example.com"), "julia.example.com"));
-        assert!(!origin_is(Some("https://julia.example.com:443"), "julia.example.com"));
+        assert!(!origin_is(
+            Some("http://julia.example.com"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(
+            Some("https://bench-julia.example.com"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(
+            Some("https://julia.example.com:443"),
+            "julia.example.com"
+        ));
         assert!(!origin_is(Some("null"), "julia.example.com"));
     }
 
@@ -1045,7 +1264,11 @@ mod tests {
             (None, sibling, false),
             (None, None, true),
         ] {
-            assert_eq!(fetch_is_same_origin(site, origin, host), want, "{site:?} {origin:?}");
+            assert_eq!(
+                fetch_is_same_origin(site, origin, host),
+                want,
+                "{site:?} {origin:?}"
+            );
         }
     }
 
@@ -1111,7 +1334,10 @@ mod tests {
     #[test]
     fn parse_apps_cases() {
         let got = parse_apps(" a , b:/x,c:x,d://x,E,f:/\t/x,g:/y:z ");
-        let want: Vec<(String, String)> = [("a", "/"), ("b", "/x"), ("g", "/y:z")].iter().map(|(n, p)| (n.to_string(), p.to_string())).collect();
+        let want: Vec<(String, String)> = [("a", "/"), ("b", "/x"), ("g", "/y:z")]
+            .iter()
+            .map(|(n, p)| (n.to_string(), p.to_string()))
+            .collect();
         assert_eq!(got, want);
     }
 }

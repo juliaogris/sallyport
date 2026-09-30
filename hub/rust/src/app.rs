@@ -52,20 +52,36 @@ impl Drop for Forward {
 /// The SNI is the hex-encoded cluster name, as the app service expects it.
 /// All three steps together have [`DIAL_DEADLINE`]. Returns an error when
 /// the tunnel already has [`MAX_FORWARDS`] streams open.
-pub(crate) async fn dial_app(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str) -> std::result::Result<AppStream, String> {
+pub(crate) async fn dial_app(
+    tunnel: &AppTunnel,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+) -> std::result::Result<AppStream, String> {
     if tunnel.forwards.fetch_add(1, Ordering::Relaxed) >= MAX_FORWARDS {
         tunnel.forwards.fetch_sub(1, Ordering::Relaxed);
         return Err(format!("{MAX_FORWARDS} app streams open"));
     }
     let forward = Forward(tunnel.forwards.clone());
-    match select(pin!(dial_inner(tunnel, tls, cluster)), pin!(crate::sockets::sleep(DIAL_DEADLINE))).await {
-        Either::Left((res, _)) => res.map(|tls| AppStream { tls, _forward: forward }),
+    match select(
+        pin!(dial_inner(tunnel, tls, cluster)),
+        pin!(crate::sockets::sleep(DIAL_DEADLINE)),
+    )
+    .await
+    {
+        Either::Left((res, _)) => res.map(|tls| AppStream {
+            tls,
+            _forward: forward,
+        }),
         Either::Right(_) => Err(format!("dial: no answer within {DIAL_DEADLINE:?}")),
     }
 }
 
 /// Runs the three steps of [`dial_app`].
-async fn dial_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster: &str) -> std::result::Result<TlsStream, String> {
+async fn dial_inner(
+    tunnel: &AppTunnel,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+) -> std::result::Result<TlsStream, String> {
     let ch = tunnel
         .handle
         .channel_open_custom(CHAN_TRANSPORT, Vec::new())
@@ -92,7 +108,11 @@ async fn dial_inner(tunnel: &AppTunnel, tls: Arc<rustls::ClientConfig>, cluster:
     let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
     let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
     // The stream closes the channel when it is dropped.
-    let stream = guard.0.take().expect("the guard holds the channel").into_stream();
+    let stream = guard
+        .0
+        .take()
+        .expect("the guard holds the channel")
+        .into_stream();
     tokio_rustls::TlsConnector::from(tls)
         .connect(name, stream)
         .await
@@ -113,13 +133,21 @@ impl Drop for CloseOnDrop {
 }
 
 impl AsyncRead for AppStream {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().tls).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for AppStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.get_mut().tls).poll_write(cx, buf)
     }
 
@@ -135,4 +163,3 @@ impl AsyncWrite for AppStream {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-
