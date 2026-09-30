@@ -80,153 +80,204 @@ function find(env) {
   });
 }
 
-// One Go program per isolate. It is started again if it exits.
-let ready = null;
-let inst = null;
-let go = null;
+// Each Durable Object instance runs its own Go program. The runtime can
+// build a new instance in the same isolate, for example after it upgrades
+// itself, and I/O objects of the old instance cannot be used from the new
+// one. So a new instance stops the old program and starts a fresh one, and
+// the old program's WebSockets are closed, so that auth's callout and the
+// agents dial again.
+let current = null;
 
-// Open WebSockets and response streams, by the ID Go gave them.
-const sockets = new Map();
-const streams = new Map();
-// The resolve functions of the requests Go has not answered yet.
-const pending = new Set();
+// program is one Go program: its instance, its open WebSockets and response
+// streams by the ID Go gave them, and the requests it has not answered.
+class program {
+  constructor(env) {
+    this.go = new globalThis.Go();
+    this.inst = null;
+    this.api = null;
+    this.sockets = new Map();
+    this.streams = new Map();
+    this.pending = new Set();
+    this.exited = false;
+    this.ready = this.start(env);
+  }
 
-// The functions Go calls. Go reads this object once at start.
-const glue = {
-  // Accepts a new WebSocket pair for connection id, whose incoming bytes go
-  // through inBuf, and returns the client end for the 101 response.
-  accept(id, inBuf) {
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const ws = pair[1];
-    ws.binaryType = 'arraybuffer';
-    ws.accept();
-    sockets.set(id, ws);
-    ws.addEventListener('message', (e) => {
-      if (typeof e.data === 'string') return;
-      const d = new Uint8Array(e.data);
-      for (let off = 0; off < d.length; off += inBuf.length) {
-        const k = Math.min(d.length - off, inBuf.length);
-        inBuf.set(d.subarray(off, off + k));
-        globalThis.sallyport.push(id, k);
-      }
-    });
-    const closed = (e) => {
-      if (!sockets.delete(id)) return;
-      globalThis.sallyport.closed(id, e.code || 0);
-    };
-    ws.addEventListener('close', closed);
-    ws.addEventListener('error', closed);
-    return client;
-  },
-  // Sends the first n bytes of outBuf, which is Go's persistent buffer, so
-  // the message is a copy.
-  send(id, outBuf, n) {
-    const ws = sockets.get(id);
-    if (!ws) return false;
-    try {
-      ws.send(outBuf.slice(0, n));
-      return true;
-    } catch (e) {
-      console.log('glue: websocket send: ' + e);
-      return false;
-    }
-  },
-  close(id, code, reason) {
-    const ws = sockets.get(id);
-    sockets.delete(id);
-    try {
-      ws?.close(code, reason);
-    } catch {}
-  },
-  // Returns a ReadableStream whose chunks Go supplies through buf.
-  stream(sid, buf) {
-    return new ReadableStream(
-      {
-        pull(ctl) {
-          return new Promise((resolve) => {
-            streams.set(sid, { ctl, buf, resolve });
-            globalThis.sallyport.pull(sid);
-          });
-        },
-        cancel() {
-          streams.delete(sid);
-          globalThis.sallyport.cancel(sid);
-        },
-      },
-      { highWaterMark: 0 },
-    );
-  },
-  // Delivers the answer to one pull: n >= 0 bytes in buf, then the end if
-  // last is true, or -2 for an error.
-  chunk(sid, n, last) {
-    const s = streams.get(sid);
-    if (!s) return;
-    streams.delete(sid);
-    try {
-      if (n > 0) s.ctl.enqueue(s.buf.slice(0, n));
-      if (n === -2) s.ctl.error(new Error('upstream body error'));
-      else if (last) s.ctl.close();
-    } catch {}
-    s.resolve();
-  },
-  // The size of the WASM linear memory in bytes.
+  async start(env) {
+    this.inst = await WebAssembly.instantiate(mod, this.go.importObject);
+    globalThis.sallyportEnv = env;
+    globalThis.sallyportGlue = this.glue();
+    console.log('hub: go start, linear memory ' + (this.linearMem() >> 20) + ' MiB');
+    this.done = this.go.run(this.inst).then(() => this.cleanup());
+    // main has set globalThis.sallyport by the time it first blocks.
+    this.api = globalThis.sallyport;
+  }
+
   linearMem() {
-    return inst ? inst.exports.mem.buffer.byteLength : 0;
-  },
-  // The JavaScript values Go holds a reference to, and the bytes in the
-  // typed arrays among them, as "count bytes".
-  jsValues() {
-    let n = 0;
-    let bytes = 0;
-    for (const v of go?._values || []) {
-      if (v === undefined) continue;
-      n++;
-      if (ArrayBuffer.isView(v)) bytes += v.byteLength;
-    }
-    return n + ' ' + bytes;
-  },
-};
+    return this.inst ? this.inst.exports.mem.buffer.byteLength : 0;
+  }
 
-async function start(env) {
-  go = new globalThis.Go();
-  inst = await WebAssembly.instantiate(mod, go.importObject);
-  globalThis.sallyportEnv = env;
-  globalThis.sallyportGlue = glue;
-  console.log('hub: go start, linear memory ' + (glue.linearMem() >> 20) + ' MiB');
-  go.run(inst).then(() => {
+  // Stops the program and waits for it to exit.
+  async stop() {
+    await this.ready.catch(() => {});
+    if (this.exited || !this.api) return;
+    try {
+      this.api.shutdown();
+    } catch {}
+    await this.done;
+  }
+
+  // Closes what the exited program left open.
+  cleanup() {
+    this.exited = true;
     console.log('hub: go program exited');
-    ready = null;
-    // The WebSockets of the exited program have no code behind them, but
-    // auth's callout and the agents would see them open and not redial.
-    for (const ws of sockets.values()) {
+    for (const ws of this.sockets.values()) {
       try {
         ws.close(1012, 'service restart');
       } catch {}
     }
-    sockets.clear();
-    for (const s of streams.values()) {
+    this.sockets.clear();
+    for (const s of this.streams.values()) {
       try {
         s.ctl.error(new Error('service restart'));
       } catch {}
       s.resolve();
     }
-    streams.clear();
-    for (const resolve of pending) resolve(new Response('service restart', { status: 503 }));
-    pending.clear();
-  });
+    this.streams.clear();
+    for (const resolve of this.pending) resolve(new Response('service restart', { status: 503 }));
+    this.pending.clear();
+    if (current === this) current = null;
+  }
+
+  // Returns the functions Go calls. Go reads them once at start.
+  glue() {
+    const p = this;
+    return {
+      // Accepts a new WebSocket pair for connection id, whose incoming
+      // bytes go through inBuf, and returns the client end for the 101
+      // response.
+      accept(id, inBuf) {
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const ws = pair[1];
+        ws.binaryType = 'arraybuffer';
+        ws.accept();
+        p.sockets.set(id, ws);
+        ws.addEventListener('message', (e) => {
+          if (typeof e.data === 'string' || p.exited) return;
+          const d = new Uint8Array(e.data);
+          for (let off = 0; off < d.length; off += inBuf.length) {
+            const k = Math.min(d.length - off, inBuf.length);
+            inBuf.set(d.subarray(off, off + k));
+            p.api.push(id, k);
+          }
+        });
+        const closed = (e) => {
+          if (!p.sockets.delete(id) || p.exited) return;
+          p.api.closed(id, e.code || 0);
+        };
+        ws.addEventListener('close', closed);
+        ws.addEventListener('error', closed);
+        return client;
+      },
+      // Sends the first n bytes of outBuf, which is Go's persistent
+      // buffer, so the message is a copy.
+      send(id, outBuf, n) {
+        const ws = p.sockets.get(id);
+        if (!ws) return false;
+        try {
+          ws.send(outBuf.slice(0, n));
+          return true;
+        } catch (e) {
+          console.log('glue: websocket send: ' + e);
+          return false;
+        }
+      },
+      close(id, code, reason) {
+        const ws = p.sockets.get(id);
+        p.sockets.delete(id);
+        try {
+          ws?.close(code, reason);
+        } catch {}
+      },
+      // Returns a ReadableStream whose chunks Go supplies through buf.
+      stream(sid, buf) {
+        return new ReadableStream(
+          {
+            pull(ctl) {
+              if (p.exited) return ctl.error(new Error('service restart'));
+              return new Promise((resolve) => {
+                p.streams.set(sid, { ctl, buf, resolve });
+                p.api.pull(sid);
+              });
+            },
+            cancel() {
+              p.streams.delete(sid);
+              if (!p.exited) p.api.cancel(sid);
+            },
+          },
+          { highWaterMark: 0 },
+        );
+      },
+      // Delivers the answer to one pull: n >= 0 bytes in buf, then the end
+      // if last is true, or -2 for an error.
+      chunk(sid, n, last) {
+        const s = p.streams.get(sid);
+        if (!s) return;
+        p.streams.delete(sid);
+        try {
+          if (n > 0) s.ctl.enqueue(s.buf.slice(0, n));
+          if (n === -2) s.ctl.error(new Error('upstream body error'));
+          else if (last) s.ctl.close();
+        } catch {}
+        s.resolve();
+      },
+      // The size of the WASM linear memory in bytes.
+      linearMem() {
+        return p.linearMem();
+      },
+      // The JavaScript values Go holds a reference to, and the bytes in the
+      // typed arrays among them, as "count bytes".
+      jsValues() {
+        let n = 0;
+        let bytes = 0;
+        for (const v of p.go._values || []) {
+          if (v === undefined) continue;
+          n++;
+          if (ArrayBuffer.isView(v)) bytes += v.byteLength;
+        }
+        return n + ' ' + bytes;
+      },
+    };
+  }
+}
+
+// Returns the running program of this instance, replacing one that belongs
+// to another instance or has exited.
+async function programFor(owner, env) {
+  if (!current || current.owner !== owner || current.exited) {
+    const old = current;
+    const next = new program(env);
+    next.owner = owner;
+    current = next;
+    if (old) {
+      console.log('hub: stopping the go program of a previous instance');
+      await old.stop();
+    }
+  }
+  const p = current;
+  await p.ready;
+  return p;
 }
 
 export class Hub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     console.log('hub: durable object started');
-    if (!ready) ready = start(env);
+    this.program = programFor(this, env);
   }
 
   async fetch(req) {
-    if (!ready) ready = start(this.env);
-    await ready;
+    const p = await programFor(this, this.env);
     const url = new URL(req.url);
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
@@ -243,9 +294,9 @@ export class Hub extends DurableObject {
       body,
     };
     return new Promise((resolve) => {
-      pending.add(resolve);
-      globalThis.sallyport.fetch(r, (status, head, b, flags, ws, stream) => {
-        pending.delete(resolve);
+      p.pending.add(resolve);
+      p.api.fetch(r, (status, head, b, flags, ws, stream) => {
+        p.pending.delete(resolve);
         // A throw here would come out in Go as a panic, so it stays here.
         try {
           resolve(respond(status, head, b, flags, ws, stream));

@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -69,6 +70,11 @@ func main() {
 		if s := streams.get(args[0].Int()); s != nil {
 			s.cancel()
 		}
+		return nil
+	}))
+	api.Set("shutdown", js.FuncOf(func(this js.Value, args []js.Value) any {
+		logf("hub: shutting down for a new Durable Object instance")
+		os.Exit(0)
 		return nil
 	}))
 	js.Global().Set("sallyport", api)
