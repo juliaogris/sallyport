@@ -640,7 +640,7 @@ mod tests {
             app_tunnel: Default::default(),
             auth_pipe: Default::default(),
         };
-        let (ticket, _, _) = crate::tunnel::Pending::default().admit(1);
+        let (ticket, _, _) = crate::tunnel::Pending::default().admit(1, "a");
         let mut handler = AgentHandler::new(
             key(1).public_key().clone(),
             CLUSTER.into(),

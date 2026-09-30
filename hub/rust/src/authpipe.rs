@@ -172,13 +172,14 @@ pub fn accept(req: &Request, env: &Env, pool: &Pool) -> Result<Response> {
     ws.accept()?;
     console_log!("tunnel/auth: connection accepted");
 
-    let (ticket, evicted, evicted_one) = pool.unverified.admit(MAX_UNVERIFIED);
-    if evicted_one {
+    let (ticket, evict_rx, evicted_other) =
+        pool.unverified.admit(MAX_UNVERIFIED, &crate::tunnel::client_key(req)?);
+    if evicted_other {
         console_log!("tunnel/auth: {MAX_UNVERIFIED} sockets in the challenge, closed the oldest");
     }
     let pool = pool.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        serve(ws.clone(), key, host, &pool, ticket, evicted).await;
+        serve(ws.clone(), key, host, &pool, ticket, evict_rx).await;
         // `serve` added the WebSocket to the restart list when it started
         // listening, before the challenge.
         crate::sockets::remove(&ws);

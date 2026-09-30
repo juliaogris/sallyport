@@ -6,7 +6,7 @@
 //! host CA, and inside that SSH.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -161,8 +161,9 @@ impl DurableObject for Hub {
             .map_err(|_| Error::RustError("setting binaryType".into()))?;
         ws.accept()?;
 
-        let (ticket, evicted, evicted_one) = self.unauthenticated.admit(MAX_UNAUTHENTICATED);
-        if evicted_one {
+        let (ticket, evict_rx, evicted_other) =
+            self.unauthenticated.admit(MAX_UNAUTHENTICATED, &client_key(&req)?);
+        if evicted_other {
             console_log!(
                 "tunnel: {MAX_UNAUTHENTICATED} connections not authenticated, closed the oldest"
             );
@@ -189,7 +190,7 @@ impl DurableObject for Hub {
             // Resolves at the deadline, when a newer connection evicts this
             // one, or when the handler drops its ticket after auth.
             let watch = pin!(async {
-                match select(pin!(crate::sockets::sleep(AUTH_DEADLINE)), evicted).await {
+                match select(pin!(crate::sockets::sleep(AUTH_DEADLINE)), evict_rx).await {
                     Either::Left(_) => format!("not authenticated after {AUTH_DEADLINE:?}"),
                     Either::Right(_) => {
                         "closed for a newer connection that is not authenticated".to_string()
@@ -450,7 +451,9 @@ fn secret_string(env: &Env, name: &str) -> Result<String> {
 }
 
 /// Connections that have not proved who they are, oldest first. Each one
-/// holds a [`Ticket`] until it has.
+/// holds a [`Ticket`] until it has. At the cap, the client with the most
+/// connections waiting loses its oldest, so one client address that opens
+/// many connections evicts its own, not the agent's or auth's.
 #[derive(Clone, Default)]
 pub struct Pending {
     inner: Arc<Mutex<PendingInner>>,
@@ -459,8 +462,8 @@ pub struct Pending {
 #[derive(Default)]
 struct PendingInner {
     next: u64,
-    /// Each connection's ID and the sender that evicts it.
-    queue: VecDeque<(u64, oneshot::Sender<()>)>,
+    /// Each connection's ID, its client, and the sender that evicts it.
+    queue: VecDeque<(u64, String, oneshot::Sender<()>)>,
 }
 
 /// One connection's place in [`Pending`]. Dropping it removes the
@@ -471,31 +474,44 @@ pub struct Ticket {
 }
 
 impl Pending {
-    /// Adds a connection. If `cap` connections are already waiting, it
-    /// evicts the oldest first. Returns the new connection's ticket, a
-    /// receiver, and true if it evicted one. The receiver resolves with
-    /// `Ok(())` when a later call evicts this connection, and with an error
-    /// once the ticket is dropped.
-    pub fn admit(&self, cap: usize) -> (Ticket, oneshot::Receiver<()>, bool) {
+    /// Adds a connection from `client`. If `cap` connections are already
+    /// waiting, it first evicts the oldest connection of the client that
+    /// has the most waiting, counting the new one. Returns the new
+    /// connection's ticket, a receiver, and true if it evicted another
+    /// connection. The receiver resolves with `Ok(())` when a later call
+    /// evicts this connection, and with an error once the ticket is dropped.
+    pub fn admit(&self, cap: usize, client: &str) -> (Ticket, oneshot::Receiver<()>, bool) {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().unwrap();
-        let mut evicted = false;
+        let mut evicted_other = false;
         while inner.queue.len() >= cap.max(1) {
-            if let Some((_, evict)) = inner.queue.pop_front() {
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            *counts.entry(client).or_default() += 1;
+            for (_, c, _) in &inner.queue {
+                *counts.entry(c.as_str()).or_default() += 1;
+            }
+            let most = counts.values().copied().max().unwrap_or(0);
+            // The oldest connection whose client has the most waiting.
+            let at = inner
+                .queue
+                .iter()
+                .position(|(_, c, _)| counts[c.as_str()] == most)
+                .unwrap_or(0);
+            if let Some((_, _, evict)) = inner.queue.remove(at) {
                 let _ = evict.send(());
-                evicted = true;
+                evicted_other = true;
             }
         }
         let id = inner.next;
         inner.next += 1;
-        inner.queue.push_back((id, tx));
+        inner.queue.push_back((id, client.to_string(), tx));
         (
             Ticket {
                 id,
                 pending: self.clone(),
             },
             rx,
-            evicted,
+            evicted_other,
         )
     }
 
@@ -512,8 +528,24 @@ impl Drop for Ticket {
             .lock()
             .unwrap()
             .queue
-            .retain(|(id, _)| *id != self.id);
+            .retain(|(id, _, _)| *id != self.id);
     }
+}
+
+/// Returns the client address of `req` from `CF-Connecting-IP`, with an
+/// IPv6 address cut to its /64, because one host usually holds a whole
+/// /64. It is empty when the header is missing, as under `wrangler dev`.
+pub fn client_key(req: &Request) -> Result<String> {
+    let ip = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
+    Ok(ipv6_prefix(&ip).unwrap_or(ip))
+}
+
+/// Returns the first four groups of an IPv6 address, or None when `ip` is
+/// not one.
+fn ipv6_prefix(ip: &str) -> Option<String> {
+    let addr: std::net::Ipv6Addr = ip.parse().ok()?;
+    let s = addr.segments();
+    Some(format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]))
 }
 
 /// Reads a base64-encoded secret. Secrets are base64 so that multi-line
@@ -533,7 +565,7 @@ mod tests {
     #[test]
     fn pending_counts_until_the_ticket_drops() {
         let pending = Pending::default();
-        let (a, mut a_rx, evicted) = pending.admit(2);
+        let (a, mut a_rx, evicted) = pending.admit(2, "a");
         assert!(!evicted);
         assert_eq!(pending.waiting(), 1);
         drop(a);
@@ -544,9 +576,9 @@ mod tests {
     #[test]
     fn pending_evicts_the_oldest_at_the_cap() {
         let pending = Pending::default();
-        let (_a, a_rx, _) = pending.admit(2);
-        let (_b, mut b_rx, _) = pending.admit(2);
-        let (_c, mut c_rx, evicted) = pending.admit(2);
+        let (_a, a_rx, _) = pending.admit(2, "a");
+        let (_b, mut b_rx, _) = pending.admit(2, "a");
+        let (_c, mut c_rx, evicted) = pending.admit(2, "a");
         assert!(evicted);
         assert_eq!(pending.waiting(), 2);
         assert_eq!(block_on(a_rx), Ok(()));
@@ -555,10 +587,33 @@ mod tests {
     }
 
     #[test]
+    fn pending_evicts_the_client_with_the_most() {
+        let pending = Pending::default();
+        let (_agent, mut agent_rx, _) = pending.admit(3, "agent");
+        let (_x1, x1_rx, _) = pending.admit(3, "x");
+        let (_x2, mut x2_rx, _) = pending.admit(3, "x");
+        let (_x3, mut x3_rx, evicted) = pending.admit(3, "x");
+        assert!(evicted);
+        assert_eq!(block_on(x1_rx), Ok(()));
+        assert_eq!(agent_rx.try_recv(), Ok(None));
+        let (_x4, _, _) = pending.admit(3, "x");
+        assert_eq!(block_on(&mut x2_rx), Ok(()));
+        assert_eq!(agent_rx.try_recv(), Ok(None));
+        assert_eq!(x3_rx.try_recv(), Ok(None));
+    }
+
+    #[test]
+    fn ipv6_prefix_cuts_to_64() {
+        assert_eq!(ipv6_prefix("2001:db8:1:2:3:4:5:6").as_deref(), Some("2001:db8:1:2::/64"));
+        assert_eq!(ipv6_prefix("192.0.2.1"), None);
+        assert_eq!(ipv6_prefix(""), None);
+    }
+
+    #[test]
     fn pending_ticket_of_an_evicted_connection_removes_nothing() {
         let pending = Pending::default();
-        let (a, _a_rx, _) = pending.admit(1);
-        let (_b, _b_rx, _) = pending.admit(1);
+        let (a, _a_rx, _) = pending.admit(1, "a");
+        let (_b, _b_rx, _) = pending.admit(1, "a");
         drop(a);
         assert_eq!(pending.waiting(), 1);
     }
