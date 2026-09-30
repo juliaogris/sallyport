@@ -310,6 +310,43 @@ async fn messages_on_unconfirmed_channel_are_ignored() {
     assert_eq!(r.events, vec![]);
 }
 
+/// Runs a scenario that sends one data packet of `size` bytes, bypassing Go's
+/// packet size and window checks, and returns what the Go client printed.
+async fn send_raw_data(scenario: &str, config: server::Config, size: usize) -> String {
+    run_with(config, &[scenario, &size.to_string()], |_| async {})
+        .await
+        .stdout
+}
+
+#[tokio::test]
+async fn data_over_maximum_packet_size_disconnects() {
+    let max = ed25519_config().maximum_packet_size as usize;
+    assert_eq!(
+        send_raw_data("oversize-data", ed25519_config(), max).await,
+        "after-data=true\n"
+    );
+    assert_eq!(
+        send_raw_data("oversize-data", ed25519_config(), max + 1).await,
+        "after-data=false\n"
+    );
+}
+
+#[tokio::test]
+async fn data_over_window_disconnects() {
+    let small_window = || server::Config {
+        window_size: 16384,
+        ..ed25519_config()
+    };
+    assert_eq!(
+        send_raw_data("overwindow-data", small_window(), 16384).await,
+        "after-data=true\n"
+    );
+    assert_eq!(
+        send_raw_data("overwindow-data", small_window(), 16385).await,
+        "after-data=false\n"
+    );
+}
+
 /// Returns a CA key and a server config whose ECDSA host key has a host
 /// certificate signed by that CA.
 fn host_cert_config() -> (PrivateKey, server::Config) {

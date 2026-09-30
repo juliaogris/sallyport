@@ -653,6 +653,23 @@ impl Session {
                 };
                 trace!("handler.data {:?} {:?}", ext, channel_num);
                 let data = map_err!(Bytes::decode(r))?;
+                // sallyport: the channel queue below holds up to
+                // `channel_buffer_size` messages. This check keeps each
+                // message at or under the advertised maximum packet size, so
+                // the queue stays under `channel_buffer_size *
+                // maximum_packet_size` bytes. Without it, only the 256 KiB
+                // transport packet limit applies. Go's x/crypto also ends the
+                // connection on both errors.
+                if let Some(ref enc) = self.common.encrypted {
+                    if let Some(params) = enc.channels.get(&channel_num) {
+                        if data.len() > params.sender_maximum_packet_size as usize {
+                            return Err(Error::PacketSize(data.len()).into());
+                        }
+                        if data.len() > params.sender_window_size as usize {
+                            return Err(Error::Inconsistent.into());
+                        }
+                    }
+                }
                 let target = self.target_window_size;
 
                 if let Some(ref mut enc) = self.common.encrypted {

@@ -113,6 +113,24 @@ func main() {
 		writeRaw(client, channelEOFMsg{PeersID: id})
 		serveTransport(nc)
 
+	case "oversize-data", "overwindow-data":
+		// Send one data packet of the given size on a channel. Go's own
+		// writes never exceed the server's packet size or window, so
+		// this bypasses them.
+		size, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			log.Fatalf("size: %v", err)
+		}
+		ch, reqs, err := client.OpenChannel("teleport-heartbeat", nil)
+		if err != nil {
+			log.Fatalf("open teleport-heartbeat: %v", err)
+		}
+		go ssh.DiscardRequests(reqs)
+		writeRaw(client, channelDataMsg{PeersID: remoteID(ch), Data: make([]byte, size)})
+		// A reply shows that the server kept the connection open.
+		_, err = ch.SendRequest("probe-true", true, nil)
+		fmt.Printf("after-data=%v\n", err == nil)
+
 	case "rekey-echo":
 		channels, err := strconv.Atoi(os.Args[3])
 		if err != nil {

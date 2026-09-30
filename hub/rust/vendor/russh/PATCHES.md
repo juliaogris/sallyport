@@ -103,6 +103,17 @@ so that `[patch.crates-io]` can point at this directory.
   `CHANNEL_OPEN_FAILURE` for a channel that is already confirmed ends the
   connection with `Error::Inconsistent`, as x/crypto does.
 
+## Incoming channel data
+
+- `src/server/encrypted.rs`: `CHANNEL_DATA` and `CHANNEL_EXTENDED_DATA`
+  longer than the channel's advertised maximum packet size end the
+  connection with `Error::PacketSize`. Data longer than the channel's
+  remaining window ends it with `Error::Inconsistent`. Go's x/crypto does
+  the same. Before this, russh ignored data past the window and checked no
+  length except the 256 KiB transport packet limit, so a channel queue of
+  256 messages could hold about 64 MiB. It now holds at most
+  `channel_buffer_size * maximum_packet_size` bytes.
+
 ## Host certificates
 
 - `src/server/mod.rs`: New `Config::host_certificates`, matched to `keys` by
