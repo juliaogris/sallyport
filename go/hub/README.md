@@ -43,11 +43,10 @@ test cluster on homesrv needs no change when the Worker changes language.
 
 ### Rollback to the Rust hub
 
-Deploy the Rust hub's `go` env again from the Rust hub's directory (`hub/`
-today, `rust/hub/` after the move):
+Deploy the Rust hub's `go` env again from the Rust hub's directory:
 
 ```
-cd hub && npx wrangler@4 deploy --env go
+cd rust/hub && npx wrangler@4 deploy --env go
 ```
 
 The secrets stay, because they belong to the Worker, not to the code. A
