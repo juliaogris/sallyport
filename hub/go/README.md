@@ -12,7 +12,10 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   `/webapi/find` and `/webapi/ping`, rejects a non-upgrade request to the
   upgrade paths, and forwards everything else to the Durable Object. Only
   the Durable Object starts the Go program, so a stateless Worker isolate
-  never pays the Go runtime's startup CPU and 38 MiB of memory.
+  never pays the Go runtime's startup CPU and 38 MiB of memory. The
+  Durable Object reads each request body before Go runs, and answers 413
+  for a login host body over 64 KiB. It also owns the SQLite table of used
+  privilege tokens, which Go reads and writes through the glue.
 - `js.go` and `wsconn.go` are the Go side of the glue. `wsconn.go` is a
   `net.Conn` over a Workers WebSocket and a response body stream.
 - `tunnel.go` is the reverse tunnel: TLS with `crypto/tls` and the SSH
@@ -25,12 +28,20 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
 - `web.go` and `pages.go` are the login host and the app host pages.
   `passkeys.go` is the passkeys page and its JSON routes, which call auth
   as the user to list, add and remove passkeys, and the routes for adding
-  a passkey from another device: `/webapi/passkeys/link` makes a link
-  with a privilege token, and `/web/add-passkey/<token>` with its `begin`
-  and `finish` routes uses it without a session, as the invite does. The
-  passkeys page draws the QR code of the link with an encoder in its own
-  script block, which `qr_test.go` runs under node and decodes.
-  `appproxy.go` forwards app requests through the tunnel.
+  a passkey from another device. `POST /webapi/passkeys/link` makes a
+  privilege token and returns `/web/add-passkey#<token>`, with the token
+  in the fragment so that it stays out of logs and the Referer. That page
+  needs no session. It takes the token out of the address bar and sends
+  it in the body of `POST /webapi/add-passkey/begin` (`{"token"}`) and
+  `POST /webapi/add-passkey/finish` (`{"token", "name", "credential"}`).
+  A token adds one passkey: after a finish that worked, the hub keeps the
+  token ID in Durable Object storage until the token has expired, and
+  both routes answer 403 `invalid token` for it, as they do for a token
+  auth does not know. The passkeys page draws the QR code of the link
+  with an encoder in its own script block, which `qr_test.go` runs under
+  node and decodes. The decoder is checked against codes from qrencode
+  under `testdata/qrencode`, and against fresh ones when qrencode is
+  installed. `appproxy.go` forwards app requests through the tunnel.
 - `devtools/` holds two test commands with their own module, for testing
   a hub that the real agent and auth do not use. See "Testing on the dev
   Worker".
@@ -38,7 +49,7 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
 ## Build and deploy
 
 ```
-./build.sh                          # build/hub.wasm, about 11.8 MB
+./build.sh                          # build/hub.wasm, about 11.85 MB
 npx wrangler@4 deploy               # the dev Worker, see below
 npx wrangler@4 deploy --env go      # go.example.com
 ```
@@ -91,11 +102,12 @@ Build them with `GOOS=linux GOARCH=amd64 go build ./agent ./callout` in
   entry, the tunnel, the auth pipe, gRPC and HTTP to auth, the browser
   pages and the app proxy. The passkey invite and login were not tried
   with a real passkey yet.
-- **Size.** `build/hub.wasm` is 11.84 MB after `wasm-opt -Oz` (3.29 MB
+- **Size.** `build/hub.wasm` is 11.85 MB after `wasm-opt -Oz` (3.29 MB
   gzip). Wrangler uploads 11.4 MiB (3.2 MiB gzip), with a startup time
   of 11 to 22 ms. The Rust hub is about 0.7 MB gzip. The passkey routes
-  and page added 62 KB (20 KB gzip), and the link, the token routes and
-  the QR encoder in the page another 36 KB (2 KB gzip).
+  and page added 62 KB (20 KB gzip), the link, the token routes and the
+  QR encoder in the page another 36 KB (2 KB gzip), and the single-use
+  record with the fragment link 6 KB.
 - **Memory.** The heartbeat logs linear memory, the Go heap after a GC,
   the memory Go has mapped (`sys`), goroutines and the js.Values Go
   holds. Linear memory starts at 38 MiB before any Go code runs, while
