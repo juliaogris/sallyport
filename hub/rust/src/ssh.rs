@@ -117,7 +117,7 @@ pub struct AgentHandler {
     /// Agent-opened transport channels waiting for their dial request. Each
     /// sender hands the auth pipe stream to the channel's task in
     /// [`transport`], and dropping it refuses the dial.
-    transports: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<DuplexStream>>>>,
+    transports: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<Dialed>>>>,
 }
 
 impl AgentHandler {
@@ -302,16 +302,7 @@ impl russh::server::Handler for AgentHandler {
                     }
                     pending.insert(id, tx);
                 }
-                let counts = (
-                    self.conn_passthroughs.clone(),
-                    self.shared.passthroughs.clone(),
-                );
-                wasm_bindgen_futures::spawn_local(transport(
-                    channel,
-                    rx,
-                    self.transports.clone(),
-                    counts,
-                ));
+                wasm_bindgen_futures::spawn_local(transport(channel, rx, self.transports.clone()));
             }
             other => {
                 console_log!("ssh: rejected channel type {other:?}");
@@ -368,12 +359,9 @@ impl russh::server::Handler for AgentHandler {
                         return Ok(false);
                     }
                 };
-                self.conn_passthroughs.fetch_add(1, Ordering::Relaxed);
-                self.shared.passthroughs.fetch_add(1, Ordering::Relaxed);
-                if tx.send(pipe).is_err() {
+                let slot = Passthrough::new(&self.conn_passthroughs, &self.shared.passthroughs);
+                if tx.send((pipe, slot)).is_err() {
                     // The task already gave up at the dial deadline.
-                    self.conn_passthroughs.fetch_sub(1, Ordering::Relaxed);
-                    self.shared.passthroughs.fetch_sub(1, Ordering::Relaxed);
                     return Ok(false);
                 }
                 console_log!("ssh: passthrough to auth over the callout");
@@ -407,47 +395,77 @@ impl russh::server::Handler for AgentHandler {
     }
 }
 
+/// An auth pipe stream for a transport channel, and its place in the
+/// passthrough counts.
+type Dialed = (DuplexStream, Passthrough);
+
+/// One passthrough's place in the connection's and the Durable Object's
+/// passthrough counts. Dropping it lowers both counts.
+struct Passthrough(Arc<AtomicUsize>, Arc<AtomicUsize>);
+
+impl Passthrough {
+    /// Raises both counts by one.
+    fn new(conn: &Arc<AtomicUsize>, total: &Arc<AtomicUsize>) -> Self {
+        conn.fetch_add(1, Ordering::Relaxed);
+        total.fetch_add(1, Ordering::Relaxed);
+        Self(conn.clone(), total.clone())
+    }
+}
+
+impl Drop for Passthrough {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.1.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// What ended one wait in [`transport`].
+enum Wake {
+    Dial(std::result::Result<Dialed, oneshot::Canceled>),
+    Deadline,
+    Msg(Option<ChannelMsg>),
+}
+
 /// Runs one agent-opened transport channel. It waits up to
 /// [`DIAL_DEADLINE`] for the handler to send an auth pipe stream on `dial`,
-/// and then copies bytes between the channel and the stream. `counts` are
-/// the connection's and the Durable Object's passthrough counts, which the
-/// handler raised before it sent the stream. The channel is closed when the
-/// dial is refused, when the deadline passes, or when the agent sends data
-/// before its dial, because nothing would read that data.
+/// and then copies bytes between the channel and the stream. The channel is
+/// closed when the dial is refused, when the deadline passes, or when the
+/// agent sends data before its dial, because nothing would read that data.
 async fn transport(
     mut ch: Channel<Msg>,
-    mut dial: oneshot::Receiver<DuplexStream>,
-    pending: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<DuplexStream>>>>,
-    counts: (Arc<AtomicUsize>, Arc<AtomicUsize>),
+    mut dial: oneshot::Receiver<Dialed>,
+    pending: Arc<Mutex<HashMap<ChannelId, oneshot::Sender<Dialed>>>>,
 ) {
     let id = ch.id();
     let mut deadline = pin!(crate::sockets::sleep(DIAL_DEADLINE));
-    let pipe = loop {
+    let dialed = loop {
         // `dial` comes first, so a stream the handler sent wins over data
         // that follows the dial request.
-        match select(&mut dial, select(deadline.as_mut(), pin!(ch.wait()))).await {
-            Either::Left((Ok(pipe), _)) => break Some(pipe),
-            Either::Left((Err(_), _)) => break None,
-            Either::Right((Either::Left(_), _)) => {
+        let wake = match select(&mut dial, select(deadline.as_mut(), pin!(ch.wait()))).await {
+            Either::Left((res, _)) => Wake::Dial(res),
+            Either::Right((Either::Left(_), _)) => Wake::Deadline,
+            Either::Right((Either::Right((msg, _)), _)) => Wake::Msg(msg),
+        };
+        match wake {
+            Wake::Dial(Ok(dialed)) => break Some(dialed),
+            Wake::Dial(Err(_)) => break None,
+            Wake::Deadline => {
                 console_log!("ssh: transport channel never dialed, closing");
                 break None;
             }
-            Either::Right((
-                Either::Right((Some(ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }), _)),
-                _,
-            )) => {
+            Wake::Msg(Some(ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. })) => {
                 console_log!("ssh: data on a transport channel before its dial, closing");
                 break None;
             }
-            Either::Right((Either::Right((Some(_), _)), _)) => {}
-            Either::Right((Either::Right((None, _)), _)) => {
+            Wake::Msg(Some(_)) => {}
+            Wake::Msg(None) => {
                 pending.lock().unwrap().remove(&id);
                 return;
             }
         }
     };
     pending.lock().unwrap().remove(&id);
-    let Some(mut pipe) = pipe else {
+    let Some((mut pipe, _slot)) = dialed else {
         let _ = ch.close().await;
         return;
     };
@@ -457,8 +475,6 @@ async fn transport(
         Ok((up, down)) => console_log!("ssh: passthrough closed, {up} up, {down} down"),
         Err(err) => console_log!("ssh: passthrough error: {err}"),
     }
-    counts.0.fetch_sub(1, Ordering::Relaxed);
-    counts.1.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Opens a transport channel into the agent, asks it to dial its local
