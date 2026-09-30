@@ -407,10 +407,7 @@ async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> Result<Response> {
         if status != 200 {
             return Err(format!("AuthenticateWebUser: http {status}: {}", String::from_utf8_lossy(&body)));
         }
-        let web: Value = serde_json::from_slice(&body).map_err(|e| format!("web session: {e}"))?;
-        let sid = web["metadata"]["name"].as_str().ok_or("no web session name")?.to_string();
-        let user = web["spec"]["user"].as_str().ok_or("no web session user")?.to_string();
-        Ok::<_, String>((user, sid))
+        parse_web_session(&body)
     }
     .await;
     session_response(res)
@@ -456,16 +453,7 @@ async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, S
 
 async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> Result<Response> {
     let res = async {
-        let cred: Value = serde_json::from_slice(&body).map_err(|e| format!("credential: {e}"))?;
-        let field = |v: &Value| -> std::result::Result<Vec<u8>, String> { URL_SAFE_NO_PAD.decode(v.as_str().unwrap_or_default()).map_err(|e| e.to_string()) };
-        let resp = CredentialCreationResponse {
-            r#type: cred["type"].as_str().unwrap_or("public-key").to_string(),
-            raw_id: field(&cred["rawId"])?,
-            response: Some(AttestationResponse {
-                client_data_json: field(&cred["response"]["clientDataJSON"])?,
-                attestation_object: field(&cred["response"]["attestationObject"])?,
-            }),
-        };
+        let resp = parse_credential(&body)?;
         let changed: ChangeUserAuthenticationResponse = cx
             .auth
             .call(
@@ -486,6 +474,71 @@ async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> Result<Respo
     }
     .await;
     session_response(res)
+}
+
+/// The parts of auth's `AuthenticateWebUser` JSON reply the hub reads.
+#[derive(Deserialize)]
+struct WebSessionJson {
+    metadata: WebSessionMetadata,
+    spec: WebSessionUser,
+}
+
+#[derive(Deserialize)]
+struct WebSessionMetadata {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct WebSessionUser {
+    user: String,
+}
+
+/// Returns the user and the web session ID from auth's
+/// `AuthenticateWebUser` reply.
+fn parse_web_session(body: &[u8]) -> std::result::Result<(String, String), String> {
+    let web: WebSessionJson = serde_json::from_slice(body).map_err(|e| format!("web session: {e}"))?;
+    if web.metadata.name.is_empty() || web.spec.user.is_empty() {
+        return Err("web session has no name or user".into());
+    }
+    Ok((web.spec.user, web.metadata.name))
+}
+
+/// The credential the invite page posts, from `navigator.credentials.create`.
+/// The byte fields are base64url without padding.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialJson {
+    #[serde(default = "public_key")]
+    r#type: String,
+    raw_id: String,
+    response: AttestationJson,
+}
+
+#[derive(Deserialize)]
+struct AttestationJson {
+    #[serde(rename = "clientDataJSON")]
+    client_data_json: String,
+    #[serde(rename = "attestationObject")]
+    attestation_object: String,
+}
+
+fn public_key() -> String {
+    "public-key".into()
+}
+
+/// Returns the credential the invite page posted in `body`, decoded for
+/// `ChangeUserAuthentication`.
+fn parse_credential(body: &[u8]) -> std::result::Result<CredentialCreationResponse, String> {
+    let cred: CredentialJson = serde_json::from_slice(body).map_err(|e| format!("credential: {e}"))?;
+    let field = |name: &str, v: &str| URL_SAFE_NO_PAD.decode(v).map_err(|e| format!("credential {name}: {e}"));
+    Ok(CredentialCreationResponse {
+        r#type: cred.r#type,
+        raw_id: field("rawId", &cred.raw_id)?,
+        response: Some(AttestationResponse {
+            client_data_json: field("clientDataJSON", &cred.response.client_data_json)?,
+            attestation_object: field("attestationObject", &cred.response.attestation_object)?,
+        }),
+    })
 }
 
 /// Sets the session cookie for a new web session, or reports the failure.
@@ -739,6 +792,31 @@ mod tests {
     fn html_escape_cases() {
         assert_eq!(html_escape("alice"), "alice");
         assert_eq!(html_escape(r#"<a href="x">'&'</a>"#), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
+    }
+
+    #[test]
+    fn parse_web_session_cases() {
+        assert_eq!(parse_web_session(br#"{"kind":"web_session","metadata":{"name":"s1"},"spec":{"user":"alice","pub":"x"}}"#), Ok(("alice".into(), "s1".into())));
+        for body in [&b"null"[..], b"{}", br#"{"metadata":{"name":"s1"}}"#, br#"{"metadata":{"name":""},"spec":{"user":"alice"}}"#, br#"{"metadata":{"name":1},"spec":{"user":"alice"}}"#] {
+            assert!(parse_web_session(body).is_err(), "{:?}", String::from_utf8_lossy(body));
+        }
+    }
+
+    #[test]
+    fn parse_credential_cases() {
+        let got = parse_credential(br#"{"rawId":"AQI","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#).unwrap();
+        assert_eq!(got.r#type, "public-key");
+        assert_eq!(got.raw_id, vec![1, 2]);
+        let att = got.response.unwrap();
+        assert_eq!((att.client_data_json, att.attestation_object), (vec![3], vec![4, 5]));
+        for body in [
+            &b"[]"[..],
+            br#"{"response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+            br#"{"rawId":"AQI","response":{"attestationObject":"BAU"}}"#,
+            br#"{"rawId":"AQ==","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+        ] {
+            assert!(parse_credential(body).is_err(), "{:?}", String::from_utf8_lossy(body));
+        }
     }
 
     #[test]
