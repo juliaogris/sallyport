@@ -494,11 +494,9 @@ async fn probe_dial(handle: Handle, server_id: String) {
         });
         // Closes the channel when the dial ends, and also when the deadline
         // drops this future before the agent answers.
-        let guard = crate::app::CloseOnDrop(Some(ch));
+        let guard = crate::app::CloseOnDrop::new(ch);
         let res = guard
-            .0
-            .as_ref()
-            .expect("the guard holds the channel")
+            .channel()
             .request_custom(REQ_DIAL, true, req.to_string().into_bytes())
             .await;
         drop(guard);

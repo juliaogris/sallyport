@@ -88,16 +88,14 @@ async fn dial_inner(
         .await
         .map_err(|e| format!("transport open: {e}"))?;
     // Closes the channel on a refusal, an error, or the deadline.
-    let mut guard = CloseOnDrop(Some(ch));
+    let guard = CloseOnDrop::new(ch);
     let dial = json!({
         "address": "@local-node",
         "server_id": tunnel.server_id,
         "conn_type": "app",
     });
     let accepted = guard
-        .0
-        .as_ref()
-        .expect("the guard holds the channel")
+        .channel()
         .request_custom(REQ_DIAL, true, dial.to_string().into_bytes())
         .await
         .map_err(|e| format!("dial request: {e}"))?;
@@ -108,11 +106,7 @@ async fn dial_inner(
     let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
     let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
     // The stream closes the channel when it is dropped.
-    let stream = guard
-        .0
-        .take()
-        .expect("the guard holds the channel")
-        .into_stream();
+    let stream = guard.into_inner().into_stream();
     tokio_rustls::TlsConnector::from(tls)
         .connect(name, stream)
         .await
@@ -122,7 +116,24 @@ async fn dial_inner(
 type TlsStream = tokio_rustls::client::TlsStream<russh::ChannelStream<Msg>>;
 
 /// Closes the channel it holds when it is dropped.
-pub(crate) struct CloseOnDrop(pub(crate) Option<Channel<Msg>>);
+pub(crate) struct CloseOnDrop(Option<Channel<Msg>>);
+
+impl CloseOnDrop {
+    pub(crate) fn new(ch: Channel<Msg>) -> Self {
+        Self(Some(ch))
+    }
+
+    /// Returns the channel.
+    pub(crate) fn channel(&self) -> &Channel<Msg> {
+        // Only `into_inner` takes the channel out, and it consumes the guard.
+        self.0.as_ref().expect("the guard holds the channel")
+    }
+
+    /// Returns the channel, which then stays open.
+    pub(crate) fn into_inner(mut self) -> Channel<Msg> {
+        self.0.take().expect("the guard holds the channel")
+    }
+}
 
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
