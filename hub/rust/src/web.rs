@@ -60,9 +60,11 @@ const BEGIN_CLIENTS: usize = 4096;
 
 thread_local! {
     static BEGIN_LIMIT: RefCell<BeginLimit> = RefCell::new(BeginLimit::default());
+    static FINISH_LIMIT: RefCell<BeginLimit> = RefCell::new(BeginLimit::default());
 }
 
-/// A token bucket per client address for `login/begin` and `invite/begin`.
+/// A token bucket per client address for the `begin` and `finish` calls of
+/// login and invite.
 #[derive(Default)]
 struct BeginLimit {
     /// The tokens left and the time they were counted, in ms, per address.
@@ -96,6 +98,15 @@ impl BeginLimit {
 fn begin_allowed(req: &Request) -> Result<bool> {
     let client = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
     Ok(BEGIN_LIMIT.with(|l| l.borrow_mut().allow(&client, Date::now().as_millis())))
+}
+
+/// Returns false when the client address of `req` has made too many
+/// `finish` calls. A login finish takes an auth pipe stream, so without a
+/// limit one client could empty the pool. It has its own bucket, so that a
+/// login's begin and finish each spend one token.
+fn finish_allowed(req: &Request) -> Result<bool> {
+    let client = req.headers().get("CF-Connecting-IP")?.unwrap_or_default();
+    Ok(FINISH_LIMIT.with(|l| l.borrow_mut().allow(&client, Date::now().as_millis())))
 }
 
 /// What the hub needs to answer a browser request.
@@ -175,6 +186,9 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
             json_or_error(login_begin(cx).await)
         }
         (Method::Post, "/webapi/login/finish") => {
+            if !finish_allowed(&req)? {
+                return Response::error("too many requests, try again in a minute", 429);
+            }
             let Some(body) = read_body(&mut req).await? else {
                 return Response::error("request too large", 413);
             };
@@ -203,6 +217,9 @@ async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response>
             json_or_error(invite_begin(cx, token).await)
         }
         "finish" => {
+            if !finish_allowed(req)? {
+                return Response::error("too many requests, try again in a minute", 429);
+            }
             let Some(body) = read_body(req).await? else {
                 return Response::error("request too large", 413);
             };
@@ -507,7 +524,13 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
 /// Logs in with the passkey assertion in `assertion`, and returns the user
 /// and the new web session ID.
 async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> std::result::Result<(String, String), String> {
+    // Each call takes a pool stream, so a body that is not an assertion
+    // is refused before one is taken.
     let assertion: Value = serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
+    let a: Assertion = serde_json::from_value(assertion.clone()).map_err(|e| format!("assertion: {e}"))?;
+    if a.id.is_empty() || a.r#type != "public-key" {
+        return Err("assertion: not a public-key credential".into());
+    }
     let tls = authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
     let body = json!({ "username": "", "webauthn": assertion }).to_string().into_bytes();
     let stream = cx.pool.take_wait().await?;
@@ -577,6 +600,14 @@ async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> std::result:
     let sid = ws.metadata.map(|m| m.name).ok_or("no web session name")?;
     let user = ws.spec.map(|s| s.user).ok_or("no web session user")?;
     Ok((user, sid))
+}
+
+/// The fields every WebAuthn assertion has. The hub sends the assertion on
+/// as it came, so this only checks that they are there.
+#[derive(Deserialize)]
+struct Assertion {
+    id: String,
+    r#type: String,
 }
 
 /// The parts of auth's `AuthenticateWebUser` JSON reply the hub reads.
