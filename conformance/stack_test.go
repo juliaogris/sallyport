@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // stack is a hub of its own with a fake auth behind its callout and an App
@@ -26,8 +27,8 @@ type stack struct {
 }
 
 // newStack starts a hub, keeps 4 callout streams open to it, and connects
-// an App agent that serves testApp.
-func newStack(t *testing.T) *stack {
+// an App agent that serves testApp, dialed with opts.
+func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	t.Helper()
 	h := freshHub(t)
 	auth, err := NewFakeAuth(pki)
@@ -37,7 +38,7 @@ func newStack(t *testing.T) *stack {
 
 	id, err := pki.AgentIdentity("App")
 	require.NoError(t, err)
-	a, err := h.DialAgent(t.Context(), pki, id)
+	a, err := h.DialAgent(t.Context(), pki, id, opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { a.Close() })
 	require.NoError(t, a.ServeApp(pki, testApp()))
