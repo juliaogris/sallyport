@@ -95,7 +95,7 @@ async fn forward_inner(
         }
     });
 
-    let request = build_request(req, host).await?;
+    let request = build_request(req, host)?;
     let response = send
         .send_request(request)
         .await
@@ -106,7 +106,7 @@ async fn forward_inner(
 /// Builds the request the hub sends upstream: `req`'s method and path, its
 /// headers with the hop-by-hop, `Host` and `cf-*` ones dropped, `Host` set
 /// to `host`, and the hub's own session cookies removed from `Cookie`.
-async fn build_request(
+fn build_request(
     req: &mut Request,
     host: &str,
 ) -> std::result::Result<http::Request<RequestBody>, String> {
