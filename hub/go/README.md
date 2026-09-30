@@ -12,9 +12,7 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   `/webapi/find` and `/webapi/ping`, rejects a non-upgrade request to the
   upgrade paths, and forwards everything else to the Durable Object. Only
   the Durable Object starts the Go program, so a stateless Worker isolate
-  never pays the Go runtime's startup CPU and 38 MiB of memory. The
-  Durable Object reads each request body before Go runs, and answers 413
-  for a login host body over 64 KiB.
+  never pays the Go runtime's startup CPU and 38 MiB of memory.
 - `js.go` and `wsconn.go` are the Go side of the glue. `wsconn.go` is a
   `net.Conn` over a Workers WebSocket and a response body stream.
 - `tunnel.go` is the reverse tunnel: TLS with `crypto/tls` and the SSH
@@ -88,10 +86,10 @@ Build them with `GOOS=linux GOARCH=amd64 go build ./agent ./callout` in
   entry, the tunnel, the auth pipe, gRPC and HTTP to auth, the browser
   pages and the app proxy. The passkey invite and login were not tried
   with a real passkey yet.
-- **Size.** `build/hub.wasm` is 11.81 MB after `wasm-opt -Oz` (3.28 MB
-  gzip), of which the passkey routes and page are about 80 KB (20 KB
+- **Size.** `build/hub.wasm` is 11.7 MB after `wasm-opt -Oz` (3.26 MB
   gzip). Wrangler uploads 11.4 MiB (3.2 MiB gzip), with a startup time
-  of 11 to 22 ms. The Rust hub is about 0.7 MB gzip.
+  of 11 to 22 ms. The Rust hub is about 0.7 MB gzip. The passkey routes
+  and page added 62 KB (20 KB gzip), to 11.79 MB (3.28 MB gzip).
 - **Memory.** The heartbeat logs linear memory, the Go heap after a GC,
   the memory Go has mapped (`sys`), goroutines and the js.Values Go
   holds. Linear memory starts at 38 MiB before any Go code runs, while
