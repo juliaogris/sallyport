@@ -1072,6 +1072,194 @@ mod tests {
     use super::*;
 
     #[test]
+    fn valid_name_cases() {
+        assert!(valid_name("a"));
+        assert!(valid_name("octo2"));
+        assert!(!valid_name(""));
+        assert!(!valid_name("2octo"));
+        assert!(!valid_name("oc-to"));
+        assert!(!valid_name("Octo"));
+        assert!(!valid_name(&"a".repeat(31)));
+    }
+
+    #[test]
+    fn classify_host_cases() {
+        let kind = |host: &str| match classify_host("julia", "example.com", host) {
+            Some(Host::Login) => "login".to_string(),
+            Some(Host::App(app)) => format!("app {app}"),
+            None => "none".to_string(),
+        };
+        let long = format!("{}-julia.example.com", "a".repeat(31));
+        let max = format!("{}-julia.example.com", "a".repeat(30));
+        for (host, want) in [
+            ("julia.example.com", "login"),
+            ("bench-julia.example.com", "app bench"),
+            ("octo2-julia.example.com", "app octo2"),
+            (max.as_str(), "app aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("example.com", "none"),
+            ("evil.julia.example.com", "none"),
+            ("julia.example.com.evil", "none"),
+            ("bench-julia.example.com.evil", "none"),
+            ("foo-bar-julia.example.com", "none"),
+            ("Bench-julia.example.com", "none"),
+            ("2bench-julia.example.com", "none"),
+            ("-julia.example.com", "none"),
+            ("bench-bob.example.com", "none"),
+            (long.as_str(), "none"),
+        ] {
+            assert_eq!(kind(host), want, "{host}");
+        }
+    }
+
+    #[test]
+    fn cookie_value_cases() {
+        let header = "a=1; __Host-sp_app2=x;__Host-sp_app=s1=; b";
+        assert_eq!(cookie_value(header, "a"), Some("1"));
+        assert_eq!(cookie_value(header, "__Host-sp_app"), Some("s1="));
+        assert_eq!(cookie_value(header, "__Host-sp_app2"), Some("x"));
+        assert_eq!(cookie_value(header, "b"), None);
+        assert_eq!(cookie_value(header, "__host-sp_app"), None);
+        assert_eq!(cookie_value("", "a"), None);
+    }
+
+    #[test]
+    fn origin_is_cases() {
+        assert!(origin_is(
+            Some("https://julia.example.com"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(None, "julia.example.com"));
+        assert!(!origin_is(
+            Some("http://julia.example.com"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(
+            Some("https://bench-julia.example.com"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(
+            Some("https://julia.example.com:443"),
+            "julia.example.com"
+        ));
+        assert!(!origin_is(Some("null"), "julia.example.com"));
+    }
+
+    #[test]
+    fn fetch_is_same_origin_cases() {
+        let host = "bench-julia.example.com";
+        let same = Some("https://bench-julia.example.com");
+        let sibling = Some("https://octo-julia.example.com");
+        for (site, origin, want) in [
+            (Some("same-origin"), None, true),
+            (Some("none"), None, true),
+            (Some("same-site"), same, false),
+            (Some("cross-site"), same, false),
+            (Some("same-origin"), sibling, true),
+            (None, same, true),
+            (None, sibling, false),
+            (None, None, true),
+        ] {
+            assert_eq!(
+                fetch_is_same_origin(site, origin, host),
+                want,
+                "{site:?} {origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ct_eq_cases() {
+        assert!(ct_eq(b"token", b"token"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"token", b"tokens"));
+        assert!(!ct_eq(b"token", b"tokem"));
+    }
+
+    #[test]
+    fn html_escape_cases() {
+        assert_eq!(html_escape("alice"), "alice");
+        assert_eq!(
+            html_escape(r#"<a href="x">'&'</a>"#),
+            "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;"
+        );
+    }
+
+    #[test]
+    fn parse_web_session_cases() {
+        assert_eq!(parse_web_session(br#"{"kind":"web_session","metadata":{"name":"s1"},"spec":{"user":"alice","pub":"x"}}"#), Ok(("alice".into(), "s1".into())));
+        for body in [
+            &b"null"[..],
+            b"{}",
+            br#"{"metadata":{"name":"s1"}}"#,
+            br#"{"metadata":{"name":""},"spec":{"user":"alice"}}"#,
+            br#"{"metadata":{"name":1},"spec":{"user":"alice"}}"#,
+        ] {
+            assert!(
+                parse_web_session(body).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_credential_cases() {
+        let got = parse_credential(
+            br#"{"rawId":"AQI","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+        )
+        .unwrap();
+        assert_eq!(got.r#type, "public-key");
+        assert_eq!(got.raw_id, vec![1, 2]);
+        let att = got.response.unwrap();
+        assert_eq!(
+            (att.client_data_json, att.attestation_object),
+            (vec![3], vec![4, 5])
+        );
+        for body in [
+            &b"[]"[..],
+            br#"{"response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+            br#"{"rawId":"AQI","response":{"attestationObject":"BAU"}}"#,
+            br#"{"rawId":"AQ==","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
+        ] {
+            assert!(
+                parse_credential(body).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_handoff_cases() {
+        let h = parse_handoff(br#"{"sid":"s","subject":"t"}"#).unwrap();
+        assert_eq!((h.sid.as_str(), h.subject.as_str()), ("s", "t"));
+        for body in [
+            &b""[..],
+            b"not json",
+            br#"{"sid":"s"}"#,
+            br#"{"sid":"","subject":"t"}"#,
+            br#"{"sid":"s","subject":""}"#,
+            br#"{"sid":1,"subject":"t"}"#,
+        ] {
+            assert!(
+                parse_handoff(body).is_none(),
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_apps_cases() {
+        let got = parse_apps(" a , b:/x,c:x,d://x,E,f:/\t/x,g:/y:z ");
+        let want: Vec<(String, String)> = [("a", "/"), ("b", "/x"), ("g", "/y:z")]
+            .iter()
+            .map(|(n, p)| (n.to_string(), p.to_string()))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn start_path_ok_cases() {
         for (path, want) in [
             ("/", true),
@@ -1095,26 +1283,6 @@ mod tests {
             ("/\u{e9}", false),
         ] {
             assert_eq!(start_path_ok(path), want, "{path:?}");
-        }
-    }
-
-    #[test]
-    fn parse_handoff_cases() {
-        let h = parse_handoff(br#"{"sid":"s","subject":"t"}"#).unwrap();
-        assert_eq!((h.sid.as_str(), h.subject.as_str()), ("s", "t"));
-        for body in [
-            &b""[..],
-            b"not json",
-            br#"{"sid":"s"}"#,
-            br#"{"sid":"","subject":"t"}"#,
-            br#"{"sid":"s","subject":""}"#,
-            br#"{"sid":1,"subject":"t"}"#,
-        ] {
-            assert!(
-                parse_handoff(body).is_none(),
-                "{:?}",
-                String::from_utf8_lossy(body)
-            );
         }
     }
 
@@ -1175,164 +1343,6 @@ mod tests {
     }
 
     #[test]
-    fn html_escape_cases() {
-        assert_eq!(html_escape("alice"), "alice");
-        assert_eq!(
-            html_escape(r#"<a href="x">'&'</a>"#),
-            "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;"
-        );
-    }
-
-    #[test]
-    fn parse_web_session_cases() {
-        assert_eq!(parse_web_session(br#"{"kind":"web_session","metadata":{"name":"s1"},"spec":{"user":"alice","pub":"x"}}"#), Ok(("alice".into(), "s1".into())));
-        for body in [
-            &b"null"[..],
-            b"{}",
-            br#"{"metadata":{"name":"s1"}}"#,
-            br#"{"metadata":{"name":""},"spec":{"user":"alice"}}"#,
-            br#"{"metadata":{"name":1},"spec":{"user":"alice"}}"#,
-        ] {
-            assert!(
-                parse_web_session(body).is_err(),
-                "{:?}",
-                String::from_utf8_lossy(body)
-            );
-        }
-    }
-
-    #[test]
-    fn parse_credential_cases() {
-        let got = parse_credential(
-            br#"{"rawId":"AQI","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
-        )
-        .unwrap();
-        assert_eq!(got.r#type, "public-key");
-        assert_eq!(got.raw_id, vec![1, 2]);
-        let att = got.response.unwrap();
-        assert_eq!(
-            (att.client_data_json, att.attestation_object),
-            (vec![3], vec![4, 5])
-        );
-        for body in [
-            &b"[]"[..],
-            br#"{"response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
-            br#"{"rawId":"AQI","response":{"attestationObject":"BAU"}}"#,
-            br#"{"rawId":"AQ==","response":{"clientDataJSON":"Aw","attestationObject":"BAU"}}"#,
-        ] {
-            assert!(
-                parse_credential(body).is_err(),
-                "{:?}",
-                String::from_utf8_lossy(body)
-            );
-        }
-    }
-
-    #[test]
-    fn classify_host_cases() {
-        let kind = |host: &str| match classify_host("julia", "example.com", host) {
-            Some(Host::Login) => "login".to_string(),
-            Some(Host::App(app)) => format!("app {app}"),
-            None => "none".to_string(),
-        };
-        let long = format!("{}-julia.example.com", "a".repeat(31));
-        let max = format!("{}-julia.example.com", "a".repeat(30));
-        for (host, want) in [
-            ("julia.example.com", "login"),
-            ("bench-julia.example.com", "app bench"),
-            ("octo2-julia.example.com", "app octo2"),
-            (max.as_str(), "app aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            ("example.com", "none"),
-            ("evil.julia.example.com", "none"),
-            ("julia.example.com.evil", "none"),
-            ("bench-julia.example.com.evil", "none"),
-            ("foo-bar-julia.example.com", "none"),
-            ("Bench-julia.example.com", "none"),
-            ("2bench-julia.example.com", "none"),
-            ("-julia.example.com", "none"),
-            ("bench-bob.example.com", "none"),
-            (long.as_str(), "none"),
-        ] {
-            assert_eq!(kind(host), want, "{host}");
-        }
-    }
-
-    #[test]
-    fn origin_is_cases() {
-        assert!(origin_is(
-            Some("https://julia.example.com"),
-            "julia.example.com"
-        ));
-        assert!(!origin_is(None, "julia.example.com"));
-        assert!(!origin_is(
-            Some("http://julia.example.com"),
-            "julia.example.com"
-        ));
-        assert!(!origin_is(
-            Some("https://bench-julia.example.com"),
-            "julia.example.com"
-        ));
-        assert!(!origin_is(
-            Some("https://julia.example.com:443"),
-            "julia.example.com"
-        ));
-        assert!(!origin_is(Some("null"), "julia.example.com"));
-    }
-
-    #[test]
-    fn fetch_is_same_origin_cases() {
-        let host = "bench-julia.example.com";
-        let same = Some("https://bench-julia.example.com");
-        let sibling = Some("https://octo-julia.example.com");
-        for (site, origin, want) in [
-            (Some("same-origin"), None, true),
-            (Some("none"), None, true),
-            (Some("same-site"), same, false),
-            (Some("cross-site"), same, false),
-            (Some("same-origin"), sibling, true),
-            (None, same, true),
-            (None, sibling, false),
-            (None, None, true),
-        ] {
-            assert_eq!(
-                fetch_is_same_origin(site, origin, host),
-                want,
-                "{site:?} {origin:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn cookie_value_cases() {
-        let header = "a=1; __Host-sp_app2=x;__Host-sp_app=s1=; b";
-        assert_eq!(cookie_value(header, "__Host-sp_app"), Some("s1="));
-        assert_eq!(cookie_value(header, "__Host-sp_app2"), Some("x"));
-        assert_eq!(cookie_value(header, "a"), Some("1"));
-        assert_eq!(cookie_value(header, "b"), None);
-        assert_eq!(cookie_value(header, "__host-sp_app"), None);
-        assert_eq!(cookie_value("", "a"), None);
-    }
-
-    #[test]
-    fn ct_eq_cases() {
-        assert!(ct_eq(b"token", b"token"));
-        assert!(ct_eq(b"", b""));
-        assert!(!ct_eq(b"token", b"tokens"));
-        assert!(!ct_eq(b"token", b"tokem"));
-    }
-
-    #[test]
-    fn valid_name_cases() {
-        assert!(valid_name("a"));
-        assert!(valid_name("octo2"));
-        assert!(!valid_name(""));
-        assert!(!valid_name("2octo"));
-        assert!(!valid_name("oc-to"));
-        assert!(!valid_name("Octo"));
-        assert!(!valid_name(&"a".repeat(31)));
-    }
-
-    #[test]
     fn rate_limit_refills() {
         let mut l = RateLimit::default();
         for _ in 0..10 {
@@ -1359,15 +1369,5 @@ mod tests {
         assert!(l.allow("0", 0));
         assert!(l.allow("new", 6_000));
         assert_eq!(l.buckets.len(), 2);
-    }
-
-    #[test]
-    fn parse_apps_cases() {
-        let got = parse_apps(" a , b:/x,c:x,d://x,E,f:/\t/x,g:/y:z ");
-        let want: Vec<(String, String)> = [("a", "/"), ("b", "/x"), ("g", "/y:z")]
-            .iter()
-            .map(|(n, p)| (n.to_string(), p.to_string()))
-            .collect();
-        assert_eq!(got, want);
     }
 }
