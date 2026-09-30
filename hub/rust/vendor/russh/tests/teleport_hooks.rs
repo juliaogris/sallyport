@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use rand_core::OsRng;
 use russh::server::{self, Auth, Msg, Session};
@@ -157,6 +158,7 @@ where
         .arg(addr.to_string())
         .args(args)
         .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
@@ -175,7 +177,12 @@ where
         }
     });
 
-    let out = child.wait_with_output().await.unwrap();
+    // A regression that stalls the session would otherwise hang the test
+    // run instead of failing it.
+    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("goclient {args:?} did not exit within 60 s"))
+        .unwrap();
     assert!(out.status.success(), "goclient {args:?} failed");
     server_side.await.unwrap();
     // The session ends with an error when the client drops the connection.
