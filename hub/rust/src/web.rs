@@ -1,6 +1,6 @@
 //! The browser side of the hub: invite, login, launcher and app hosts.
 //!
-//! Hosts are flat, one level below `DOMAIN` (see Hostnames in the plan):
+//! Hosts are flat, one level below `DOMAIN`:
 //!
 //! - `<owner>.<domain>` is the login host. It serves the invite page, the
 //!   passkey login and a dashboard with one launch button per app. Its
@@ -19,9 +19,9 @@ use std::sync::Arc;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use futures::StreamExt;
-use serde::Deserialize;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 use x509_cert::der::asn1::ObjectIdentifier;
@@ -30,7 +30,12 @@ use x509_cert::name::Name;
 
 use crate::app::TunnelSlot;
 use crate::authpipe::Pool;
-use crate::authrpc::{self, *};
+use crate::authrpc::{
+    self, unary, AppSessionResponse, AttestationResponse, ChallengeExtensions, ChangeUserAuthenticationRequest, ChangeUserAuthenticationResponse, CreateAppSessionRequest,
+    CreateAuthenticateChallengeRequest, CreateRegisterChallengeRequest, CredentialCreationResponse, GetAppSessionRequest, GetWebSessionRequest, HubAuth, MfaAuthenticateChallenge,
+    MfaRegisterChallenge, MfaRegisterResponse, Passwordless, WebSessionSpecV2, AUTHENTICATE_WEB_USER_PASSWORDLESS, CHANGE_USER_AUTHENTICATION, CREATE_APP_SESSION,
+    CREATE_AUTHENTICATE_CHALLENGE, CREATE_REGISTER_CHALLENGE, DEVICE_TYPE_WEBAUTHN, DEVICE_USAGE_PASSWORDLESS, GET_APP_SESSION, GET_WEB_SESSION, SCOPE_PASSWORDLESS_LOGIN,
+};
 
 const SESSION_COOKIE: &str = "__Host-sp_session";
 const APP_COOKIE: &str = "__Host-sp_app";
@@ -63,7 +68,7 @@ pub enum Host {
 /// Returns the host kind for `host`, or None if the hub does not serve it.
 /// App names match `^[a-z][a-z0-9]*$`, so `<app>-<owner>` splits once.
 pub fn classify(env: &Env, host: &str) -> Option<Host> {
-    let (owner, domain) = owner_domain(env)?;
+    let (owner, domain) = owner_domain(env).ok()?;
     classify_host(&owner, &domain, host)
 }
 
@@ -78,8 +83,11 @@ fn classify_host(owner: &str, domain: &str, host: &str) -> Option<Host> {
     valid_name(app).then(|| Host::App(app.to_string()))
 }
 
-fn owner_domain(env: &Env) -> Option<(String, String)> {
-    Some((env.var("OWNER").ok()?.to_string(), env.var("DOMAIN").ok()?.to_string()))
+fn owner_domain(env: &Env) -> Result<(String, String)> {
+    match (env.var("OWNER"), env.var("DOMAIN")) {
+        (Ok(owner), Ok(domain)) => Ok((owner.to_string(), domain.to_string())),
+        _ => Err(Error::RustError("OWNER and DOMAIN must be set".into())),
+    }
 }
 
 /// Returns true when `name` matches `^[a-z][a-z0-9]*$` and is at most 30
@@ -90,7 +98,7 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 fn login_host(env: &Env) -> Result<String> {
-    let (owner, domain) = owner_domain(env).ok_or_else(|| Error::RustError("OWNER and DOMAIN must be set".into()))?;
+    let (owner, domain) = owner_domain(env)?;
     Ok(format!("{owner}.{domain}"))
 }
 
@@ -101,42 +109,56 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
     if req.method() == Method::Post && !same_origin(&req, &host)? {
         return Response::error("bad origin", 403);
     }
-    let res = match (req.method(), path.as_str()) {
-        (Method::Get, "/") => return dashboard(&req, cx).await,
-        (Method::Get, "/web/login") => return Response::from_html(LOGIN_PAGE),
-        (Method::Post, "/webapi/login/begin") => login_begin(cx).await,
+    if req.method() == Method::Post {
+        if let Some(rest) = path.strip_prefix("/webapi/invite/") {
+            return invite(&mut req, cx, rest).await;
+        }
+        if let Some(app) = path.strip_prefix("/web/launch/") {
+            return launch(&req, cx, app).await;
+        }
+    }
+    match (req.method(), path.as_str()) {
+        (Method::Get, "/") => dashboard(&req, cx).await,
+        (Method::Get, "/web/login") => Response::from_html(LOGIN_PAGE),
+        (Method::Get, p) if p.starts_with("/web/invite/") => Response::from_html(INVITE_PAGE),
+        (Method::Post, "/webapi/login/begin") => json_or_error(login_begin(cx).await),
         (Method::Post, "/webapi/login/finish") => {
             let Some(body) = read_body(&mut req).await? else {
                 return Response::error("request too large", 413);
             };
-            return login_finish(cx, body).await;
+            session_response(login_finish(cx, body).await)
         }
         (Method::Post, "/web/logout") => {
             let mut res = redirect("/web/login")?;
             res.headers_mut().append("Set-Cookie", &expire_cookie(SESSION_COOKIE))?;
-            return Ok(res);
+            Ok(res)
         }
-        (Method::Get, p) if p.starts_with("/web/invite/") => return Response::from_html(INVITE_PAGE),
-        (Method::Post, p) if p.starts_with("/webapi/invite/") => {
-            let rest = &p["/webapi/invite/".len()..];
-            let Some((token, step)) = rest.split_once('/') else {
-                return Response::error("not found", 404);
-            };
-            let token = token.to_string();
-            match step {
-                "begin" => invite_begin(cx, &token).await,
-                "finish" => {
-                    let Some(body) = read_body(&mut req).await? else {
-                        return Response::error("request too large", 413);
-                    };
-                    return invite_finish(cx, &token, body).await;
-                }
-                _ => return Response::error("not found", 404),
-            }
-        }
-        (Method::Post, p) if p.starts_with("/web/launch/") => return launch(&req, cx, &p["/web/launch/".len()..]).await,
-        _ => return Response::error("not found", 404),
+        _ => Response::error("not found", 404),
+    }
+}
+
+/// Answers `POST /webapi/invite/<token>/begin` and `.../finish`. `rest` is
+/// the path after `/webapi/invite/`.
+async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response> {
+    let Some((token, step)) = rest.split_once('/') else {
+        return Response::error("not found", 404);
     };
+    match step {
+        "begin" => json_or_error(invite_begin(cx, token).await),
+        "finish" => {
+            let Some(body) = read_body(req).await? else {
+                return Response::error("request too large", 413);
+            };
+            session_response(invite_finish(cx, token, body).await)
+        }
+        _ => Response::error("not found", 404),
+    }
+}
+
+/// Answers with `res` as JSON, or maps its error to 429 when auth rate
+/// limited the call and to 502 otherwise. A finish route answers through
+/// [`session_response`] instead, which maps every error to 401.
+fn json_or_error(res: std::result::Result<Value, String>) -> Result<Response> {
     match res {
         Ok(v) => Response::from_json(&v),
         Err(err) if err.contains(RATE_LIMITED) => {
@@ -173,22 +195,22 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
             _ => Response::error("method not allowed", 405),
         };
     }
-    if path == "/teleport-logout" {
-        let mut res = redirect(&format!("https://{}/", login_host(cx.env)?))?;
-        res.headers_mut().append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
-        res.headers_mut().append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
-        return Ok(res);
-    }
-    if path.starts_with("/x-teleport-dbsc") {
-        return Response::error("not found", 404);
-    }
-
     let to_login = || -> Result<Response> {
         let mut res = redirect(&format!("https://{}/", login_host(cx.env)?))?;
         res.headers_mut().append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
         res.headers_mut().append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
         Ok(res)
     };
+    if path == "/teleport-logout" {
+        return to_login();
+    }
+    // Teleport's proxy registers device-bound session credentials on this
+    // path (lib/web/app/dbsc.go). The hub does not, and the app service must
+    // never see the request.
+    if path.starts_with("/x-teleport-dbsc") {
+        return Response::error("not found", 404);
+    }
+
     // Every `<app>-<owner>.<domain>` is the same site, so SameSite=Lax still
     // sends the app cookies on a POST from a sibling app host. Only this
     // host may send a request that can change state.
@@ -273,9 +295,9 @@ fn name_public_addr(name: &Name) -> Option<String> {
     matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String).then(|| String::from_utf8(atv.value.value().to_vec()).ok())?
 }
 
-/// Returns the logged-in user and web session ID, if the session cookie
-/// names a web session that auth has and that has not expired.
-async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, String, WebSessionSpecV2)>> {
+/// Returns the logged-in user and the web session, if the session cookie
+/// is for a web session that auth has and that has not expired.
+async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, WebSessionSpecV2)>> {
     let Some(value) = cookie(req, SESSION_COOKIE)? else {
         return Ok(None);
     };
@@ -287,7 +309,7 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, Stri
         .call(cx.env, cx.pool, GET_WEB_SESSION, &GetWebSessionRequest { user: user.to_string(), session_id: sid.to_string() })
         .await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
-        Ok(Some(spec)) if spec.unexpired() => Ok(Some((user.to_string(), sid.to_string(), spec))),
+        Ok(Some(spec)) if spec.unexpired() => Ok(Some((user.to_string(), spec))),
         Ok(_) => Ok(None),
         Err(err) => {
             console_log!("web: GetWebSession: {err}");
@@ -297,7 +319,7 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, Stri
 }
 
 async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
-    let Some((user, _, _)) = web_session(req, cx).await? else {
+    let Some((user, _)) = web_session(req, cx).await? else {
         return redirect("/web/login");
     };
     let buttons: String = app_list(cx.env)?
@@ -306,7 +328,7 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
         .collect();
     let user = html_escape(&user);
     Response::from_html(format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">{STYLE}<title>sallyport</title>
+        r#"{HEAD}<title>sallyport</title>
 <p>Logged in as {user}.</p>{buttons}<form method="post" action="/web/logout"><button>Log out</button></form>"#
     ))
 }
@@ -340,36 +362,18 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
     let Some(start) = app_list(cx.env)?.into_iter().find(|(a, _)| a == app).map(|(_, p)| p) else {
         return Response::error("not found", 404);
     };
-    let Some((user, _, spec)) = web_session(req, cx).await? else {
+    let Some((user, spec)) = web_session(req, cx).await? else {
         return redirect("/web/login");
     };
-    let (owner, domain) = owner_domain(cx.env).ok_or_else(|| Error::RustError("OWNER and DOMAIN must be set".into()))?;
+    let (owner, domain) = owner_domain(cx.env)?;
     let public_addr = format!("{app}-{owner}.{domain}");
-    let res = async {
-        let key = if spec.tls_priv.is_empty() { &spec.priv_key } else { &spec.tls_priv };
-        let tls = Arc::new(authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?);
-        let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
-        let created: AppSessionResponse = unary(
-            &as_user,
-            CREATE_APP_SESSION,
-            &CreateAppSessionRequest {
-                username: user.clone(),
-                public_addr: public_addr.clone(),
-                cluster_name: cx.env.var("CLUSTER_NAME").map_err(|e| e.to_string())?.to_string(),
-                app_name: app.to_string(),
-            },
-        )
-        .await?;
-        let sid = created.session.and_then(|s| s.metadata).map(|m| m.name).ok_or("no app session name")?;
-        let got: AppSessionResponse = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await?;
-        let bearer = got.session.and_then(|s| s.spec).map(|s| s.bearer_token).filter(|b| !b.is_empty()).ok_or("no bearer token")?;
-        Ok::<_, String>((sid, bearer))
-    }
-    .await;
-    match res {
+    match create_app_session(cx, &user, &spec, app, &public_addr).await {
         Ok((sid, bearer)) => {
             let mut res = Response::empty()?.with_status(303);
             res.headers_mut().set("Location", &format!("https://{public_addr}{AUTH_PATH}#{sid}.{bearer}.{}", b64(start.as_bytes())))?;
+            // The URL has the session ID and bearer token in its fragment.
+            // Browsers leave fragments out of `Referer`, and `no-referrer`
+            // keeps the rest of the URL from leaving the page too.
             res.headers_mut().set("Referrer-Policy", "no-referrer")?;
             Ok(res)
         }
@@ -378,6 +382,29 @@ async fn launch(req: &Request, cx: &Ctx<'_>, app: &str) -> Result<Response> {
             Response::error("launch failed", 502)
         }
     }
+}
+
+/// Creates an app session for `app` at `public_addr` as `user`, with the
+/// user's web session `spec`, and returns its ID and bearer token.
+async fn create_app_session(cx: &Ctx<'_>, user: &str, spec: &WebSessionSpecV2, app: &str, public_addr: &str) -> std::result::Result<(String, String), String> {
+    let key = if spec.tls_priv.is_empty() { &spec.priv_key } else { &spec.tls_priv };
+    let tls = Arc::new(authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?);
+    let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
+    let created: AppSessionResponse = unary(
+        &as_user,
+        CREATE_APP_SESSION,
+        &CreateAppSessionRequest {
+            username: user.to_string(),
+            public_addr: public_addr.to_string(),
+            cluster_name: cx.env.var("CLUSTER_NAME").map_err(|e| e.to_string())?.to_string(),
+            app_name: app.to_string(),
+        },
+    )
+    .await?;
+    let sid = created.session.and_then(|s| s.metadata).map(|m| m.name).ok_or("no app session name")?;
+    let got: AppSessionResponse = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await?;
+    let bearer = got.session.and_then(|s| s.spec).map(|s| s.bearer_token).filter(|b| !b.is_empty()).ok_or("no bearer token")?;
+    Ok((sid, bearer))
 }
 
 async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, String> {
@@ -403,20 +430,18 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, String> {
     }))
 }
 
-async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> Result<Response> {
-    let res = async {
-        let assertion: Value = serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
-        let tls = authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
-        let body = json!({ "username": "", "webauthn": assertion }).to_string().into_bytes();
-        let stream = cx.pool.take_wait().await?;
-        let (status, body) = authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
-        if status != 200 {
-            return Err(format!("AuthenticateWebUser: http {status}: {}", String::from_utf8_lossy(&body)));
-        }
-        parse_web_session(&body)
+/// Logs in with the passkey assertion in `assertion`, and returns the user
+/// and the new web session ID.
+async fn login_finish(cx: &Ctx<'_>, assertion: Vec<u8>) -> std::result::Result<(String, String), String> {
+    let assertion: Value = serde_json::from_slice(&assertion).map_err(|e| format!("assertion: {e}"))?;
+    let tls = authrpc::tls_config(cx.env, "HUB_TLS_CERT", "HUB_TLS_KEY").map_err(|e| e.to_string())?;
+    let body = json!({ "username": "", "webauthn": assertion }).to_string().into_bytes();
+    let stream = cx.pool.take_wait().await?;
+    let (status, body) = authrpc::post_json(stream, &tls, AUTHENTICATE_WEB_USER_PASSWORDLESS, body).await?;
+    if status != 200 {
+        return Err(format!("AuthenticateWebUser: http {status}: {}", String::from_utf8_lossy(&body)));
     }
-    .await;
-    session_response(res)
+    parse_web_session(&body)
 }
 
 async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, String> {
@@ -457,29 +482,27 @@ async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, S
     }))
 }
 
-async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> Result<Response> {
-    let res = async {
-        let resp = parse_credential(&body)?;
-        let changed: ChangeUserAuthenticationResponse = cx
-            .auth
-            .call(
-                cx.env,
-                cx.pool,
-                CHANGE_USER_AUTHENTICATION,
-                &ChangeUserAuthenticationRequest {
-                    token_id: token.to_string(),
-                    new_mfa_register_response: Some(MfaRegisterResponse { webauthn: Some(resp) }),
-                    new_device_name: "passkey".into(),
-                },
-            )
-            .await?;
-        let ws = changed.web_session.ok_or("no web session")?;
-        let sid = ws.metadata.map(|m| m.name).ok_or("no web session name")?;
-        let user = ws.spec.map(|s| s.user).ok_or("no web session user")?;
-        Ok::<_, String>((user, sid))
-    }
-    .await;
-    session_response(res)
+/// Registers the passkey credential in `body` for the invite `token`, and
+/// returns the user and the new web session ID.
+async fn invite_finish(cx: &Ctx<'_>, token: &str, body: Vec<u8>) -> std::result::Result<(String, String), String> {
+    let resp = parse_credential(&body)?;
+    let changed: ChangeUserAuthenticationResponse = cx
+        .auth
+        .call(
+            cx.env,
+            cx.pool,
+            CHANGE_USER_AUTHENTICATION,
+            &ChangeUserAuthenticationRequest {
+                token_id: token.to_string(),
+                new_mfa_register_response: Some(MfaRegisterResponse { webauthn: Some(resp) }),
+                new_device_name: "passkey".into(),
+            },
+        )
+        .await?;
+    let ws = changed.web_session.ok_or("no web session")?;
+    let sid = ws.metadata.map(|m| m.name).ok_or("no web session name")?;
+    let user = ws.spec.map(|s| s.user).ok_or("no web session user")?;
+    Ok((user, sid))
 }
 
 /// The parts of auth's `AuthenticateWebUser` JSON reply the hub reads.
@@ -662,14 +685,19 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Larger text and buttons, so they are easy to tap on a phone.
-const STYLE: &str = "<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>";
+/// The start of every page: the doctype, the charset, the viewport and
+/// `STYLE`. `concat!` takes only literals, so this is a macro.
+macro_rules! head {
+    () => {
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>"#
+    };
+}
 
-const LOGIN_PAGE: &str = concat!(
-    r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport login</title>
-<button id="go">Log in with passkey</button><pre id="out"></pre><script>
-"#,
-    r#"const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+/// The script helpers the login and invite pages share: base64url decode
+/// and encode, and a JSON `post`.
+macro_rules! passkey_js {
+    () => {
+        r#"const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const out = document.getElementById('out');
 async function post(url, body) {
@@ -677,7 +705,20 @@ async function post(url, body) {
   if (!r.ok) throw new Error(r.status + ' ' + await r.text());
   return r.json();
 }
-document.getElementById('go').onclick = async () => {
+"#
+    };
+}
+
+/// Larger text and buttons, so they are easy to tap on a phone.
+const HEAD: &str = head!();
+
+const LOGIN_PAGE: &str = concat!(
+    head!(),
+    r#"<title>sallyport login</title>
+<button id="go">Log in with passkey</button><pre id="out"></pre><script>
+"#,
+    passkey_js!(),
+    r#"document.getElementById('go').onclick = async () => {
   try {
     const c = await post('/webapi/login/begin');
     const cred = await navigator.credentials.get({ publicKey: {
@@ -698,17 +739,13 @@ document.getElementById('go').onclick = async () => {
 </script>"#
 );
 
-const INVITE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport invite</title>
+const INVITE_PAGE: &str = concat!(
+    head!(),
+    r#"<title>sallyport invite</title>
 <button id="go">Register a passkey</button><pre id="out"></pre><script>
-const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
-const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const out = document.getElementById('out');
-async function post(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
-  return r.json();
-}
-const token = location.pathname.split('/').pop();
+"#,
+    passkey_js!(),
+    r#"const token = location.pathname.split('/').pop();
 document.getElementById('go').onclick = async () => {
   try {
     const c = await post('/webapi/invite/' + token + '/begin');
@@ -726,9 +763,12 @@ document.getElementById('go').onclick = async () => {
     location.href = '/';
   } catch (e) { out.textContent = 'error: ' + e; }
 };
-</script>"#;
+</script>"#
+);
 
-const HANDOFF_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport</title>
+const HANDOFF_PAGE: &str = concat!(
+    head!(),
+    r#"<meta name="referrer" content="no-referrer"><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
@@ -745,7 +785,8 @@ try {
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
   .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));
-</script>"#;
+</script>"#
+);
 
 #[cfg(test)]
 mod tests {
