@@ -33,6 +33,10 @@ http-body-util = "0.1"
 prost = "0.13"
 console_error_panic_hook = "0.1"
 russh = { version = "0.54.5", default-features = false, features = ["ring"] }
+x509-cert = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 # The hub is its own workspace, so the vendored crates are patched in here.
 [workspace]

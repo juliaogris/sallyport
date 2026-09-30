@@ -20,8 +20,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use futures::StreamExt;
 use serde::Deserialize;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use worker::*;
+use x509_cert::der::asn1::ObjectIdentifier;
+use x509_cert::der::{Decode, Tag, Tagged};
+use x509_cert::name::Name;
 
 use crate::app::TunnelSlot;
 use crate::authpipe::Pool;
@@ -34,6 +39,9 @@ const AUTH_PATH: &str = "/x-teleport-auth";
 /// The largest body the login host and the handoff read. A WebAuthn
 /// assertion or attestation is a few KiB.
 const MAX_BODY: usize = 64 * 1024;
+/// The subject attribute in which Teleport's `tlsca` writes an app
+/// session's public address, `AppPublicAddrASN1ExtensionOID`.
+const APP_PUBLIC_ADDR_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.9999.1.6");
 /// How [`authrpc::unary`] reports gRPC status `RESOURCE_EXHAUSTED`, which
 /// auth returns when a client address makes too many login or invite calls.
 const RATE_LIMITED: &str = "grpc-status \"8\"";
@@ -154,7 +162,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
                 let Some(h) = parse_handoff(&body) else {
                     return Response::error("bad handoff", 400);
                 };
-                handoff(cx, h).await
+                handoff(cx, h, &host).await
             }
             _ => Response::error("method not allowed", 405),
         };
@@ -185,10 +193,9 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
         return to_login();
     };
     // Auth is asked on every request, and any error denies.
-    let got: std::result::Result<AppSessionResponse, String> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid }).await;
-    let spec = match got.map(|r| r.session.and_then(|s| s.spec)) {
-        Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => spec,
-        Ok(_) => return to_login(),
+    let spec = match valid_app_session(cx, &sid, &subject, &host).await {
+        Ok(Some(spec)) => spec,
+        Ok(None) => return to_login(),
         Err(err) => {
             console_error!("web: GetAppSession for {app}: {err}");
             return Response::error("auth unavailable", 503);
@@ -217,12 +224,12 @@ fn parse_handoff(body: &[u8]) -> Option<Handoff> {
     serde_json::from_slice::<Handoff>(body).ok().filter(|h| !h.sid.is_empty() && !h.subject.is_empty())
 }
 
-/// Checks the handoff from the launcher and sets the app cookies.
-async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff) -> Result<Response> {
-    let got: std::result::Result<AppSessionResponse, String> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.clone() }).await;
-    match got.map(|r| r.session.and_then(|s| s.spec)) {
-        Ok(Some(spec)) if spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) => {}
-        Ok(_) => return Response::error("bad handoff", 403),
+/// Checks the handoff from the launcher for the app host `host` and sets
+/// the app cookies.
+async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff, host: &str) -> Result<Response> {
+    match valid_app_session(cx, &sid, &subject, host).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return Response::error("bad handoff", 403),
         Err(err) => {
             console_error!("web: handoff GetAppSession: {err}");
             return Response::error("auth unavailable", 503);
@@ -232,6 +239,32 @@ async fn handoff(cx: &Ctx<'_>, Handoff { sid, subject }: Handoff) -> Result<Resp
     res.headers_mut().append("Set-Cookie", &set_cookie(APP_COOKIE, &sid))?;
     res.headers_mut().append("Set-Cookie", &set_cookie(SUBJECT_COOKIE, &subject))?;
     Ok(res)
+}
+
+/// Returns the app session `sid` from auth when it has not expired, its
+/// bearer token is `subject`, and its certificate is for the app host
+/// `host`. It returns Ok(None) when any of these checks fails, and an
+/// error when auth cannot be asked.
+async fn valid_app_session(cx: &Ctx<'_>, sid: &str, subject: &str, host: &str) -> std::result::Result<Option<WebSessionSpecV2>, String> {
+    let got: std::result::Result<AppSessionResponse, _> = cx.auth.call(cx.env, cx.pool, GET_APP_SESSION, &GetAppSessionRequest { session_id: sid.to_string() }).await;
+    let spec = got.map_err(|e| e.to_string())?.session.and_then(|s| s.spec);
+    Ok(spec.filter(|spec| spec.unexpired() && ct_eq(spec.bearer_token.as_bytes(), subject.as_bytes()) && cert_public_addr(&spec.tls_cert).as_deref() == Some(host)))
+}
+
+/// Returns the app public address in the first certificate of `cert_pem`,
+/// or None when there is none or the PEM or DER does not parse.
+fn cert_public_addr(cert_pem: &[u8]) -> Option<String> {
+    let der = CertificateDer::pem_slice_iter(cert_pem).next()?.ok()?;
+    let cert = x509_cert::Certificate::from_der(&der).ok()?;
+    name_public_addr(&cert.tbs_certificate.subject)
+}
+
+/// Returns the value of the [`APP_PUBLIC_ADDR_OID`] attribute in `name`.
+/// Go's `encoding/asn1` writes a string as `PrintableString` when it can,
+/// and as `UTF8String` otherwise.
+fn name_public_addr(name: &Name) -> Option<String> {
+    let atv = name.0.iter().flat_map(|rdn| rdn.0.iter()).find(|atv| atv.oid == APP_PUBLIC_ADDR_OID)?;
+    matches!(atv.value.tag(), Tag::PrintableString | Tag::Utf8String | Tag::Ia5String).then(|| String::from_utf8(atv.value.value().to_vec()).ok())?
 }
 
 /// Returns the logged-in user and web session ID, if the session cookie
@@ -656,6 +689,32 @@ mod tests {
         for body in [&b""[..], b"not json", br#"{"sid":"s"}"#, br#"{"sid":"","subject":"t"}"#, br#"{"sid":"s","subject":""}"#, br#"{"sid":1,"subject":"t"}"#] {
             assert!(parse_handoff(body).is_none(), "{:?}", String::from_utf8_lossy(body));
         }
+    }
+
+    fn app_cert(attrs: &[(&[u64], rcgen::DnValue)]) -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::default();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "alice");
+        for (oid, value) in attrs {
+            params.distinguished_name.push(rcgen::DnType::CustomDnType(oid.to_vec()), value.clone());
+        }
+        let key = rcgen::KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().pem().into_bytes()
+    }
+
+    #[test]
+    fn cert_public_addr_cases() {
+        let addr: &[u64] = &[1, 3, 9999, 1, 6];
+        let name: &[u64] = &[1, 3, 9999, 1, 10];
+        let utf8 = |v: &str| rcgen::DnValue::Utf8String(v.into());
+        let printable = |v: &str| rcgen::DnValue::PrintableString(v.try_into().unwrap());
+        let bmp = |v: &str| rcgen::DnValue::BmpString(v.try_into().unwrap());
+        assert_eq!(cert_public_addr(&app_cert(&[(name, utf8("bench")), (addr, printable("bench-julia.example.com"))])).as_deref(), Some("bench-julia.example.com"));
+        assert_eq!(cert_public_addr(&app_cert(&[(addr, utf8("bench-julia.example.com"))])).as_deref(), Some("bench-julia.example.com"));
+        assert_eq!(cert_public_addr(&app_cert(&[(name, utf8("bench"))])), None);
+        assert_eq!(cert_public_addr(&app_cert(&[(addr, bmp("bench-julia.example.com"))])), None);
+        assert_eq!(cert_public_addr(b"not a pem"), None);
+        assert_eq!(cert_public_addr(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), None);
     }
 
     #[test]
