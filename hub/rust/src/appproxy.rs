@@ -7,12 +7,13 @@
 
 use std::cell::Cell;
 use std::pin::Pin;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::channel::oneshot;
 use futures::future::{abortable, AbortHandle};
 use futures::stream::LocalBoxStream;
 use futures::StreamExt;
@@ -247,22 +248,27 @@ fn body_stream(
 ) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
     // The time the stream last handed a chunk to the runtime, or None while
     // the stream waits on the app service. Only the wait for a pull counts,
-    // not a slow app service.
-    let pulled: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(None));
-    wasm_bindgen_futures::spawn_local(end_when_idle(Rc::downgrade(&pulled), conn));
-    futures::stream::unfold((incoming, pulled), |(mut incoming, pulled)| async move {
+    // not a slow app service. The clock starts before the first pull, so a
+    // body the runtime never pulls is aborted too.
+    let pulled: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(Some(Date::now().as_millis())));
+    // The stream holds `done`, so dropping the stream ends the idle task.
+    let (done, done_rx) = oneshot::channel::<()>();
+    wasm_bindgen_futures::spawn_local(end_when_idle(pulled.clone(), done_rx, conn));
+    let state = (incoming, pulled, done);
+    futures::stream::unfold(state, |(mut incoming, pulled, done)| async move {
         pulled.set(None);
         loop {
             match incoming.frame().await {
                 None => return None,
                 Some(Err(err)) => {
                     console_error!("appproxy: response body: {err}");
-                    return Some((Err(Error::RustError(err.to_string())), (incoming, pulled)));
+                    let err = Err(Error::RustError(err.to_string()));
+                    return Some((err, (incoming, pulled, done)));
                 }
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => {
                         pulled.set(Some(Date::now().as_millis()));
-                        return Some((Ok(data.to_vec()), (incoming, pulled)));
+                        return Some((Ok(data.to_vec()), (incoming, pulled, done)));
                     }
                     // A trailers frame, which HTTP/1.1 responses rarely
                     // carry. Keep reading for the real end of the body.
@@ -274,15 +280,19 @@ fn body_stream(
 }
 
 /// Aborts `conn` once `pulled` shows no pull for [`STREAM_IDLE`]. It returns
-/// when the body stream that owns `pulled` is dropped.
-async fn end_when_idle(pulled: Weak<Cell<Option<u64>>>, conn: AbortHandle) {
+/// when `done` resolves, which is when the body stream is dropped.
+async fn end_when_idle(
+    pulled: Rc<Cell<Option<u64>>>,
+    mut done: oneshot::Receiver<()>,
+    conn: AbortHandle,
+) {
     let idle_ms = STREAM_IDLE.as_millis() as u64;
     let mut wait = STREAM_IDLE;
     loop {
-        crate::sockets::sleep(wait).await;
-        let Some(pulled) = pulled.upgrade() else {
+        let sleep = std::pin::pin!(crate::sockets::sleep(wait));
+        if let futures::future::Either::Right(_) = futures::future::select(sleep, &mut done).await {
             return;
-        };
+        }
         wait = STREAM_IDLE;
         if let Some(at) = pulled.get() {
             let waited = Date::now().as_millis().saturating_sub(at);
