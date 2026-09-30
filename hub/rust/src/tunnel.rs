@@ -6,6 +6,7 @@
 //! host CA, and inside that SSH.
 
 use std::cell::Cell;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -214,7 +215,8 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
 }
 
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
-/// in-memory pipe until either side closes.
+/// in-memory pipe until either side closes. When it returns, the pipe end
+/// is dropped, so the far end reads EOF.
 pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
     crate::sockets::add(ws);
     pump_inner(ws, events, pipe).await;
@@ -269,7 +271,10 @@ async fn pump_inner(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: D
         let _ = wr.shutdown().await;
     };
 
-    futures::join!(outbound, inbound);
+    // A stream that waits in the auth pipe pool has nobody reading or
+    // writing its far end. When the WebSocket closes, only `inbound` ends,
+    // so waiting for both would never return.
+    futures::future::select(pin!(outbound), pin!(inbound)).await;
 }
 
 /// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
