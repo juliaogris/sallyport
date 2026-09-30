@@ -8,12 +8,6 @@ mod appproxy;
 mod authpipe;
 mod authrpc;
 mod ping;
-#[cfg(feature = "spikes")]
-mod s4;
-#[cfg(feature = "spikes")]
-mod s5;
-#[cfg(feature = "spikes")]
-mod s5login;
 mod sockets;
 mod ssh;
 mod tunnel;
@@ -53,12 +47,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             if !upgrade.eq_ignore_ascii_case("websocket") {
                 return Response::error("upgrade required", 426);
             }
-            let ns = env.durable_object("HUB")?;
-            let stub = ns.id_from_name(HUB_INSTANCE)?.get_stub()?;
-            stub.fetch_with_request(req).await
+            hub(&env)?.fetch_with_request(req).await
         }
-        #[cfg(feature = "spikes")]
-        p if p.starts_with("/spike/") => hub(&env)?.fetch_with_request(req).await,
         _ if kind.is_some() => hub(&env)?.fetch_with_request(req).await,
         _ => Response::error("not found", 404),
     }

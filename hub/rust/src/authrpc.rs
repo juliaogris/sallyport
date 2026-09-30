@@ -27,10 +27,6 @@ const ALPN_H2: &[u8] = b"h2";
 /// Every call to auth has this deadline.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(5);
 
-#[cfg(feature = "spikes")]
-pub const PING: &str = "/proto.AuthService/Ping";
-#[cfg(feature = "spikes")]
-pub const GET_CLUSTER_NAME: &str = "/teleport.clusterconfig.v1.ClusterConfigService/GetClusterName";
 pub const CREATE_APP_SESSION: &str = "/proto.AuthService/CreateAppSession";
 pub const GET_APP_SESSION: &str = "/proto.AuthService/GetAppSession";
 pub const CREATE_AUTHENTICATE_CHALLENGE: &str = "/proto.AuthService/CreateAuthenticateChallenge";
@@ -105,39 +101,6 @@ pub struct GetWebSessionRequest {
     pub user: String,
     #[prost(string, tag = "2")]
     pub session_id: String,
-}
-
-#[cfg(feature = "spikes")]
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PingRequest {}
-
-#[cfg(feature = "spikes")]
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PingResponse {
-    #[prost(string, tag = "1")]
-    pub cluster_name: String,
-    #[prost(string, tag = "2")]
-    pub server_version: String,
-}
-
-#[cfg(feature = "spikes")]
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct GetClusterNameRequest {}
-
-#[cfg(feature = "spikes")]
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ClusterNameV2 {
-    #[prost(message, optional, tag = "5")]
-    pub spec: Option<ClusterNameSpecV2>,
-}
-
-#[cfg(feature = "spikes")]
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ClusterNameSpecV2 {
-    #[prost(string, tag = "1")]
-    pub cluster_name: String,
-    #[prost(string, tag = "2")]
-    pub cluster_id: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

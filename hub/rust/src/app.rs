@@ -23,7 +23,8 @@ use crate::ssh::{AppTunnel, CHAN_TRANSPORT, DIAL_DEADLINE, REQ_DIAL};
 const API_DOMAIN: &str = "teleport.cluster.local";
 
 /// The authenticated `App` connection the hub dials apps through. The
-/// newest connection replaces the previous one. S4 has one agent.
+/// hub serves one agent, so the newest connection replaces the previous
+/// one.
 pub type TunnelSlot = Arc<Mutex<Option<AppTunnel>>>;
 
 /// Channels to the app service that one app tunnel may have open at once.
