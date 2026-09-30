@@ -777,7 +777,7 @@ impl Session {
                     return Err(Error::Inconsistent.into());
                 };
 
-                if let Some(channel) = self.channels.get(&local_id) {
+                let abandoned = if let Some(channel) = self.channels.get(&local_id) {
                     channel
                         .send(ChannelMsg::Open {
                             id: local_id,
@@ -785,9 +785,18 @@ impl Session {
                             window_size: msg.initial_window_size,
                         })
                         .await
-                        .unwrap_or(());
+                        .is_err()
                 } else {
                     error!("no channel for id {:?}", local_id);
+                    false
+                };
+                // sallyport: the send fails when the opener stopped waiting,
+                // for example at a deadline. Nothing else owns the channel
+                // then, so close it instead of leaving it open until the
+                // connection ends.
+                if abandoned {
+                    debug!("channel {local_id:?} confirmed after its opener left, closing");
+                    self.close(local_id)?;
                 }
                 handler
                     .channel_open_confirmation(

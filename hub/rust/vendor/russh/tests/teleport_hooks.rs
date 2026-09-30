@@ -395,6 +395,28 @@ async fn request_custom_fails_when_server_closes_first() {
     ));
 }
 
+#[tokio::test]
+async fn channel_confirmed_after_its_opener_left_is_closed() {
+    let r = run("late-confirm", |handle| async move {
+        let first = tokio::time::timeout(
+            Duration::from_millis(100),
+            handle.channel_open_custom("teleport-transport", vec![]),
+        )
+        .await;
+        assert!(first.is_err(), "the first open did not time out");
+        // The client confirms the first channel once this one arrives,
+        // and rejects this one.
+        let second = handle
+            .channel_open_custom("teleport-transport", vec![])
+            .await;
+        assert!(second.is_err(), "the second open was not rejected");
+    })
+    .await;
+    assert_eq!(r.stdout, "closed=true\n");
+    // The client's close is the reply to the server's.
+    assert_eq!(r.events, vec![Event::ChannelClose]);
+}
+
 /// Runs a scenario that sends one data packet of `size` bytes, bypassing Go's
 /// packet size and window checks, and returns what the Go client printed.
 async fn send_raw_data(scenario: &str, config: server::Config, size: usize) -> String {

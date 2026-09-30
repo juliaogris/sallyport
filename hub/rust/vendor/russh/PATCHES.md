@@ -122,6 +122,10 @@ lists the changes to the vendored ssh-key crate in `../ssh-key`.
 - `src/server/encrypted.rs`: A `CHANNEL_OPEN_CONFIRMATION` or
   `CHANNEL_OPEN_FAILURE` for a channel that is already confirmed ends the
   connection with `Error::Inconsistent`, as x/crypto does.
+- `src/server/encrypted.rs`: A `CHANNEL_OPEN_CONFIRMATION` for a channel
+  whose opener stopped waiting, for example at a deadline, closes the
+  channel. Upstream ignores the failed send, and the channel stays open
+  until the connection ends.
 
 ## Incoming channel data
 
@@ -198,8 +202,8 @@ and handler replies and keepalives went out too.
 
 - `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks, the
   server-initiated channel and requests, the unconfirmed-channel checks,
-  the packet size and window checks, the key exchange limit and host
-  certificates. A Go client on golang.org/x/crypto/ssh drives them, because
+  the close of a channel confirmed after its opener left, the packet size
+  and window checks, the key exchange limit and host certificates. A Go client on golang.org/x/crypto/ssh drives them, because
   the russh client cannot open unknown channel types, send arbitrary
   requests or answer custom channel requests. The Go client sends
   out-of-order messages through x/crypto's unexported packet writers, which

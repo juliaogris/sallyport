@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/crypto/ssh"
@@ -172,6 +173,36 @@ func main() {
 		}
 		fmt.Printf("after-confirm=%v\n", err == nil)
 		ch.Close()
+
+	case "late-confirm":
+		// Accept the server's first channel only once its second one
+		// arrives, which the server opens after it stopped waiting for the
+		// first. The server must then close the first channel.
+		opens := client.HandleChannelOpen("teleport-transport")
+		if _, _, err := client.SendRequest("ready", true, nil); err != nil {
+			log.Fatalf("ready: %v", err)
+		}
+		first, second := <-opens, <-opens
+		if first == nil || second == nil {
+			log.Fatalf("connection closed before both channels were opened")
+		}
+		second.Reject(ssh.Prohibited, "")
+		_, reqs, err := first.Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
+		}
+		// x/crypto closes reqs when the server closes the channel.
+		closed := make(chan struct{})
+		go func() {
+			ssh.DiscardRequests(reqs)
+			close(closed)
+		}()
+		select {
+		case <-closed:
+			fmt.Println("closed=true")
+		case <-time.After(10 * time.Second):
+			fmt.Println("closed=false")
+		}
 
 	case "oversize-data", "overwindow-data":
 		// Send one data packet of the given size on a channel. Go's own
