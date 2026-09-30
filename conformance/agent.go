@@ -118,8 +118,9 @@ type Dial struct {
 }
 
 // DialAgent connects id to the hub's tunnel. The hub's host key must be a
-// host certificate signed by the cluster host CA.
-func (h *Hub) DialAgent(ctx context.Context, p *PKI, id *Identity) (*Agent, error) {
+// host certificate signed by the cluster host CA. Each of opts changes the
+// SSH client config before the dial.
+func (h *Hub) DialAgent(ctx context.Context, p *PKI, id *Identity, opts ...func(*ssh.ClientConfig)) (*Agent, error) {
 	tc, err := h.DialTunnelTLS(ctx, p)
 	if err != nil {
 		return nil, err
@@ -160,6 +161,9 @@ func (h *Hub) DialAgent(ctx context.Context, p *PKI, id *Identity) (*Agent, erro
 			ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSAv01,
 		},
 		Timeout: 20 * time.Second,
+	}
+	for _, o := range opts {
+		o(cfg)
 	}
 	stop := context.AfterFunc(ctx, func() { tc.Close() })
 	sc, chans, reqs, err := ssh.NewClientConn(tc, LoginHost, cfg)
@@ -301,3 +305,9 @@ func (chanConn) RemoteAddr() net.Addr             { return fakeAddr{} }
 func (chanConn) SetDeadline(time.Time) error      { return nil }
 func (chanConn) SetReadDeadline(time.Time) error  { return nil }
 func (chanConn) SetWriteDeadline(time.Time) error { return nil }
+
+// WithRekeyThreshold makes the agent start a key exchange after every n
+// bytes it sends or receives.
+func WithRekeyThreshold(n uint64) func(*ssh.ClientConfig) {
+	return func(c *ssh.ClientConfig) { c.RekeyThreshold = n }
+}

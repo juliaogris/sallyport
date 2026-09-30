@@ -30,8 +30,8 @@ BASE = os.path.expanduser("~/sallyport-probe")
 DOMAIN = "example.com"
 CLUSTERS = {
     "julia": {"streams": ["octocam"]},
-    "rust": {"streams": ["cam", "octocam"]},
-    "go": {"streams": ["cam", "octocam"]},
+    "rust": {"streams": ["octocam"]},
+    "go": {"streams": ["octocam"]},
 }
 BENCH_FILE = "/10mb.bin"
 BENCH_BYTES = 10 * 1024 * 1024
@@ -41,6 +41,7 @@ GAP_SECONDS = 2.0
 TIMEOUT = 15
 CHUNK = 64 * 1024
 
+# The cam columns are always empty. They keep the header of older CSV files.
 FIELDS = [
     "ts", "cluster", "tunnel_down",
     "dl_status", "dl_bytes", "dl_ttfb_s", "dl_total_s",
@@ -155,7 +156,7 @@ def stream(cluster, app, row, errors):
     A gap is more than GAP_SECONDS between frames, or between the start and
     the first frame, or between the last frame and the end.
     """
-    prefix = "cam" if app == "cam" else "octocam"
+    prefix = app
     frames = 0
     gaps = 0
     max_gap = 0.0

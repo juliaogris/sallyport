@@ -25,7 +25,6 @@ CHECKS = {
     "latency": lambda r: r["lat_ok"] == "5",
     "snapshot": lambda r: r["snap_status"] == "200",
     "octo": lambda r: r["octo_status"] == "403",
-    "cam": lambda r: r["cam_status"] == "200" and r["cam_gaps"] == "0",
     "octocam": lambda r: r["octocam_status"] == "200" and r["octocam_gaps"] == "0",
 }
 # Each timing counts only in runs where its check passed, so fast error

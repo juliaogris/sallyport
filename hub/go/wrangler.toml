@@ -31,14 +31,13 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "julia-sallyport-gohub-dev.example.workers.dev"
 DOMAIN = "example.workers.dev"
 OWNER = "julia-sallyport-gohub-dev"
-APPS = "bench,cam:/stream,octo,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [env.go]
 name = "sallyport-hub-go"
 routes = [
   { pattern = "go.example.com", custom_domain = true },
   { pattern = "bench-go.example.com", custom_domain = true },
-  { pattern = "cam-go.example.com", custom_domain = true },
   { pattern = "octo-go.example.com", custom_domain = true },
   { pattern = "octocam-go.example.com", custom_domain = true },
 ]
@@ -50,7 +49,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "go.example.com"
 DOMAIN = "example.com"
 OWNER = "go"
-APPS = "bench,cam:/stream,octo,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.go.durable_objects.bindings]]
 name = "HUB"

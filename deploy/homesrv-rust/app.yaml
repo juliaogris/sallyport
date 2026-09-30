@@ -24,10 +24,6 @@ app_service:
   - name: bench
     uri: http://127.0.0.1:18180
     public_addr: bench-rust.example.com
-  # A fake MJPEG camera, so the test does not depend on the printer.
-  - name: cam
-    uri: http://127.0.0.1:18181
-    public_addr: cam-rust.example.com
   # The same OctoPrint and webcam as the julia cluster. octocam shares
   # julia's relay on 127.0.0.1:18081.
   - name: octo

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juliaogris/sallyport/conformance/testapp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,10 +22,10 @@ func TestAppProxy(t *testing.T) {
 	host := appHost("bench")
 
 	t.Run("static", func(t *testing.T) {
-		resp := s.get(host, "/static", cookies...)
+		resp := s.get(t, host, "/t/static", cookies...)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Equal(t, staticBody, body)
+		require.Equal(t, testapp.StaticBody, body)
 		require.Equal(t, "text/plain", resp.Header.Get("Content-Type"))
 	})
 
@@ -32,12 +33,12 @@ func TestAppProxy(t *testing.T) {
 		e := s.echo(t, cookies, nil)
 		require.Equal(t, Alice, e.Client)
 		require.Equal(t, host, e.Host)
-		require.Equal(t, "/echo?a=1&b=%2F", e.URI)
+		require.Equal(t, "/t/echo?a=1&b=%2F", e.URI)
 	})
 
 	for _, code := range []int{204, 205, 304} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
-			resp := s.get(host, "/status/"+itoa(code), cookies...)
+			resp := s.get(t, host, "/t/status/"+itoa(code), cookies...)
 			body := readBody(t, resp)
 			require.Equal(t, code, resp.StatusCode)
 			require.Empty(t, body)
@@ -46,7 +47,7 @@ func TestAppProxy(t *testing.T) {
 	}
 
 	t.Run("gzip passed through", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "https://"+host+"/gzip", nil)
+		req, _ := http.NewRequest("GET", "https://"+host+"/t/gzip", nil)
 		req.Header.Set("Accept-Encoding", "gzip")
 		for _, c := range cookies {
 			req.AddCookie(c)
@@ -63,7 +64,7 @@ func TestAppProxy(t *testing.T) {
 		require.NoError(t, err, "body is not gzip, compressed twice or not at all")
 		plain, err := io.ReadAll(zr)
 		require.NoError(t, err)
-		require.Equal(t, gzipPlain, plain)
+		require.Equal(t, testapp.GzipPlain, plain)
 	})
 
 	t.Run("hub cookies stripped upstream", func(t *testing.T) {
@@ -88,7 +89,7 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("hub cookies dropped from the app's response", func(t *testing.T) {
-		resp := s.get(host, "/setcookie", cookies...)
+		resp := s.get(t, host, "/t/setcookie", cookies...)
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Nil(t, cookie(resp, "__Host-sp_app"))
@@ -97,10 +98,10 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("post", func(t *testing.T) {
-		resp := s.post(host, "/echo", origin(host), "posted", cookies...)
+		resp := s.post(t, host, "/t/echo", origin(host), "posted", cookies...)
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		var e echo
+		var e testapp.Echo
 		require.NoError(t, json.Unmarshal(body, &e))
 		require.Equal(t, "POST", e.Method)
 		require.Equal(t, "posted", e.Body)
@@ -108,11 +109,11 @@ func TestAppProxy(t *testing.T) {
 
 	t.Run("post from another site", func(t *testing.T) {
 		for _, o := range []string{origin(appHost("cam")), origin(LoginHost), "https://other.test"} {
-			resp := s.post(host, "/echo", o, "posted", cookies...)
+			resp := s.post(t, host, "/t/echo", o, "posted", cookies...)
 			readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "origin %s", o)
 		}
-		req, _ := http.NewRequest("POST", "https://"+host+"/echo", nil)
+		req, _ := http.NewRequest("POST", "https://"+host+"/t/echo", nil)
 		req.Header.Set("Sec-Fetch-Site", "same-site")
 		for _, c := range cookies {
 			req.AddCookie(c)
@@ -124,7 +125,7 @@ func TestAppProxy(t *testing.T) {
 	})
 
 	t.Run("no cookies", func(t *testing.T) {
-		resp := s.get(host, "/static")
+		resp := s.get(t, host, "/t/static")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
@@ -132,14 +133,14 @@ func TestAppProxy(t *testing.T) {
 
 	t.Run("wrong subject", func(t *testing.T) {
 		bad := []*http.Cookie{cookies[0], {Name: "__Host-sp_subject", Value: "nope"}}
-		resp := s.get(host, "/static", bad...)
+		resp := s.get(t, host, "/t/static", bad...)
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	})
 
 	t.Run("16 MiB streamed", func(t *testing.T) {
 		const n = 16 << 20
-		resp := s.get(host, "/big?n="+itoa(n), cookies...)
+		resp := s.get(t, host, "/t/bytes?n="+itoa(n), cookies...)
 		defer resp.Body.Close()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		want := sha256.New()
@@ -158,11 +159,11 @@ func TestAppProxy(t *testing.T) {
 	})
 }
 
-// echo sends GET /echo?a=1&b=%2F to bench with cookies and extra headers
+// echo sends GET /t/echo?a=1&b=%2F to bench with cookies and extra headers
 // and returns what the app saw.
-func (s *stack) echo(t *testing.T, cookies []*http.Cookie, header http.Header) echo {
+func (s *stack) echo(t *testing.T, cookies []*http.Cookie, header http.Header) testapp.Echo {
 	t.Helper()
-	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/echo?a=1&b=%2F", nil)
+	req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/t/echo?a=1&b=%2F", nil)
 	for k, vs := range header {
 		req.Header[k] = vs
 	}
@@ -173,7 +174,7 @@ func (s *stack) echo(t *testing.T, cookies []*http.Cookie, header http.Header) e
 	require.NoError(t, err)
 	body := readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
-	var e echo
+	var e testapp.Echo
 	require.NoError(t, json.Unmarshal(body, &e), "body %s", body)
 	return e
 }
@@ -184,7 +185,7 @@ func TestAppProxyExpired(t *testing.T) {
 	s := newStack(t)
 	cookies := s.appCookies(t, "bench")
 	s.auth.ExpireAppSessions()
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
@@ -196,7 +197,7 @@ func TestAppProxyOffline(t *testing.T) {
 	cookies := s.appCookies(t, "bench")
 	s.agent.Close()
 	time.Sleep(time.Second)
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
@@ -209,7 +210,7 @@ func TestAuthUnavailable(t *testing.T) {
 	s.auth.Close()
 	time.Sleep(time.Second)
 	start := time.Now()
-	resp := s.get(appHost("bench"), "/static", cookies...)
+	resp := s.get(t, appHost("bench"), "/t/static", cookies...)
 	readBody(t, resp)
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	require.Less(t, time.Since(start), 15*time.Second)

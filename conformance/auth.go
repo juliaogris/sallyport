@@ -47,6 +47,28 @@ type FakeAuth struct {
 	LoginChallenge []byte
 	// RegisterChallenge is the challenge in every register challenge.
 	RegisterChallenge []byte
+	// rateLimited makes the challenge calls fail with ResourceExhausted.
+	rateLimited bool
+}
+
+// SetRateLimited makes CreateAuthenticateChallenge and
+// CreateRegisterChallenge fail with ResourceExhausted while on is true, as
+// auth does when its rate limit is reached.
+func (a *FakeAuth) SetRateLimited(on bool) {
+	a.mu.Lock()
+	a.rateLimited = on
+	a.mu.Unlock()
+}
+
+// DropStreams closes every callout stream open now, waiting or in use.
+// Run opens new ones.
+func (a *FakeAuth) DropStreams() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for ws := range a.sockets {
+		ws.Close()
+		delete(a.sockets, ws)
+	}
 }
 
 // Call is one call the hub made to FakeAuth.
@@ -224,10 +246,11 @@ func (a *FakeAuth) newWebSession(user string) (*session, error) {
 
 // gRPC status codes.
 const (
-	codeInvalidArgument  = 3
-	codeNotFound         = 5
-	codePermissionDenied = 7
-	codeUnimplemented    = 12
+	codeInvalidArgument   = 3
+	codeNotFound          = 5
+	codePermissionDenied  = 7
+	codeResourceExhausted = 8
+	codeUnimplemented     = 12
 )
 
 func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
@@ -238,6 +261,13 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 		return
 	}
 	req := decodeFields(body[5:])
+	a.mu.Lock()
+	limited := a.rateLimited
+	a.mu.Unlock()
+	if limited && (method == "CreateAuthenticateChallenge" || method == "CreateRegisterChallenge") {
+		grpcStatus(w, codeResourceExhausted, "too many requests")
+		return
+	}
 	var resp pbMsg
 	var code int
 	var message string

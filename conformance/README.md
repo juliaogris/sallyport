@@ -9,6 +9,7 @@ Teleport cluster and no deploy.
 ./run.sh go           # one hub
 NO_BUILD=1 ./run.sh   # use the hubs as last built
 SP_HUB=rust go test -run TestTunnelAuth -v .
+SP_HUB=go go test -run TestRekey -long -v .   # 2 GiB through one tunnel
 ```
 
 `run.sh` needs `npx`, Go, `worker-build` and Homebrew's LLVM for the Rust

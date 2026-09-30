@@ -1,11 +1,8 @@
 package conformance
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,11 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juliaogris/sallyport/conformance/testapp"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // stack is a hub of its own with a fake auth behind its callout and an App
-// agent that serves testApp.
+// agent that serves the test app.
 type stack struct {
 	hub   *Hub
 	auth  *FakeAuth
@@ -26,8 +25,8 @@ type stack struct {
 }
 
 // newStack starts a hub, keeps 4 callout streams open to it, and connects
-// an App agent that serves testApp.
-func newStack(t *testing.T) *stack {
+// an App agent that serves the test app, dialed with opts.
+func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	t.Helper()
 	h := freshHub(t)
 	auth, err := NewFakeAuth(pki)
@@ -37,10 +36,10 @@ func newStack(t *testing.T) *stack {
 
 	id, err := pki.AgentIdentity("App")
 	require.NoError(t, err)
-	a, err := h.DialAgent(t.Context(), pki, id)
+	a, err := h.DialAgent(t.Context(), pki, id, opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { a.Close() })
-	require.NoError(t, a.ServeApp(pki, testApp()))
+	require.NoError(t, a.ServeApp(pki, testapp.Handler("")))
 	_, ok, err := a.Heartbeat()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -56,7 +55,8 @@ func newStack(t *testing.T) *stack {
 func appHost(app string) string { return app + "-" + LoginHost }
 
 // post sends a POST with Origin set to origin, unless origin is "".
-func (s *stack) post(host, path, origin, body string, cookies ...*http.Cookie) *http.Response {
+func (s *stack) post(t *testing.T, host, path, origin, body string, cookies ...*http.Cookie) *http.Response {
+	t.Helper()
 	req, _ := http.NewRequest("POST", "https://"+host+path, strings.NewReader(body))
 	if origin != "" {
 		req.Header.Set("Origin", origin)
@@ -66,22 +66,19 @@ func (s *stack) post(host, path, origin, body string, cookies ...*http.Cookie) *
 		req.AddCookie(c)
 	}
 	resp, err := s.hub.Do(req)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return resp
 }
 
 // get sends a GET with cookies.
-func (s *stack) get(host, path string, cookies ...*http.Cookie) *http.Response {
+func (s *stack) get(t *testing.T, host, path string, cookies ...*http.Cookie) *http.Response {
+	t.Helper()
 	req, _ := http.NewRequest("GET", "https://"+host+path, nil)
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
 	resp, err := s.hub.Do(req)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return resp
 }
 
@@ -108,7 +105,7 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 // login logs Alice in and returns the session cookie.
 func (s *stack) login(t *testing.T) *http.Cookie {
 	t.Helper()
-	resp := s.post(LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"`+AliceCredID+`","type":"public-key"}`)
+	resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"`+AliceCredID+`","type":"public-key"}`)
 	readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	c := cookie(resp, "__Host-sp_session")
@@ -120,7 +117,7 @@ func (s *stack) login(t *testing.T) *http.Cookie {
 // and the start path from the handoff URL.
 func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bearer, start string) {
 	t.Helper()
-	resp := s.post(LoginHost, "/web/launch/"+app, origin(LoginHost), "", session)
+	resp := s.post(t, LoginHost, "/web/launch/"+app, origin(LoginHost), "", session)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	loc, err := url.Parse(resp.Header.Get("Location"))
@@ -139,7 +136,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp := s.post(appHost(app), "/x-teleport-auth", origin(appHost(app)), string(body))
+	resp := s.post(t, appHost(app), "/x-teleport-auth", origin(appHost(app)), string(body))
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")
@@ -153,82 +150,6 @@ func (s *stack) appCookies(t *testing.T, app string) []*http.Cookie {
 	t.Helper()
 	sid, bearer, _ := s.launch(t, s.login(t), app)
 	return s.handoff(t, app, sid, bearer)
-}
-
-// The bodies testApp serves.
-var (
-	staticBody = []byte("hello from the app\n")
-	gzipPlain  = []byte("hello, gzipped\n")
-)
-
-// testApp is the app behind the fake agent.
-func testApp() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/static", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Length", strconv.Itoa(len(staticBody)))
-		w.Write(staticBody)
-	})
-	mux.HandleFunc("/big", func(w http.ResponseWriter, r *http.Request) {
-		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
-		w.Header().Set("Content-Type", "application/octet-stream")
-		chunk := make([]byte, 64<<10)
-		for i := range chunk {
-			chunk[i] = byte(i)
-		}
-		for n > 0 {
-			k := min(n, len(chunk))
-			if _, err := w.Write(chunk[:k]); err != nil {
-				return
-			}
-			n -= k
-		}
-	})
-	mux.HandleFunc("/gzip", func(w http.ResponseWriter, r *http.Request) {
-		var b bytes.Buffer
-		zw := gzip.NewWriter(&b)
-		zw.Write(gzipPlain)
-		zw.Close()
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Content-Length", strconv.Itoa(b.Len()))
-		w.Write(b.Bytes())
-	})
-	for _, code := range []int{204, 205, 304} {
-		mux.HandleFunc(fmt.Sprintf("/status/%d", code), func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("ETag", `"v1"`)
-			w.WriteHeader(code)
-		})
-	}
-	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		client := ""
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			client = r.TLS.PeerCertificates[0].Subject.CommonName
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(echo{
-			Method: r.Method, Host: r.Host, URI: r.RequestURI,
-			Header: r.Header, Body: string(body), Client: client,
-		})
-	})
-	mux.HandleFunc("/setcookie", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Set-Cookie", "__Host-sp_app=evil; Path=/; Secure")
-		w.Header().Add("Set-Cookie", "__Host-sp_subject=evil; Path=/; Secure")
-		w.Header().Add("Set-Cookie", "app=1; Path=/")
-		w.WriteHeader(http.StatusOK)
-	})
-	return mux
-}
-
-// echo is what testApp's /echo returns.
-type echo struct {
-	Method string
-	Host   string
-	URI    string
-	Header http.Header
-	Body   string
-	Client string
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
