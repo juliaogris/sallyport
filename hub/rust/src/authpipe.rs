@@ -31,7 +31,7 @@ const NONCE: usize = 32;
 const SIGNATURE: usize = 64;
 /// The challenge is one round trip, so a socket that has not answered by
 /// then is closed.
-const CHALLENGE_DEADLINE: Duration = Duration::from_secs(3);
+const CHALLENGE_DEADLINE: Duration = Duration::from_secs(10);
 /// Verified WebSockets from auth, waiting or in use, that the hub keeps.
 /// Auth opens 8 by default. Above this, a newly verified stream closes the
 /// oldest waiting one.

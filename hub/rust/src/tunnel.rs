@@ -36,7 +36,7 @@ pub const PIPE_BYTES: usize = 64 * 1024;
 /// A connection that has not authenticated by then is closed. Without it an
 /// unauthenticated client can hold a tunnel open forever. A stock agent
 /// finishes TLS and SSH auth in well under this.
-const AUTH_DEADLINE: Duration = Duration::from_secs(10);
+const AUTH_DEADLINE: Duration = Duration::from_secs(30);
 /// Authenticated tunnels the Durable Object accepts. One app service uses
 /// about three: its auth client, its tunnel, and a short-lived probe.
 const MAX_CONNECTIONS: usize = 16;
