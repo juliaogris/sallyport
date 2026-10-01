@@ -1,0 +1,13 @@
+[Unit]
+Description=sallyport party-go bench static server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/julia/sallyport-party-go
+ExecStart=/usr/bin/python3 -m http.server 18680 --bind 127.0.0.1 --directory /home/julia/sallyport-party-go/bench
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

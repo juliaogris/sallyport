@@ -54,4 +54,8 @@ renew lazy "$HOME/sallyport-lazy/deploy/teleport.yaml" 127.0.0.1:3326 sallyport-
   bench=bench-lazy.example.com octocam=octocam-lazy.example.com || failed=1
 renew party "$HOME/sallyport-party/deploy/teleport.yaml" 127.0.0.1:3426 sallyport-party "$HOME/sallyport-party/hub-identity" \
   bench=bench-julia.example.net octocam=octocam-julia.example.net || failed=1
+renew party-rust "$HOME/sallyport-party-rust/deploy/teleport.yaml" 127.0.0.1:3526 sallyport-party-rust "$HOME/sallyport-party-rust/hub-identity" \
+  bench=bench-rust.example.net octocam=octocam-rust.example.net || failed=1
+renew party-go "$HOME/sallyport-party-go/deploy/teleport.yaml" 127.0.0.1:3626 sallyport-party-go "$HOME/sallyport-party-go/hub-identity" \
+  bench=bench-go.example.net octocam=octocam-go.example.net || failed=1
 exit "$failed"

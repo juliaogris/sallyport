@@ -1,0 +1,40 @@
+# The party-go test cluster on homesrv, for the free-plan comparison: auth and the app
+# service in one fork process. Auth calls out to the hub on
+# go.example.net in on-demand mode, in a separate Cloudflare account on
+# the free Workers plan, and the app service serves through the callout.
+version: v3
+teleport:
+  nodename: sallyport-party-go
+  data_dir: /home/julia/sallyport-party-go/data
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: true
+  cluster_name: sallyport-party-go
+  listen_addr: 127.0.0.1:3626
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  callout_to: wss://go.example.net/tunnel/auth
+  callout_key_file: /home/julia/sallyport-party-go/callout.pem
+  callout_mode: on_demand
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      rp_id: go.example.net
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # A local static server with index.html and a 10 MB file.
+  - name: bench
+    uri: http://127.0.0.1:18680
+    public_addr: bench-go.example.net
+  # The OctoPrint webcam, through julia's relay on 127.0.0.1:18081.
+  - name: octocam
+    uri: http://127.0.0.1:18081
+    public_addr: octocam-go.example.net

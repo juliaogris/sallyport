@@ -28,6 +28,10 @@ import time
 
 BASE = os.path.expanduser("~/sallyport-probe")
 DOMAIN = "example.com"
+FREE = {
+    "streams": ["octocam"], "every": 30, "octo": False, "domain": "example.net",
+    "bench_file": "/1mb.bin", "stream_seconds": 5,
+}
 CLUSTERS = {
     "julia": {"streams": ["octocam"]},
     "rust": {"streams": ["octocam"]},
@@ -35,8 +39,12 @@ CLUSTERS = {
     # The lazy hub sleeps while nobody uses it, so it is probed only every
     # 5 minutes, and its cluster has no octo app.
     "lazy": {"streams": ["octocam"], "every": 5, "octo": False},
-    # The free-plan test on example.net, in a separate Cloudflare account.
-    "party": {"streams": ["octocam"], "every": 5, "octo": False, "domain": "example.net", "owner": "julia"},
+    # The free-plan clusters on example.net share one free account's daily
+    # quota of 100,000 requests, so they get a 1 MB file and a 5 s stream
+    # every 30 minutes.
+    "party": FREE | {"owner": "julia"},
+    "party-rust": FREE | {"owner": "rust"},
+    "party-go": FREE | {"owner": "go"},
 }
 BENCH_FILE = "/10mb.bin"
 BENCH_BYTES = 10 * 1024 * 1024
@@ -98,7 +106,7 @@ def get(cluster, app, path):
 
 def download(cluster, row, errors):
     try:
-        status, n, ttfb, total = get(cluster, "bench", BENCH_FILE)
+        status, n, ttfb, total = get(cluster, "bench", CLUSTERS[cluster].get("bench_file", BENCH_FILE))
         row.update(dl_status=status, dl_bytes=n, dl_ttfb_s=f"{ttfb:.3f}", dl_total_s=f"{total:.3f}")
     except Exception as e:
         row["dl_status"] = 0
@@ -180,7 +188,7 @@ def stream(cluster, app, row, errors):
         marker = ("--" + boundary.removeprefix("--")).encode() if boundary else b"\xff\xd8\xff"
         conn.sock.settimeout(GAP_SECONDS / 2)
         tail = b""
-        end = start + STREAM_SECONDS
+        end = start + CLUSTERS[cluster].get("stream_seconds", STREAM_SECONDS)
         while (now := time.monotonic()) < end:
             try:
                 chunk = res.read1(CHUNK)

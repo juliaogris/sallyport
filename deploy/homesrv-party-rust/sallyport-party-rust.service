@@ -1,0 +1,13 @@
+[Unit]
+Description=sallyport party-rust auth and app service (fork, on-demand callout)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/julia/sallyport-party-rust
+ExecStart=/home/julia/sallyport-lazy/bin/teleport start --config=/home/julia/sallyport-party-rust/deploy/teleport.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

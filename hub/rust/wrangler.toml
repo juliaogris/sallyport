@@ -167,3 +167,32 @@ APPS = "bench,octocam:/stream"
 [[env.party.durable_objects.bindings]]
 name = "HUB"
 class_name = "Hub"
+
+# The free-plan comparison: the Rust lazy hub in the free account, for
+# rust.example.net.
+[env.party-rust]
+name = "sallyport-hub-party-rust"
+account_id = "11111111111111111111111111111111"
+main = "front.mjs"
+routes = [
+  { pattern = "rust.example.net", custom_domain = true },
+  { pattern = "bench-rust.example.net", custom_domain = true },
+  { pattern = "octocam-rust.example.net", custom_domain = true },
+]
+
+[env.party-rust.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[env.party-rust.vars]
+HUB_MODE = "lazy"
+CLUSTER_NAME = "sallyport-party-rust"
+PUBLIC_ADDR = "rust.example.net:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "rust.example.net"
+DOMAIN = "example.net"
+OWNER = "rust"
+APPS = "bench,octocam:/stream"
+
+[[env.party-rust.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
