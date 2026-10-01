@@ -147,13 +147,11 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, subject) || !certForHost(s.tlsCert, host) {
 		return h.toLogin()
 	}
-	var dial appDialer
 	if h.lazy != nil {
 		if !h.lazy.connected() {
 			logf("web: %s: app service offline, auth is not connected", app)
 			return textError("app service offline", 503)
 		}
-		dial = h.lazy.appDialer()
 	} else {
 		h.appMu.Lock()
 		t := h.appTunnel
@@ -162,13 +160,12 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 			logf("web: %s: app service offline, no tunnel", app)
 			return textError("app service offline", 503)
 		}
-		dial = tunnelDialer(t)
 	}
 	cert, err := h.userCert(s.tlsCert, s.tlsPriv)
 	if err != nil {
 		return textError(err.Error(), 500)
 	}
-	return h.forward(dial, cert, host, req)
+	return h.forward(sid, cert, host, req)
 }
 
 // handoff checks the handoff from the launcher for an app session of host,

@@ -39,6 +39,8 @@ type hub struct {
 
 	appMu     sync.Mutex
 	appTunnel *appTunnel
+	// appTransports are the connections to the app service, by app session.
+	appTransports appTransports
 
 	// tokenMu serialises the finish of the add-passkey route, so that two
 	// requests with the same privilege token cannot both add a passkey.
