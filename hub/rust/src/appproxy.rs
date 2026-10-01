@@ -59,8 +59,15 @@ const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this logs the error and returns a 502 "app
 /// unavailable" response.
+/// Where an app connection comes from: the agent's tunnel, or auth's
+/// on-demand callout in the lazy hub.
+pub enum AppDialer<'a> {
+    Tunnel(&'a AppTunnel),
+    Lazy(std::rc::Rc<crate::lazy::Lazy>),
+}
+
 pub async fn forward(
-    tunnel: &AppTunnel,
+    tunnel: AppDialer<'_>,
     tls: Arc<rustls::ClientConfig>,
     cluster: &str,
     host: &str,
@@ -76,13 +83,16 @@ pub async fn forward(
 }
 
 async fn forward_inner(
-    tunnel: &AppTunnel,
+    tunnel: AppDialer<'_>,
     tls: Arc<rustls::ClientConfig>,
     cluster: &str,
     host: &str,
     req: &mut Request,
 ) -> std::result::Result<Response, String> {
-    let stream = dial_app(tunnel, tls, cluster).await?;
+    let stream = match tunnel {
+        AppDialer::Tunnel(t) => dial_app(t, tls, cluster).await?,
+        AppDialer::Lazy(l) => crate::app::dial_app_lazy(&l, tls, cluster).await?,
+    };
     let (mut send, conn) = hyper::client::conn::http1::handshake(HyperIo::new(stream))
         .await
         .map_err(|e| format!("http1 handshake: {e}"))?;

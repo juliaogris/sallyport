@@ -34,8 +34,41 @@ pub const MAX_FORWARDS: usize = 16;
 /// A TLS connection to the app service, running over one channel of the
 /// agent tunnel. It counts toward [`MAX_FORWARDS`] until it is dropped.
 pub(crate) struct AppStream {
-    tls: TlsStream,
-    _forward: Forward,
+    tls: AppTls,
+    /// The stream's place in the tunnel's count. The lazy hub has no tunnel.
+    _forward: Option<Forward>,
+}
+
+/// The TLS connection under an [`AppStream`]: over an agent tunnel channel,
+/// or over a stream from auth's on-demand callout.
+enum AppTls {
+    Tunnel(TlsStream),
+    Lazy(tokio_rustls::client::TlsStream<tokio::io::DuplexStream>),
+}
+
+/// Asks auth's on-demand callout for an app stream and runs TLS toward the
+/// app service over it, as [`dial_app`] does over a tunnel channel.
+pub(crate) async fn dial_app_lazy(
+    lazy: &crate::lazy::Lazy,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+) -> std::result::Result<AppStream, String> {
+    let stream = lazy.dial(crate::lazy::Kind::App).await?;
+    let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
+    let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
+    let tls = match select(
+        pin!(tokio_rustls::TlsConnector::from(tls).connect(name, stream)),
+        pin!(crate::sockets::sleep(DIAL_DEADLINE)),
+    )
+    .await
+    {
+        Either::Left((res, _)) => res.map_err(|e| format!("tls connect: {e}"))?,
+        Either::Right(_) => return Err(format!("tls connect: no answer within {DIAL_DEADLINE:?}")),
+    };
+    Ok(AppStream {
+        tls: AppTls::Lazy(tls),
+        _forward: None,
+    })
 }
 
 /// One stream's place in an app tunnel's count of open streams.
@@ -69,8 +102,8 @@ pub(crate) async fn dial_app(
     .await
     {
         Either::Left((res, _)) => res.map(|tls| AppStream {
-            tls,
-            _forward: forward,
+            tls: AppTls::Tunnel(tls),
+            _forward: Some(forward),
         }),
         Either::Right(_) => Err(format!("dial: no answer within {DIAL_DEADLINE:?}")),
     }
@@ -149,7 +182,10 @@ impl AsyncRead for AppStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().tls).poll_read(cx, buf)
+        match &mut self.get_mut().tls {
+            AppTls::Tunnel(t) => Pin::new(t).poll_read(cx, buf),
+            AppTls::Lazy(t) => Pin::new(t).poll_read(cx, buf),
+        }
     }
 }
 
@@ -159,15 +195,24 @@ impl AsyncWrite for AppStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.get_mut().tls).poll_write(cx, buf)
+        match &mut self.get_mut().tls {
+            AppTls::Tunnel(t) => Pin::new(t).poll_write(cx, buf),
+            AppTls::Lazy(t) => Pin::new(t).poll_write(cx, buf),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().tls).poll_flush(cx)
+        match &mut self.get_mut().tls {
+            AppTls::Tunnel(t) => Pin::new(t).poll_flush(cx),
+            AppTls::Lazy(t) => Pin::new(t).poll_flush(cx),
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.get_mut().tls).poll_shutdown(cx)
+        match &mut self.get_mut().tls {
+            AppTls::Tunnel(t) => Pin::new(t).poll_shutdown(cx),
+            AppTls::Lazy(t) => Pin::new(t).poll_shutdown(cx),
+        }
     }
 }
 

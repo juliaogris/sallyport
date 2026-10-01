@@ -349,13 +349,20 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
             return Response::error("auth unavailable", 503);
         }
     };
+    let tls = Arc::new(authrpc::client_tls(cx.env, &spec.tls_cert, &spec.tls_priv)?);
+    let cluster = cx.env.var("CLUSTER_NAME")?.to_string();
+    if let Some(lazy) = crate::lazy::get() {
+        if !lazy.connected() {
+            console_error!("web: {app}: app service offline, auth is not connected");
+            return Response::error("app service offline", 503);
+        }
+        return crate::appproxy::forward(crate::appproxy::AppDialer::Lazy(lazy), tls, &cluster, &host, req).await;
+    }
     let Some(tunnel) = cx.tunnel.lock().unwrap().clone() else {
         console_error!("web: {app}: app service offline, no tunnel");
         return Response::error("app service offline", 503);
     };
-    let tls = Arc::new(authrpc::client_tls(cx.env, &spec.tls_cert, &spec.tls_priv)?);
-    let cluster = cx.env.var("CLUSTER_NAME")?.to_string();
-    crate::appproxy::forward(&tunnel, tls, &cluster, &host, req).await
+    crate::appproxy::forward(crate::appproxy::AppDialer::Tunnel(&tunnel), tls, &cluster, &host, req).await
 }
 
 /// The body the handoff page posts: the app session ID and its bearer
