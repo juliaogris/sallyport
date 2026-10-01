@@ -54,8 +54,10 @@ const CHALLENGE_DEADLINE_MS: u64 = 10_000;
 /// oldest socket of the client address with the most in the challenge, with
 /// 1013, so that one address cannot close the callout's socket.
 const MAX_PENDING_CONTROL: usize = 4;
-/// Dials waiting for their stream. Above this a dial fails at once.
-const MAX_PENDING_DIALS: usize = 32;
+/// Dials waiting for their stream. Above this a dial fails at once. Auth's
+/// callout allows a burst of 128 dials of each kind, and a page load can
+/// send more than 32 app requests at once, each of which is one dial.
+const MAX_PENDING_DIALS: usize = 128;
 /// Dials for callers that have not signed in, such as a passkey login,
 /// that may wait at once. Above this such a dial fails at once, so that
 /// logins cannot take the pending dials of signed-in users.
