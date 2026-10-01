@@ -34,14 +34,23 @@ const apiDomain = "teleport.cluster.local"
 // The app service never sees them, and the app cannot set them.
 const spCookiePrefix = "__Host-sp_"
 
+// errSwitchingProtocols is the error for a 101 from the app, which has its
+// own 502 body. Every other failure gets the same fixed body.
+var errSwitchingProtocols = errors.New("app answered 101 Switching Protocols")
+
 // forward sends req to the app service at host through the tunnel, as the
-// user with the given certificate. A dial, TLS or HTTP failure, or a 101
-// from the app, returns a 502 with the error.
+// user with the given certificate. A dial, TLS or HTTP failure logs the
+// error and returns a 502 "app unavailable". A 101 from the app returns a
+// 502 that says so.
 func (h *hub) forward(t *appTunnel, cert tls.Certificate, host string, req *request) *response {
 	res, err := h.forwardInner(t, cert, host, req)
-	if err != nil {
+	if errors.Is(err, errSwitchingProtocols) {
 		logf("appproxy: %v", err)
 		return textError(err.Error(), 502)
+	}
+	if err != nil {
+		logf("appproxy: %v", err)
+		return textError("app unavailable", 502)
 	}
 	return res
 }
@@ -90,7 +99,7 @@ func (h *hub) forwardInner(t *appTunnel, cert tls.Certificate, host string, req 
 	// A 101 cannot be forwarded. The hub sends no Upgrade header upstream.
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		closeBoth{resp.Body, cc}.Close()
-		return nil, errors.New("app answered 101 Switching Protocols")
+		return nil, errSwitchingProtocols
 	}
 	return buildResponse(resp, cc), nil
 }
