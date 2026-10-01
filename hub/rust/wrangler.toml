@@ -56,9 +56,6 @@ class_name = "Hub"
 # hub. `--env go` from this directory replaces the Go hub that
 # `hub/go/wrangler.toml` deploys.
 [env.rust]
-# The Rust hub with JavaScript WebSocket glue, to test whether the Rust
-# glue drops tunnels. See wsglue.mjs.
-main = "entry-glued.mjs"
 routes = [
   { pattern = "rust.example.com", custom_domain = true },
   { pattern = "bench-rust.example.com", custom_domain = true },
