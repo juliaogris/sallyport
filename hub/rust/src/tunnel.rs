@@ -524,6 +524,13 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
         Either::Left((stats, _)) => stats,
         Either::Right(_) => (Some(format!("idle for {idle:?}")), 0, 0),
     };
+    // A half-closing stream can end without a close, for example after a
+    // pipe write error when the hub's end was dropped. An open WebSocket
+    // keeps the Durable Object awake and the sender waits for acks, so
+    // close it. Closing a closed WebSocket does nothing.
+    if half_close {
+        let _ = ws.close(Some(1000), Some("stream done"));
+    }
     // Tunnel drops close with 1006. The counts show whether a drop follows a
     // burst of messages, and the waits whether the hub fell behind.
     let now = Date::now().as_millis();
