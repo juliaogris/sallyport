@@ -104,6 +104,8 @@ pub struct Hub {
     used_tokens: crate::passkeys::UsedTokens,
     /// The lazy hub, when `HUB_MODE` is `lazy`.
     lazy: Option<Rc<crate::lazy::Lazy>>,
+    /// True when `HUB_MODE` is `lazy` but the lazy hub failed to install.
+    lazy_misconfigured: bool,
 }
 
 impl DurableObject for Hub {
@@ -117,13 +119,15 @@ impl DurableObject for Hub {
         if let Some(msg) = crate::sockets::take_last_panic() {
             console_error!("hub: the previous instance panicked: {msg}");
         }
+        crate::lazy::clear();
         let used_tokens = crate::passkeys::UsedTokens::new(state.storage().sql());
         // The lazy hub starts no timers, so that the object can hibernate.
-        let lazy = if crate::lazy::enabled(&env) {
+        let lazy_mode = crate::lazy::enabled(&env);
+        let lazy = if lazy_mode {
             match crate::lazy::Lazy::install(state, &env) {
                 Ok(l) => Some(l),
                 Err(err) => {
-                    console_error!("lazy: {err}");
+                    console_error!("lazy: the lazy hub is misconfigured, answering 503: {err}");
                     None
                 }
             }
@@ -139,9 +143,11 @@ impl DurableObject for Hub {
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
             used_tokens,
+            lazy_misconfigured: lazy_mode && lazy.is_none(),
             lazy,
         };
-        if hub.lazy.is_some() {
+        // A misconfigured lazy hub must not run as the full hub either.
+        if lazy_mode {
             return hub;
         }
         wasm_bindgen_futures::spawn_local(heartbeat(
@@ -177,9 +183,16 @@ impl DurableObject for Hub {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if self.lazy_misconfigured {
+            return Response::error("lazy hub misconfigured", 503);
+        }
         let host = req.url()?.host_str().unwrap_or_default().to_string();
-        // Temporary: the lazy hub's recent stream closes.
+        // Temporary: the lazy hub's recent stream closes. Without the right
+        // token the route answers as if it did not exist.
         if self.lazy.is_some() && req.path() == "/webapi/lazy-debug" {
+            if !self.debug_token_ok(&req)? {
+                return Response::error("not found", 404);
+            }
             let lines = CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
             return Response::ok(lines);
         }
@@ -317,6 +330,22 @@ impl DurableObject for Hub {
         let headers = Headers::new();
         headers.set("Sec-WebSocket-Protocol", SUBPROTOCOL)?;
         Ok(Response::from_websocket(pair.client)?.with_headers(headers))
+    }
+}
+
+impl Hub {
+    /// Returns true if `req` carries the `Sallyport-Debug` header and it
+    /// equals the `LAZY_DEBUG_TOKEN` secret. It returns false when the
+    /// secret is not set or is empty.
+    fn debug_token_ok(&self, req: &Request) -> Result<bool> {
+        let Ok(token) = self.env.secret("LAZY_DEBUG_TOKEN") else {
+            return Ok(false);
+        };
+        let token = token.to_string();
+        let Some(got) = req.headers().get("Sallyport-Debug")? else {
+            return Ok(false);
+        };
+        Ok(!token.is_empty() && web::ct_eq(token.as_bytes(), got.as_bytes()))
     }
 }
 

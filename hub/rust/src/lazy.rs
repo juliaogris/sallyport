@@ -57,6 +57,12 @@ pub fn enabled(env: &Env) -> bool {
     env.var("HUB_MODE").map(|v| v.to_string() == "lazy").unwrap_or(false)
 }
 
+/// Removes the lazy hub of this instance, so that a new Durable Object does
+/// not use the `State` of an earlier one.
+pub fn clear() {
+    LAZY.with(|l| *l.borrow_mut() = None);
+}
+
 /// Returns the lazy hub of this instance, if there is one.
 pub fn get() -> Option<Rc<Lazy>> {
     LAZY.with(|l| l.borrow().clone())
