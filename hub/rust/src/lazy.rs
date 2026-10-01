@@ -10,6 +10,11 @@
 //! in the `Sallyport-Stream-Id` header. The hub checks the id before the
 //! upgrade, and uses each id once.
 //!
+//! The control upgrade's response carries `Sallyport-Control: refuse`. A
+//! callout that reads it may answer a dial it will not open a stream for
+//! with "refuse <id>", and the dial then fails at once instead of after
+//! [`STREAM_WAIT`]. A refused id is used up.
+//!
 //! Streams are accepted without hibernation, so the object stays awake while
 //! one is open. A stream closes after [`STREAM_IDLE`] without bytes.
 
@@ -32,6 +37,9 @@ use crate::tunnel::{secret_bytes, PIPE_BYTES};
 const CONTROL: &str = "control";
 /// The request header that carries a stream's id.
 const STREAM_ID_HEADER: &str = "Sallyport-Stream-Id";
+/// The response header on the control upgrade that lists what the hub
+/// accepts on the control socket after the challenge.
+const CONTROL_HEADER: &str = "Sallyport-Control";
 /// A control socket that has not passed the challenge by then is closed.
 const CHALLENGE_DEADLINE_MS: u64 = 10_000;
 /// Control sockets in the challenge. Above this the oldest is closed.
@@ -111,7 +119,7 @@ struct Attachment {
 /// Why a dial got no stream.
 #[derive(Debug)]
 pub enum DialError {
-    /// The hub has no room for the dial.
+    /// The hub has no room for the dial, or auth's callout refused it.
     Busy(String),
     /// Auth is not connected, or no stream arrived in time.
     Failed(String),
@@ -128,7 +136,8 @@ impl std::fmt::Display for DialError {
 /// A dial waiting for its stream.
 struct PendingDial {
     kind: Kind,
-    tx: oneshot::Sender<DuplexStream>,
+    /// Sends the stream, or None when the callout refused the dial.
+    tx: oneshot::Sender<Option<DuplexStream>>,
     /// An app dial's place in [`MAX_APP_STREAMS`]. The stream's pump keeps
     /// it until the WebSocket closes, because the queue of the WebSocket's
     /// events lives as long as the WebSocket.
@@ -225,12 +234,15 @@ impl Lazy {
             verified: false,
         })?;
         ws.send_with_bytes(&nonce)?;
-        Response::from_websocket(pair.client)
+        let headers = Headers::new();
+        headers.set(CONTROL_HEADER, "refuse")?;
+        Ok(Response::from_websocket(pair.client)?.with_headers(headers))
     }
 
     /// Handles a message on a control socket: the challenge reply while it
-    /// is pending, and nothing after that. The runtime answers "ping"
-    /// itself, so it never reaches the hub.
+    /// is pending, and "refuse <id>" after that. Any other message after the
+    /// challenge closes the socket. The runtime answers "ping" itself, so it
+    /// never reaches the hub.
     pub fn on_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
         self.prune();
         let Some(mut a) = ws.deserialize_attachment::<Attachment>()? else {
@@ -242,6 +254,12 @@ impl Lazy {
             return Ok(());
         }
         if a.verified {
+            if let WebSocketIncomingMessage::String(text) = &msg {
+                if let Some(id) = parse_refuse(text) {
+                    self.refuse(id);
+                    return Ok(());
+                }
+            }
             console_log!("lazy: unexpected message on the control socket, closing it");
             let _ = ws.close(Some(1008), Some("unexpected message"));
             return Ok(());
@@ -288,7 +306,7 @@ impl Lazy {
         let events = crate::wsevents::events(&ws)?;
         let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
         let PendingDial { kind, tx, slot } = dial;
-        if tx.send(hub_side).is_err() {
+        if tx.send(Some(hub_side)).is_err() {
             console_log!(
                 "lazy: {} stream arrived after its dial gave up",
                 kind.as_str()
@@ -342,7 +360,11 @@ impl Lazy {
             return Err(DialError::Failed(format!("sending dial: {err}")));
         }
         let res = match select(rx, pin!(crate::sockets::sleep(STREAM_WAIT))).await {
-            Either::Left((Ok(stream), _)) => Ok(stream),
+            Either::Left((Ok(Some(stream)), _)) => Ok(stream),
+            Either::Left((Ok(None), _)) => Err(DialError::Busy(format!(
+                "auth refused the {} dial",
+                kind.as_str()
+            ))),
             Either::Left((Err(_), _)) => Err(DialError::Failed("dial cancelled".to_string())),
             Either::Right(_) => Err(DialError::Failed(format!(
                 "no {} stream within {STREAM_WAIT:?}",
@@ -356,6 +378,16 @@ impl Lazy {
             Date::now().as_millis().saturating_sub(started)
         );
         res
+    }
+
+    /// Fails the pending dial `id` at once, as refused. An id that is not
+    /// pending is ignored.
+    fn refuse(&self, id: &str) {
+        let Some(dial) = self.dials.borrow_mut().remove(id) else {
+            return;
+        };
+        console_log!("lazy: auth refused a {} dial", dial.kind.as_str());
+        let _ = dial.tx.send(None);
     }
 
     /// Returns true if a verified control socket is open.
@@ -406,6 +438,18 @@ impl Drop for DialGuard<'_> {
     fn drop(&mut self) {
         self.dials.borrow_mut().remove(&self.id);
     }
+}
+
+/// Returns the id in a control message "refuse <id>", or None when `text`
+/// is any other message. The id is 43 characters of unpadded base64url, as
+/// the hub makes them.
+fn parse_refuse(text: &str) -> Option<&str> {
+    let id = text.strip_prefix("refuse ")?;
+    let ok = id.len() == 43
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    ok.then_some(id)
 }
 
 /// Returns true if `a` is still in the challenge after its deadline, at
@@ -470,6 +514,19 @@ mod tests {
         });
         assert!(dials.borrow().is_empty());
         assert_eq!(open.get(), 0);
+    }
+
+    #[test]
+    fn parse_refuse_takes_one_id() {
+        let id = "a".repeat(42) + "_";
+        assert_eq!(parse_refuse(&format!("refuse {id}")), Some(id.as_str()));
+        assert_eq!(parse_refuse(&format!("refuse  {id}")), None);
+        assert_eq!(parse_refuse(&format!("refuse {id} ")), None);
+        assert_eq!(parse_refuse(&format!("refuse {}", &id[1..])), None);
+        assert_eq!(parse_refuse(&format!("refuse {}=", &id[1..])), None);
+        assert_eq!(parse_refuse(&format!("dial app {id}")), None);
+        assert_eq!(parse_refuse("refuse"), None);
+        assert_eq!(parse_refuse(""), None);
     }
 
     #[test]
