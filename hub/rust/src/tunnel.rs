@@ -58,31 +58,6 @@ static WS_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
 /// waited for room since the last heartbeat.
 static PIPE_WAIT_MAX_MS: AtomicU64 = AtomicU64::new(0);
 static PIPE_WAIT_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
-thread_local! {
-    /// The last stream close lines, for the temporary lazy debug route,
-    /// because logs after a request ends do not reach `wrangler tail`.
-    pub static CLOSE_LOG: std::cell::RefCell<std::collections::VecDeque<String>> =
-        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-}
-
-/// Keeps `line` in [`CLOSE_LOG`], at most 20 lines.
-pub fn keep_close_line(line: String) {
-    CLOSE_LOG.with(|l| {
-        let mut l = l.borrow_mut();
-        if l.len() >= 20 {
-            l.pop_front();
-        }
-        l.push_back(line);
-    });
-}
-
-/// How many bytes a lazy stream passes on between two acks. The sender's
-/// window is larger, so it can keep sending while an ack is on its way. The
-/// sender is auth's side, whose window is 1 MiB (`streamWindow` in
-/// lib/authcallout/flowconn.go in the fork). [`crate::wsevents`] closes a
-/// WebSocket that queues more than its `MAX_QUEUED_BYTES`, so that limit
-/// must stay at or above the window.
-pub const ACK_EVERY: u64 = 256 * 1024;
 /// How often the hub logs its counters.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
@@ -102,10 +77,18 @@ pub struct Hub {
     hub_auth: crate::authrpc::HubAuth,
     /// The privilege tokens that have added a passkey.
     used_tokens: crate::passkeys::UsedTokens,
+    mode: HubMode,
+}
+
+/// Which hub the Durable Object runs.
+enum HubMode {
+    /// The full hub, with agent tunnels and the auth pipe pool.
+    Full,
     /// The lazy hub, when `HUB_MODE` is `lazy`.
-    lazy: Option<Rc<crate::lazy::Lazy>>,
-    /// True when `HUB_MODE` is `lazy` but the lazy hub failed to install.
-    lazy_misconfigured: bool,
+    Lazy(Rc<crate::lazy::Lazy>),
+    /// `HUB_MODE` is `lazy`, but the lazy hub failed to install. Every
+    /// request gets a 503.
+    Misconfigured,
 }
 
 impl DurableObject for Hub {
@@ -121,18 +104,16 @@ impl DurableObject for Hub {
         }
         crate::lazy::clear();
         let used_tokens = crate::passkeys::UsedTokens::new(state.storage().sql());
-        // The lazy hub starts no timers, so that the object can hibernate.
-        let lazy_mode = crate::lazy::enabled(&env);
-        let lazy = if lazy_mode {
+        let mode = if !crate::lazy::enabled(&env) {
+            HubMode::Full
+        } else {
             match crate::lazy::Lazy::install(state, &env) {
-                Ok(l) => Some(l),
+                Ok(l) => HubMode::Lazy(l),
                 Err(err) => {
                     console_error!("lazy: the lazy hub is misconfigured, answering 503: {err}");
-                    None
+                    HubMode::Misconfigured
                 }
             }
-        } else {
-            None
         };
         let hub = Self {
             env,
@@ -143,11 +124,12 @@ impl DurableObject for Hub {
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
             used_tokens,
-            lazy_misconfigured: lazy_mode && lazy.is_none(),
-            lazy,
+            mode,
         };
-        // A misconfigured lazy hub must not run as the full hub either.
-        if lazy_mode {
+        // The lazy hub starts no timers, so that the object can hibernate. A
+        // misconfigured one starts none either, so that it does not run as
+        // the full hub.
+        if !matches!(hub.mode, HubMode::Full) {
             return hub;
         }
         wasm_bindgen_futures::spawn_local(heartbeat(
@@ -160,19 +142,30 @@ impl DurableObject for Hub {
         hub
     }
 
-    async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
-        match &self.lazy {
-            Some(lazy) => lazy.on_message(ws, message),
-            None => {
+    async fn websocket_message(
+        &self,
+        ws: WebSocket,
+        message: WebSocketIncomingMessage,
+    ) -> Result<()> {
+        match &self.mode {
+            HubMode::Lazy(lazy) => lazy.on_message(ws, message),
+            HubMode::Full | HubMode::Misconfigured => {
                 let _ = ws.close(Some(1011), Some("no handler"));
                 Ok(())
             }
         }
     }
 
-    async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _was_clean: bool) -> Result<()> {
+    async fn websocket_close(
+        &self,
+        ws: WebSocket,
+        code: usize,
+        reason: String,
+        _was_clean: bool,
+    ) -> Result<()> {
         console_log!("lazy: control socket closed, code {code} {reason:?}");
-        // Without the auto-reply flag the runtime needs the close echoed.
+        // The runtime completes the close handshake only when the object
+        // closes its end too.
         let _ = ws.close(Some(1000), Some("closed"));
         Ok(())
     }
@@ -183,19 +176,10 @@ impl DurableObject for Hub {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if self.lazy_misconfigured {
+        if let HubMode::Misconfigured = self.mode {
             return Response::error("lazy hub misconfigured", 503);
         }
         let host = req.url()?.host_str().unwrap_or_default().to_string();
-        // Temporary: the lazy hub's recent stream closes. Without the right
-        // token the route answers as if it did not exist.
-        if self.lazy.is_some() && req.path() == "/webapi/lazy-debug" {
-            if !self.debug_token_ok(&req)? {
-                return Response::error("not found", 404);
-            }
-            let lines = CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
-            return Response::ok(lines);
-        }
         // The login host is also the agents' `PUBLIC_ADDR` and auth's
         // `CALLOUT_HOST`, so the agent and auth reach these paths on it.
         // They are not browser requests.
@@ -217,7 +201,7 @@ impl DurableObject for Hub {
                 web::Host::Login => {}
             }
         }
-        if let Some(lazy) = &self.lazy {
+        if let HubMode::Lazy(lazy) = &self.mode {
             // The lazy hub has no reverse tunnel and no auth pipe pool.
             if req.path() != authpipe::PATH {
                 return Response::error("not found", 404);
@@ -333,22 +317,6 @@ impl DurableObject for Hub {
     }
 }
 
-impl Hub {
-    /// Returns true if `req` carries the `Sallyport-Debug` header and it
-    /// equals the `LAZY_DEBUG_TOKEN` secret. It returns false when the
-    /// secret is not set or is empty.
-    fn debug_token_ok(&self, req: &Request) -> Result<bool> {
-        let Ok(token) = self.env.secret("LAZY_DEBUG_TOKEN") else {
-            return Ok(false);
-        };
-        let token = token.to_string();
-        let Some(got) = req.headers().get("Sallyport-Debug")? else {
-            return Ok(false);
-        };
-        Ok(!token.is_empty() && web::ct_eq(token.as_bytes(), got.as_bytes()))
-    }
-}
-
 /// Logs the hub's counters every [`HEARTBEAT_EVERY`], so that `wrangler
 /// tail` shows whether the object is alive and what it holds.
 async fn heartbeat(
@@ -416,29 +384,46 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
             return;
         }
     };
-    pump(&ws, events, pipe).await;
+    pump(&ws, events, pipe, PumpMode::Tunnel).await;
+}
+
+/// How [`pump`] runs.
+#[derive(Clone, Copy, Debug)]
+pub enum PumpMode {
+    /// A tunnel or an auth pipe stream. The WebSocket closes when the pipe
+    /// closes.
+    Tunnel,
+    /// A lazy hub stream, which serves one connection. When the hub's end
+    /// stops writing, the pump keeps reading until the WebSocket closes,
+    /// because the far end may still be sending: an HTTP/1.1 client shuts
+    /// down its write side while the response arrives. The pump sends
+    /// `ack <n>` after every [`crate::lazy::ACK_EVERY`] bytes it passes on
+    /// to the pipe, and it closes the WebSocket when no bytes have crossed
+    /// in either direction for `idle`. With `window`, the far end acks what
+    /// it receives the same way, and the pump keeps at most
+    /// [`crate::lazy::UPLOAD_WINDOW`] bytes sent and not acked. An ack that
+    /// is not a number, goes backwards, or is above the bytes sent closes
+    /// the WebSocket with 1008.
+    Stream { idle: Duration, window: bool },
 }
 
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
-/// in-memory pipe until either side closes. When it returns, the pipe end
-/// is dropped, so the far end reads EOF.
-pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
-    pump_idle(ws, events, pipe, None).await
-}
-
-/// Runs [`pump`] for a stream that serves one connection, such as a lazy
-/// hub's stream. When the hub's end stops writing, it keeps reading until
-/// the WebSocket closes, because the far end may still be sending: an
-/// HTTP/1.1 client shuts down its write side while the response arrives.
-/// It closes the WebSocket when no bytes have crossed in either direction
-/// for `idle`.
-pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream, idle: Option<Duration>) {
-    let half_close = idle.is_some();
-    // A lazy stream has no flow control of its own, so the hub tells the
-    // sender how many bytes it has passed on, and the sender keeps at most
-    // a window of bytes unacknowledged. Without it, a fast sender fills the
-    // buffer between it and the hub, and the runtime drops the WebSocket.
-    let ack = half_close;
+/// in-memory pipe until either side closes, as `mode` says. When it
+/// returns, the pipe end is dropped, so the far end reads EOF.
+pub async fn pump(
+    ws: &WebSocket,
+    mut events: crate::wsevents::Events,
+    pipe: DuplexStream,
+    mode: PumpMode,
+) {
+    let (half_close, idle, window) = match mode {
+        PumpMode::Tunnel => (false, None, false),
+        PumpMode::Stream { idle, window } => (true, Some(idle), window),
+    };
+    // The bytes sent and the far end's latest ack of them, with `window`.
+    let sent = Cell::new(0u64);
+    let peer_acked = Cell::new(0u64);
+    let ack_arrived = tokio::sync::Notify::new();
     let delivered = Cell::new(0u64);
     let acked = Cell::new(0u64);
     let (mut rd, mut wr) = tokio::io::split(pipe);
@@ -460,6 +445,12 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
                     break;
                 }
                 Ok(n) => {
+                    while window
+                        && sent.get() + n as u64 - peer_acked.get() > crate::lazy::UPLOAD_WINDOW
+                    {
+                        ack_arrived.notified().await;
+                    }
+                    sent.set(sent.get() + n as u64);
                     if let Err(err) = ws.send_with_bytes(&buf[..n]) {
                         console_error!("tunnel: websocket send: {err}");
                         break;
@@ -482,7 +473,21 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {
                     let Some(bytes) = msg.bytes() else {
-                        continue;
+                        if !window {
+                            continue;
+                        }
+                        match msg.text().as_deref().and_then(parse_ack) {
+                            Some(n) if n >= peer_acked.get() && n <= sent.get() => {
+                                peer_acked.set(n);
+                                ack_arrived.notify_one();
+                                continue;
+                            }
+                            _ => {
+                                let _ = ws.close(Some(1008), Some("bad ack"));
+                                close_code = Some("1008, a bad ack".to_string());
+                                break;
+                            }
+                        }
                     };
                     in_msgs.set(in_msgs.get() + 1);
                     in_largest.set(in_largest.get().max(bytes.len()));
@@ -500,9 +505,13 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
                         console_error!("tunnel: pipe write: {err}");
                         break;
                     }
-                    if ack {
+                    // A lazy stream has no flow control of its own, so the
+                    // sender keeps at most a window unacknowledged. Without
+                    // it, a fast sender fills the buffer between it and the
+                    // hub, and the runtime drops the WebSocket.
+                    if half_close {
                         delivered.set(delivered.get() + bytes.len() as u64);
-                        if delivered.get() - acked.get() >= ACK_EVERY {
+                        if delivered.get() - acked.get() >= crate::lazy::ACK_EVERY {
                             acked.set(delivered.get());
                             let _ = ws.send_with_str(format!("ack {}", delivered.get()));
                         }
@@ -528,16 +537,21 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
         (close_code, queue_max, queue_wait_max)
     };
 
-    // A stream that waits in the auth pipe pool has nobody reading or
-    // writing its far end. When the WebSocket closes, only `inbound` ends,
-    // so waiting for both would never return.
     let idle_watch = async {
         let Some(idle) = idle else {
             return futures::future::pending::<()>().await;
         };
         loop {
+            // Polls, so a stream ends up to 5 s after `idle`.
             crate::sockets::sleep(Duration::from_secs(5)).await;
             if Date::now().as_millis().saturating_sub(last_any.get()) >= idle.as_millis() as u64 {
+                console_log!(
+                    "lazy: stream idle for {idle:?}, closing, {} bytes in ({} acked), {} bytes out ({} acked by the callout)",
+                    delivered.get(),
+                    acked.get(),
+                    sent.get(),
+                    peer_acked.get(),
+                );
                 let _ = ws.close(Some(1000), Some("idle"));
                 return;
             }
@@ -545,6 +559,9 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
     };
     let outbound = pin!(outbound);
     let inbound = pin!(inbound);
+    // A stream that waits in the auth pipe pool has nobody reading or
+    // writing its far end. When the WebSocket closes, only `inbound` ends,
+    // so waiting for both would never return.
     let main = async {
         match select(outbound, inbound).await {
             // A half-closing stream keeps reading until the WebSocket closes.
@@ -567,15 +584,6 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
     // Tunnel drops close with 1006. The counts show whether a drop follows a
     // burst of messages, and the waits whether the hub fell behind.
     let now = Date::now().as_millis();
-    keep_close_line(format!(
-        "{} close {}, after {} ms, in {} msgs, out {} msgs, last in {} ms before",
-        Date::now().to_string(),
-        close_code.clone().unwrap_or_else(|| "none".to_string()),
-        now.saturating_sub(started),
-        in_msgs.get(),
-        out_msgs.get(),
-        now.saturating_sub(last_in.get()),
-    ));
     console_log!(
         "tunnel: websocket closed, code {}, after {} s, in {} msgs largest {} bytes, out {} msgs, last in {} ms before, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} ms",
         close_code.unwrap_or_else(|| "none".to_string()),
@@ -586,6 +594,16 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
         now.saturating_sub(last_in.get()),
         pipe_wait_max.get(),
     );
+}
+
+/// Returns `n` from a message "ack <n>", where `n` is decimal digits only,
+/// or None when `text` is any other message.
+fn parse_ack(text: &str) -> Option<u64> {
+    let n = text.strip_prefix("ack ")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
 }
 
 /// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
@@ -851,6 +869,19 @@ mod tests {
         assert_eq!(block_on(&mut x2_rx), Ok(()));
         assert_eq!(agent_rx.try_recv(), Ok(None));
         assert_eq!(x3_rx.try_recv(), Ok(None));
+    }
+
+    #[test]
+    fn parse_ack_takes_a_decimal_count() {
+        assert_eq!(parse_ack("ack 0"), Some(0));
+        assert_eq!(parse_ack("ack 262144"), Some(262144));
+        assert_eq!(parse_ack("ack +1"), None);
+        assert_eq!(parse_ack("ack -1"), None);
+        assert_eq!(parse_ack("ack "), None);
+        assert_eq!(parse_ack("ack 1 "), None);
+        assert_eq!(parse_ack("ack 99999999999999999999"), None);
+        assert_eq!(parse_ack("ACK 1"), None);
+        assert_eq!(parse_ack(""), None);
     }
 
     #[test]

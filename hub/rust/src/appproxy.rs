@@ -1,8 +1,9 @@
 //! Forwards one browser HTTP request to a Teleport app service.
 //!
 //! The hub dials the app service through the agent tunnel with
-//! `crate::app::dial_app`, then runs hyper's HTTP/1.1 client over the TLS
-//! stream. The response streams back to the browser as it arrives, instead
+//! `crate::app::dial_app`, or through auth's on-demand callout with
+//! `crate::app::dial_app_lazy`, then runs hyper's HTTP/1.1 client over the
+//! TLS stream. The response streams back to the browser as it arrives, instead
 //! of buffering the whole body in memory.
 
 use std::cell::Cell;
@@ -42,14 +43,25 @@ const HOP_BY_HOP: &[&str] = &[
 /// before the request goes upstream.
 const SP_COOKIE_PREFIX: &str = "__Host-sp_";
 
-/// How long a response body may wait for the runtime to pull the next
-/// chunk before the hub closes the app service connection. When the
-/// browser goes away, the runtime stops pulling but does not always cancel
-/// the stream, and the connection and its channel would stay open.
+/// How long a response body may go without passing a chunk to the runtime
+/// before the hub closes the app service connection and ends the body with
+/// an error. The wait counts both a silent app and a runtime that does not
+/// pull. When the browser goes away, the runtime stops pulling but does not
+/// always cancel the stream, and the connection and its channel would stay
+/// open. This also ends an app response that sends nothing for that long,
+/// as the lazy hub's stream idle does.
 const STREAM_IDLE: Duration = Duration::from_secs(30);
 
+/// Where an app connection comes from: the agent's tunnel, or auth's
+/// on-demand callout in the lazy hub.
+pub enum AppDialer<'a> {
+    Tunnel(&'a AppTunnel),
+    Lazy(std::rc::Rc<crate::lazy::Lazy>),
+}
+
 /// Sends one HTTP request to the app service at `host` through the agent
-/// tunnel, and returns the app service's response.
+/// tunnel or auth's on-demand callout, and returns the app service's
+/// response.
 ///
 /// `tls` is the client identity to present, built with
 /// `crate::authrpc::client_tls`.
@@ -58,14 +70,8 @@ const STREAM_IDLE: Duration = Duration::from_secs(30);
 ///
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this logs the error and returns a 502 "app
-/// unavailable" response.
-/// Where an app connection comes from: the agent's tunnel, or auth's
-/// on-demand callout in the lazy hub.
-pub enum AppDialer<'a> {
-    Tunnel(&'a AppTunnel),
-    Lazy(std::rc::Rc<crate::lazy::Lazy>),
-}
-
+/// unavailable" response. When the lazy hub has no room for the dial, it
+/// returns a 503 "app service busy" response.
 pub async fn forward(
     tunnel: AppDialer<'_>,
     tls: Arc<rustls::ClientConfig>,
@@ -73,7 +79,21 @@ pub async fn forward(
     host: &str,
     mut req: Request,
 ) -> Result<Response> {
-    match forward_inner(tunnel, tls, cluster, host, &mut req).await {
+    let stream = match tunnel {
+        AppDialer::Tunnel(t) => dial_app(t, tls, cluster).await,
+        AppDialer::Lazy(l) => match crate::app::dial_app_lazy(&l, tls, cluster).await {
+            Err(crate::lazy::DialError::Busy(err)) => {
+                console_error!("appproxy: {err}");
+                return Response::error("app service busy", 503);
+            }
+            res => res.map_err(|e| e.to_string()),
+        },
+    };
+    let res = match stream {
+        Ok(stream) => forward_inner(stream, host, &mut req).await,
+        Err(err) => Err(err),
+    };
+    match res {
         Ok(resp) => Ok(resp),
         Err(err) => {
             console_error!("appproxy: {err}");
@@ -83,16 +103,10 @@ pub async fn forward(
 }
 
 async fn forward_inner(
-    tunnel: AppDialer<'_>,
-    tls: Arc<rustls::ClientConfig>,
-    cluster: &str,
+    stream: crate::app::AppStream,
     host: &str,
     req: &mut Request,
 ) -> std::result::Result<Response, String> {
-    let stream = match tunnel {
-        AppDialer::Tunnel(t) => dial_app(t, tls, cluster).await?,
-        AppDialer::Lazy(l) => crate::app::dial_app_lazy(&l, tls, cluster).await?,
-    };
     let (mut send, conn) = hyper::client::conn::http1::handshake(HyperIo::new(stream))
         .await
         .map_err(|e| format!("http1 handshake: {e}"))?;
@@ -103,16 +117,16 @@ async fn forward_inner(
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(Err(err)) = conn.await {
             console_log!("appproxy: connection ended: {err}");
-            crate::tunnel::keep_close_line(format!("appproxy: connection ended: {err:?}"));
         }
     });
 
+    let head = req.method() == Method::Head;
     let request = build_request(req, host)?;
     let response = send
         .send_request(request)
         .await
         .map_err(|e| format!("app request: {e}"))?;
-    build_response(response, abort)
+    build_response(response, abort, head)
 }
 
 /// Builds the request the hub sends upstream: `req`'s method and path, its
@@ -197,10 +211,12 @@ fn strip_sp_cookies(value: &str) -> Option<String> {
 /// Turns the app service's HTTP/1.1 response into a `worker::Response`,
 /// with the hop-by-hop headers dropped and the body streamed as it arrives.
 /// `conn` aborts the app service connection when the body is idle for
-/// [`STREAM_IDLE`].
+/// [`STREAM_IDLE`]. `head` is true for the response to a HEAD request, whose
+/// `Content-Length` counts no body.
 fn build_response(
     response: http::Response<hyper::body::Incoming>,
     conn: AbortHandle,
+    head: bool,
 ) -> std::result::Result<Response, String> {
     let (parts, incoming) = response.into_parts();
     if parts.status.is_server_error() {
@@ -242,8 +258,26 @@ fn build_response(
         let res = Response::empty().map_err(|e| format!("response: {e}"))?;
         return Ok(res.with_headers(headers).with_status(status));
     }
-    let mut body = Response::from_stream(body_stream(incoming, conn))
-        .map_err(|e| format!("response body: {e}"))?;
+    let want = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        .filter(|_| !head);
+    let stream = body_stream(incoming, conn, want);
+    let mut body = match want {
+        // The runtime ends a streamed body that errors with a clean last
+        // chunk, so a client cannot tell a cut chunked body from a whole one.
+        // A `FixedLengthStream` that ends short makes the runtime fail the
+        // response instead. The hub passes an encoded body through as it
+        // arrives, so `Content-Length` is the length of the bytes it sends.
+        Some(len) => {
+            let fixed: worker::worker_sys::FixedLengthStream =
+                FixedLengthStream::wrap(stream, len).into();
+            Response::from_body(ResponseBody::Stream(fixed.readable()))
+        }
+        None => Response::from_stream(stream),
+    }
+    .map_err(|e| format!("response body: {e}"))?;
     // The runtime compresses a body to match `Content-Encoding` by
     // default, so an app's gzipped body would be compressed twice.
     if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
@@ -253,37 +287,58 @@ fn build_response(
 }
 
 /// Turns a hyper `Incoming` body into the byte stream `Response::from_stream`
-/// wants, keeping only the data frames and skipping any trailers. When the
-/// runtime does not pull the next chunk for [`STREAM_IDLE`], it aborts
-/// `conn`.
+/// wants, keeping only the data frames and skipping any trailers. When no
+/// chunk has gone to the runtime for [`STREAM_IDLE`], it aborts `conn`. A
+/// body that ends at that abort, or before `want` bytes, the response's
+/// `Content-Length`, ends with an error, so that the browser does not take
+/// the part it got for the whole body.
 fn body_stream(
     incoming: hyper::body::Incoming,
     conn: AbortHandle,
+    want: Option<u64>,
 ) -> impl futures::Stream<Item = std::result::Result<Vec<u8>, Error>> + 'static {
-    // The time the stream last handed a chunk to the runtime, or None while
-    // the stream waits on the app service. Only the wait for a pull counts,
-    // not a slow app service. The clock starts before the first pull, so a
-    // body the runtime never pulls is aborted too.
-    let pulled: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(Some(Date::now().as_millis())));
+    // The time the stream last handed a chunk to the runtime. The clock
+    // starts before the first pull, so a body the runtime never pulls is
+    // aborted too.
+    let last = Rc::new(Cell::new(Date::now().as_millis()));
+    // True once the idle task has aborted `conn`.
+    let cut = Rc::new(Cell::new(false));
     // The stream holds `done`, so dropping the stream ends the idle task.
     let (done, done_rx) = oneshot::channel::<()>();
-    wasm_bindgen_futures::spawn_local(end_when_idle(pulled.clone(), done_rx, conn));
-    let state = (incoming, pulled, done);
-    futures::stream::unfold(state, |(mut incoming, pulled, done)| async move {
-        pulled.set(None);
+    wasm_bindgen_futures::spawn_local(end_when_idle(last.clone(), cut.clone(), done_rx, conn));
+    let state = BodyState {
+        incoming,
+        last,
+        cut,
+        got: 0,
+        _done: done,
+    };
+    // The state is None once the stream has sent its error.
+    futures::stream::unfold(Some(state), move |state| async move {
+        let mut st = state?;
         loop {
-            match incoming.frame().await {
-                None => return None,
+            match st.incoming.frame().await {
+                None => {
+                    let msg = if st.cut.get() {
+                        format!("no bytes for {STREAM_IDLE:?}")
+                    } else {
+                        match want {
+                            Some(w) if st.got < w => format!("ended after {} of {w} bytes", st.got),
+                            _ => return None,
+                        }
+                    };
+                    console_error!("appproxy: response body: {msg}");
+                    return Some((Err(Error::RustError(msg)), None));
+                }
                 Some(Err(err)) => {
                     console_error!("appproxy: response body: {err}");
-                    crate::tunnel::keep_close_line(format!("appproxy: response body: {err:?}"));
-                    let err = Err(Error::RustError(err.to_string()));
-                    return Some((err, (incoming, pulled, done)));
+                    return Some((Err(Error::RustError(err.to_string())), None));
                 }
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => {
-                        pulled.set(Some(Date::now().as_millis()));
-                        return Some((Ok(data.to_vec()), (incoming, pulled, done)));
+                        st.got += data.len() as u64;
+                        st.last.set(Date::now().as_millis());
+                        return Some((Ok(data.to_vec()), Some(st)));
                     }
                     // A trailers frame, which HTTP/1.1 responses rarely
                     // carry. Keep reading for the real end of the body.
@@ -294,10 +349,22 @@ fn body_stream(
     })
 }
 
-/// Aborts `conn` once `pulled` shows no pull for [`STREAM_IDLE`]. It returns
-/// when `done` resolves, which is when the body stream is dropped.
+/// The state of a [`body_stream`].
+struct BodyState {
+    incoming: hyper::body::Incoming,
+    last: Rc<Cell<u64>>,
+    cut: Rc<Cell<bool>>,
+    /// The body bytes passed on.
+    got: u64,
+    /// Ends [`end_when_idle`] when the stream is dropped.
+    _done: oneshot::Sender<()>,
+}
+
+/// Aborts `conn` and sets `cut` once `last` is [`STREAM_IDLE`] old. It
+/// returns when `done` resolves, which is when the body stream is dropped.
 async fn end_when_idle(
-    pulled: Rc<Cell<Option<u64>>>,
+    last: Rc<Cell<u64>>,
+    cut: Rc<Cell<bool>>,
     mut done: oneshot::Receiver<()>,
     conn: AbortHandle,
 ) {
@@ -308,16 +375,14 @@ async fn end_when_idle(
         if let futures::future::Either::Right(_) = futures::future::select(sleep, &mut done).await {
             return;
         }
-        wait = STREAM_IDLE;
-        if let Some(at) = pulled.get() {
-            let waited = Date::now().as_millis().saturating_sub(at);
-            if waited >= idle_ms {
-                console_log!("appproxy: response body not read for {STREAM_IDLE:?}, closing");
-                conn.abort();
-                return;
-            }
-            wait = Duration::from_millis(idle_ms - waited);
+        let waited = Date::now().as_millis().saturating_sub(last.get());
+        if waited >= idle_ms {
+            console_log!("appproxy: response body idle for {STREAM_IDLE:?}, closing");
+            cut.set(true);
+            conn.abort();
+            return;
         }
+        wait = Duration::from_millis(idle_ms - waited);
     }
 }
 

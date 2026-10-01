@@ -1,8 +1,11 @@
-//! The hub as a TLS client to the app service, over the agent's tunnel.
+//! The hub as a TLS client to the app service, over the agent's tunnel or
+//! over a stream from auth's on-demand callout.
 //!
-//! The hub opens `teleport-transport` into the agent with an `@local-node`
-//! dial request, then runs TLS with the user's app session certificate.
-//! The app service picks the app and the session from that certificate.
+//! Over the tunnel, the hub opens `teleport-transport` into the agent with
+//! an `@local-node` dial request. The lazy hub asks the callout for a
+//! stream instead. Then the hub runs TLS with the user's app session
+//! certificate. The app service picks the app and the session from that
+//! certificate.
 
 use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,8 +34,9 @@ pub type TunnelSlot = Arc<Mutex<Option<AppTunnel>>>;
 /// russh can queue up to 8 MiB on each for a slow reader.
 pub const MAX_FORWARDS: usize = 16;
 
-/// A TLS connection to the app service, running over one channel of the
-/// agent tunnel. It counts toward [`MAX_FORWARDS`] until it is dropped.
+/// A TLS connection to the app service, over one channel of the agent
+/// tunnel or over a stream from auth's on-demand callout. A tunnel
+/// connection counts toward [`MAX_FORWARDS`] until it is dropped.
 pub(crate) struct AppStream {
     tls: AppTls,
     /// The stream's place in the tunnel's count. The lazy hub has no tunnel.
@@ -44,31 +48,6 @@ pub(crate) struct AppStream {
 enum AppTls {
     Tunnel(TlsStream),
     Lazy(tokio_rustls::client::TlsStream<tokio::io::DuplexStream>),
-}
-
-/// Asks auth's on-demand callout for an app stream and runs TLS toward the
-/// app service over it, as [`dial_app`] does over a tunnel channel.
-pub(crate) async fn dial_app_lazy(
-    lazy: &crate::lazy::Lazy,
-    tls: Arc<rustls::ClientConfig>,
-    cluster: &str,
-) -> std::result::Result<AppStream, String> {
-    let stream = lazy.dial(crate::lazy::Kind::App).await?;
-    let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
-    let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
-    let tls = match select(
-        pin!(tokio_rustls::TlsConnector::from(tls).connect(name, stream)),
-        pin!(crate::sockets::sleep(DIAL_DEADLINE)),
-    )
-    .await
-    {
-        Either::Left((res, _)) => res.map_err(|e| format!("tls connect: {e}"))?,
-        Either::Right(_) => return Err(format!("tls connect: no answer within {DIAL_DEADLINE:?}")),
-    };
-    Ok(AppStream {
-        tls: AppTls::Lazy(tls),
-        _forward: None,
-    })
 }
 
 /// One stream's place in an app tunnel's count of open streams.
@@ -136,10 +115,55 @@ async fn dial_inner(
         return Err("dial refused by agent".into());
     }
 
+    // The stream closes the channel when it is dropped.
+    connect_tls(tls, cluster, guard.into_inner().into_stream()).await
+}
+
+/// Asks auth's on-demand callout for an app stream and runs TLS toward the
+/// app service over it. The wait for the stream has
+/// [`crate::lazy::STREAM_WAIT`], and TLS then has [`DIAL_DEADLINE`], so the
+/// dial takes at most their sum, 20 s. The error is
+/// [`crate::lazy::DialError::Busy`] when the hub had no room for the dial.
+pub(crate) async fn dial_app_lazy(
+    lazy: &crate::lazy::Lazy,
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+) -> std::result::Result<AppStream, crate::lazy::DialError> {
+    use crate::lazy::DialError;
+    let stream = lazy
+        .dial(crate::lazy::Kind::App, crate::lazy::Caller::SignedIn)
+        .await?;
+    let tls = match select(
+        pin!(connect_tls(tls, cluster, stream)),
+        pin!(crate::sockets::sleep(DIAL_DEADLINE)),
+    )
+    .await
+    {
+        Either::Left((res, _)) => res.map_err(DialError::Failed)?,
+        Either::Right(_) => {
+            return Err(DialError::Failed(format!(
+                "tls connect: no answer within {DIAL_DEADLINE:?}"
+            )))
+        }
+    };
+    Ok(AppStream {
+        tls: AppTls::Lazy(tls),
+        _forward: None,
+    })
+}
+
+/// Runs TLS toward the app service over `stream`, with the SNI the app
+/// service expects for `cluster`.
+async fn connect_tls<S>(
+    tls: Arc<rustls::ClientConfig>,
+    cluster: &str,
+    stream: S,
+) -> std::result::Result<tokio_rustls::client::TlsStream<S>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let sni = format!("{}.{API_DOMAIN}", hex(cluster.as_bytes()));
     let name = ServerName::try_from(sni.clone()).map_err(|e| format!("sni {sni:?}: {e}"))?;
-    // The stream closes the channel when it is dropped.
-    let stream = guard.into_inner().into_stream();
     tokio_rustls::TlsConnector::from(tls)
         .connect(name, stream)
         .await
