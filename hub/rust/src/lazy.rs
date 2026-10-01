@@ -278,6 +278,11 @@ impl Lazy {
     /// never reaches the hub.
     pub fn on_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
         self.prune();
+        // A socket that the hub has closed, for example in `prune` or for a
+        // newer socket, must not verify or refuse.
+        if !is_open(&ws) {
+            return Ok(());
+        }
         let Some(mut a) = ws.deserialize_attachment::<Attachment>()? else {
             let _ = ws.close(Some(1008), Some("unknown socket"));
             return Ok(());
@@ -310,11 +315,17 @@ impl Lazy {
             let _ = ws.close(Some(1008), Some("challenge"));
             return Ok(());
         }
-        // A newly verified control socket replaces the older ones.
+        // The verified control socket that the hub accepted last replaces
+        // the others, also when an older one passes the challenge after it.
         for (other, old) in self.controls() {
-            if other.verified {
-                let _ = old.close(Some(1000), Some("replaced"));
+            if !other.verified {
+                continue;
             }
+            if other.accepted_ms > a.accepted_ms {
+                let _ = ws.close(Some(1000), Some("replaced"));
+                return Ok(());
+            }
+            let _ = old.close(Some(1000), Some("replaced"));
         }
         a.verified = true;
         a.nonce.clear();
@@ -470,9 +481,7 @@ impl Lazy {
         self.state
             .get_websockets_with_tag(CONTROL)
             .into_iter()
-            .filter(|ws| {
-                AsRef::<web_sys::WebSocket>::as_ref(ws).ready_state() == web_sys::WebSocket::OPEN
-            })
+            .filter(is_open)
             .filter_map(|ws| match ws.deserialize_attachment::<Attachment>() {
                 Ok(Some(a)) => Some((a, ws)),
                 _ => None,
@@ -490,6 +499,11 @@ impl Lazy {
             }
         }
     }
+}
+
+/// Returns true if `ws` is open, and not closing or closed.
+fn is_open(ws: &WebSocket) -> bool {
+    AsRef::<web_sys::WebSocket>::as_ref(ws).ready_state() == web_sys::WebSocket::OPEN
 }
 
 /// Removes a dial's id from the pending dials when dropped.
