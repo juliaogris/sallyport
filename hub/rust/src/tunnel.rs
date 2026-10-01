@@ -201,23 +201,30 @@ impl DurableObject for Hub {
                 web::Host::Login => {}
             }
         }
+        let mode = || -> Result<Option<String>> {
+            Ok(req
+                .url()?
+                .query_pairs()
+                .find(|(k, _)| k == "mode")
+                .map(|(_, v)| v.to_string()))
+        };
         if let HubMode::Lazy(lazy) = &self.mode {
             // The lazy hub has no reverse tunnel and no auth pipe pool.
             if req.path() != authpipe::PATH {
                 return Response::error("not found", 404);
             }
-            let mode = req
-                .url()?
-                .query_pairs()
-                .find(|(k, _)| k == "mode")
-                .map(|(_, v)| v.to_string());
-            return match mode.as_deref() {
+            return match mode()?.as_deref() {
                 Some("control") => lazy.accept_control(&req),
                 Some("stream") => lazy.accept_stream(&req),
                 _ => Response::error("not found", 404),
             };
         }
         if req.path() == authpipe::PATH {
+            // A control socket or a stream is for the lazy hub, from a
+            // callout in on-demand mode.
+            if matches!(mode()?.as_deref(), Some("control" | "stream")) {
+                return Response::error("not found", 404);
+            }
             return authpipe::accept(&req, &self.env, &self.auth_pipe);
         }
         let protocols = req

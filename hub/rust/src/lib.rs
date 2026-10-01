@@ -59,7 +59,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             if kind.is_none() && web::serves_hosts(&env) {
                 return Response::error("not found", 404);
             }
-            if lazy::enabled(&env) && !lazy_upgrade(&req)? {
+            if lazy::enabled(&env) != lazy_upgrade(&req)? {
                 return Response::error("not found", 404);
             }
             hub(&env)?.fetch_with_request(req).await
@@ -76,8 +76,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
 /// Returns true if `req`, an upgrade on a peer path, is one the lazy hub
 /// takes: a control socket or a stream on `/tunnel/auth`. The lazy hub has
-/// no reverse tunnel and no auth pipe pool, and a peer that dials one
-/// anyway retries, so it must not wake the Durable Object each time.
+/// no reverse tunnel and no auth pipe pool, and the pool hub has no control
+/// socket. A peer that dials the wrong hub retries, so it must not wake the
+/// Durable Object each time.
 fn lazy_upgrade(req: &Request) -> Result<bool> {
     if req.path() != authpipe::PATH {
         return Ok(false);
