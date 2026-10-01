@@ -77,6 +77,8 @@ pub struct Hub {
     hub_auth: crate::authrpc::HubAuth,
     /// The privilege tokens that have added a passkey.
     used_tokens: crate::passkeys::UsedTokens,
+    /// The lazy hub, when `HUB_MODE` is `lazy`.
+    lazy: Option<Rc<crate::lazy::Lazy>>,
 }
 
 impl DurableObject for Hub {
@@ -90,6 +92,19 @@ impl DurableObject for Hub {
         if let Some(msg) = crate::sockets::take_last_panic() {
             console_error!("hub: the previous instance panicked: {msg}");
         }
+        let used_tokens = crate::passkeys::UsedTokens::new(state.storage().sql());
+        // The lazy hub starts no timers, so that the object can hibernate.
+        let lazy = if crate::lazy::enabled(&env) {
+            match crate::lazy::Lazy::install(state, &env) {
+                Ok(l) => Some(l),
+                Err(err) => {
+                    console_error!("lazy: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let hub = Self {
             env,
             connections: Rc::new(Cell::new(0)),
@@ -98,8 +113,12 @@ impl DurableObject for Hub {
             app_tunnel: Default::default(),
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
-            used_tokens: crate::passkeys::UsedTokens::new(state.storage().sql()),
+            used_tokens,
+            lazy,
         };
+        if hub.lazy.is_some() {
+            return hub;
+        }
         wasm_bindgen_futures::spawn_local(heartbeat(
             hub.connections.clone(),
             hub.unauthenticated.clone(),
@@ -108,6 +127,28 @@ impl DurableObject for Hub {
             hub.auth_pipe.clone(),
         ));
         hub
+    }
+
+    async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+        match &self.lazy {
+            Some(lazy) => lazy.on_message(ws, message),
+            None => {
+                let _ = ws.close(Some(1011), Some("no handler"));
+                Ok(())
+            }
+        }
+    }
+
+    async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _was_clean: bool) -> Result<()> {
+        console_log!("lazy: control socket closed, code {code} {reason:?}");
+        // Without the auto-reply flag the runtime needs the close echoed.
+        let _ = ws.close(Some(1000), Some("closed"));
+        Ok(())
+    }
+
+    async fn websocket_error(&self, _ws: WebSocket, error: Error) -> Result<()> {
+        console_log!("lazy: control socket error: {error}");
+        Ok(())
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -132,6 +173,22 @@ impl DurableObject for Hub {
                 web::Host::Login if !peer_path => return web::login_host_request(req, &cx).await,
                 web::Host::Login => {}
             }
+        }
+        if let Some(lazy) = &self.lazy {
+            // The lazy hub has no reverse tunnel and no auth pipe pool.
+            if req.path() != authpipe::PATH {
+                return Response::error("not found", 404);
+            }
+            let mode = req
+                .url()?
+                .query_pairs()
+                .find(|(k, _)| k == "mode")
+                .map(|(_, v)| v.to_string());
+            return match mode.as_deref() {
+                Some("control") => lazy.accept_control(&req),
+                Some("stream") => lazy.accept_stream(&req),
+                _ => Response::error("not found", 404),
+            };
         }
         if req.path() == authpipe::PATH {
             return authpipe::accept(&req, &self.env, &self.auth_pipe);
@@ -306,9 +363,16 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
 /// in-memory pipe until either side closes. When it returns, the pipe end
 /// is dropped, so the far end reads EOF.
-pub async fn pump(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream) {
+pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
+    pump_idle(ws, events, pipe, None).await
+}
+
+/// Runs [`pump`], and closes the WebSocket when no bytes have crossed in
+/// either direction for `idle`.
+pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream, idle: Option<Duration>) {
     let (mut rd, mut wr) = tokio::io::split(pipe);
     let started = Date::now().as_millis();
+    let last_any = Cell::new(started);
     let out_msgs = Cell::new(0u64);
     let in_msgs = Cell::new(0u64);
     let in_largest = Cell::new(0usize);
@@ -330,6 +394,7 @@ pub async fn pump(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: Dup
                         break;
                     }
                     out_msgs.set(out_msgs.get() + 1);
+                    last_any.set(Date::now().as_millis());
                     WS_OUT_MSGS.fetch_add(1, Ordering::Relaxed);
                     WS_OUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
                 }
@@ -352,6 +417,7 @@ pub async fn pump(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: Dup
                     WS_IN_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     let before = Date::now().as_millis();
                     last_in.set(before);
+                    last_any.set(before);
                     let written = wr.write_all(&bytes).await;
                     let wait = Date::now().as_millis().saturating_sub(before);
                     pipe_wait_max.set(pipe_wait_max.get().max(wait));
@@ -385,10 +451,25 @@ pub async fn pump(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: Dup
     // A stream that waits in the auth pipe pool has nobody reading or
     // writing its far end. When the WebSocket closes, only `inbound` ends,
     // so waiting for both would never return.
-    let (close_code, queue_max, queue_wait_max) = match select(pin!(outbound), pin!(inbound)).await
-    {
-        Either::Left(((), _)) => (Some("none, the pipe closed first".to_string()), 0, 0),
-        Either::Right((stats, _)) => stats,
+    let idle_watch = async {
+        let Some(idle) = idle else {
+            return futures::future::pending::<()>().await;
+        };
+        loop {
+            crate::sockets::sleep(Duration::from_secs(5)).await;
+            if Date::now().as_millis().saturating_sub(last_any.get()) >= idle.as_millis() as u64 {
+                let _ = ws.close(Some(1000), Some("idle"));
+                return;
+            }
+        }
+    };
+    let outbound = pin!(outbound);
+    let inbound = pin!(inbound);
+    let main = select(outbound, inbound);
+    let (close_code, queue_max, queue_wait_max) = match select(main, pin!(idle_watch)).await {
+        Either::Left((Either::Left(((), _)), _)) => (Some("none, the pipe closed first".to_string()), 0, 0),
+        Either::Left((Either::Right((stats, _)), _)) => stats,
+        Either::Right(_) => (Some(format!("idle for {idle:?}")), 0, 0),
     };
     // Tunnel drops close with 1006. The counts show whether a drop follows a
     // burst of messages, and the waits whether the hub fell behind.

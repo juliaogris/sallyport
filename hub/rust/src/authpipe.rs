@@ -101,6 +101,10 @@ impl Pool {
 
     /// Takes the oldest open stream, waiting up to [`TAKE_WAIT`] for one.
     pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
+        // The lazy hub asks auth's callout for a stream instead.
+        if let Some(lazy) = crate::lazy::get() {
+            return lazy.dial(crate::lazy::Kind::Auth).await;
+        }
         self.take_until(crate::sockets::sleep(TAKE_WAIT))
             .await
             .ok_or_else(|| format!("no auth pipe stream within {TAKE_WAIT:?}"))
@@ -257,7 +261,7 @@ async fn serve(
 /// Checks auth's reply to the challenge `nonce`: auth's own nonce and an
 /// Ed25519 signature, by `key`, over [`DOMAIN`], `host`, `nonce` and auth's
 /// nonce. The error says which part is wrong.
-fn verify_reply(
+pub(crate) fn verify_reply(
     key: &[u8],
     host: &str,
     nonce: &[u8; NONCE],

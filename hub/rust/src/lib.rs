@@ -7,6 +7,7 @@ mod app;
 mod appproxy;
 mod authpipe;
 mod authrpc;
+mod lazy;
 mod passkeys;
 mod ping;
 mod sockets;
