@@ -383,14 +383,14 @@ func useToken(id string) {
 // auth's message as the body. These are the errors for a used name, a too
 // long name, an unknown device and a bad or stale passkey answer, and auth
 // writes their messages for the user. ResourceExhausted becomes 429, as on
-// the login routes of the Rust hub. Every other error, including a
-// transport error, is logged and answered with 502 "request failed".
+// the login routes. Every other error, including a transport error, is
+// logged and answered with 502 "request failed".
 func authError(err error) *response {
+	if rateLimited(err) {
+		return passkeyError(rateLimitedMsg, 429)
+	}
 	var ge *grpcError
 	if errors.As(err, &ge) {
-		if ge.status == "8" {
-			return passkeyError("too many requests, try again in a minute", 429)
-		}
 		if status, ok := clientStatus[ge.status]; ok {
 			return passkeyError(cmp.Or(ge.message, "request refused"), status)
 		}

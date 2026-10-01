@@ -79,15 +79,14 @@ func Handler(dir string) http.Handler {
 			w.WriteHeader(code)
 		})
 	}
-	// A 101 to a request without Upgrade, which no hub can forward.
+	// A 101 to a request without Upgrade, which no hub can forward. The
+	// handler sets the status instead of hijacking, because Hijack waits
+	// for the server's background read to end, and the agent's chanConn
+	// has no read deadline to end it.
 	mux.HandleFunc("/t/status/101", func(w http.ResponseWriter, r *http.Request) {
-		conn, buf, err := http.NewResponseController(w).Hijack()
-		if err != nil {
-			return
-		}
-		buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-		buf.Flush()
-		conn.Close()
+		w.Header().Set("Upgrade", "websocket")
+		w.Header().Set("Connection", "Upgrade")
+		w.WriteHeader(http.StatusSwitchingProtocols)
 	})
 	mux.HandleFunc("/t/echo", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

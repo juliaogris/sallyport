@@ -57,6 +57,17 @@ func (e *grpcError) Error() string {
 	return fmt.Sprintf("%s: http %d, grpc-status %q: %s", e.path, e.httpStatus, e.status, e.message)
 }
 
+// rateLimitedMsg is the body of the 429 for a call that auth refused with
+// ResourceExhausted, the same as the Rust hub's.
+const rateLimitedMsg = "too many requests, try again in a minute"
+
+// rateLimited returns true when auth answered the call in err with gRPC
+// status ResourceExhausted, which it does when its rate limit is reached.
+func rateLimited(err error) bool {
+	var ge *grpcError
+	return errors.As(err, &ge) && ge.status == "8"
+}
+
 // authTLS returns the TLS client config toward auth with the given client
 // certificate.
 func (h *hub) authTLS(cert tls.Certificate, alpn ...string) *tls.Config {

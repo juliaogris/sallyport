@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -34,8 +35,8 @@ const apiDomain = "teleport.cluster.local"
 const spCookiePrefix = "__Host-sp_"
 
 // forward sends req to the app service at host through the tunnel, as the
-// user with the given certificate. A dial, TLS or HTTP failure returns a
-// 502 with the error.
+// user with the given certificate. A dial, TLS or HTTP failure, or a 101
+// from the app, returns a 502 with the error.
 func (h *hub) forward(t *appTunnel, cert tls.Certificate, host string, req *request) *response {
 	res, err := h.forwardInner(t, cert, host, req)
 	if err != nil {
@@ -85,6 +86,11 @@ func (h *hub) forwardInner(t *appTunnel, cert tls.Certificate, host string, req 
 	if err != nil {
 		cc.Close()
 		return nil, fmt.Errorf("app request: %w", err)
+	}
+	// A 101 cannot be forwarded. The hub sends no Upgrade header upstream.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		closeBoth{resp.Body, cc}.Close()
+		return nil, errors.New("app answered 101 Switching Protocols")
 	}
 	return buildResponse(resp, cc), nil
 }
@@ -171,7 +177,7 @@ func buildResponse(resp *http.Response, cc *http.ClientConn) *response {
 	}
 	// The runtime refuses a body on these statuses.
 	switch resp.StatusCode {
-	case 101, 204, 205, 304:
+	case 204, 205, 304:
 		body.Close()
 		return res
 	}
