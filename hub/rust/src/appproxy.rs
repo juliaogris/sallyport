@@ -263,8 +263,21 @@ fn build_response(
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
         .filter(|_| !head);
-    let mut body = Response::from_stream(body_stream(incoming, conn, want))
-        .map_err(|e| format!("response body: {e}"))?;
+    let stream = body_stream(incoming, conn, want);
+    let mut body = match want {
+        // The runtime ends a streamed body that errors with a clean last
+        // chunk, so a client cannot tell a cut chunked body from a whole one.
+        // A `FixedLengthStream` that ends short makes the runtime fail the
+        // response instead. The hub passes an encoded body through as it
+        // arrives, so `Content-Length` is the length of the bytes it sends.
+        Some(len) => {
+            let fixed: worker::worker_sys::FixedLengthStream =
+                FixedLengthStream::wrap(stream, len).into();
+            Response::from_body(ResponseBody::Stream(fixed.readable()))
+        }
+        None => Response::from_stream(stream),
+    }
+    .map_err(|e| format!("response body: {e}"))?;
     // The runtime compresses a body to match `Content-Encoding` by
     // default, so an app's gzipped body would be compressed twice.
     if parts.headers.contains_key(http::header::CONTENT_ENCODING) {
