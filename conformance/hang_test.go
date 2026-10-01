@@ -2,7 +2,6 @@ package conformance
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -118,12 +117,12 @@ func TestLazyDuplicateStream(t *testing.T) {
 	}
 }
 
-var liveEdge = flag.Bool("live-edge", false, "the hub runs behind Cloudflare's edge, not wrangler dev")
-
 // TestAppStalledBody checks that a response body the app stops sending
-// ends within 60 s, in both hub modes, so the request does not hang, and
-// that it ends with an error, so the browser does not take the part it got
-// for the whole body.
+// ends within 60 s, so the request does not hang. With a Content-Length,
+// the body must end with an error, so the browser does not take the part
+// it got for the whole body. A chunked body is checked only for the end,
+// because the Workers runtime ends an errored chunked body cleanly, with
+// the final 0-chunk, both under wrangler dev and on Cloudflare's edge.
 func TestAppStalledBody(t *testing.T) {
 	for _, mode := range []string{"tunnel", "lazy"} {
 		t.Run(mode, func(t *testing.T) {
@@ -131,28 +130,38 @@ func TestAppStalledBody(t *testing.T) {
 				t.Skip("known gap: in tunnel mode a stalled body never ends on either hub; no cluster runs tunnel mode and no fix is planned")
 			}
 			s := newLazyStack(t)
-			cookies := s.appCookies(t, "bench")
-			// 4 KiB, then nothing for over an hour.
-			req, _ := http.NewRequest("GET", "https://"+appHost("bench")+"/t/slow?n=1048576&bps=1", nil)
-			for _, c := range cookies {
-				req.AddCookie(c)
-			}
-			cl := s.hub.Client()
-			cl.Timeout = 70 * time.Second
-			start := time.Now()
-			resp, err := cl.Do(req)
-			require.NoError(t, err)
-			n, err := io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			took := time.Since(start)
-			t.Logf("status %d, %d bytes, ended after %v: %v", resp.StatusCode, n, took.Round(time.Second), err)
-			require.Less(t, took, 60*time.Second, "the stalled body did not end")
-			// A body cut short must not look complete to the browser, but
-			// wrangler dev ends a chunked response cleanly even when the
-			// Worker's body stream errors, so this runs only against a live
-			// hub.
-			if *liveEdge {
-				require.Error(t, err, "the body ended cleanly after %d of 1048576 bytes", n)
+			for _, c := range []struct {
+				name   string
+				length bool
+			}{
+				{"chunked", false},
+				{"content-length", true},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					cookies := s.appCookies(t, "bench")
+					// 4 KiB, then nothing for over an hour.
+					path := "/t/slow?n=1048576&bps=1"
+					if c.length {
+						path += "&len=1"
+					}
+					req, _ := http.NewRequest("GET", "https://"+appHost("bench")+path, nil)
+					for _, ck := range cookies {
+						req.AddCookie(ck)
+					}
+					cl := s.hub.Client()
+					cl.Timeout = 70 * time.Second
+					start := time.Now()
+					resp, err := cl.Do(req)
+					require.NoError(t, err)
+					n, err := io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					took := time.Since(start)
+					t.Logf("status %d, %d bytes, ended after %v: %v", resp.StatusCode, n, took.Round(time.Second), err)
+					require.Less(t, took, 60*time.Second, "the stalled body did not end")
+					if c.length {
+						require.Error(t, err, "the body ended cleanly after %d of 1048576 bytes", n)
+					}
+				})
 			}
 		})
 	}

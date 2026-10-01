@@ -57,10 +57,14 @@ func Handler(dir string) http.Handler {
 		}
 		writePattern(w, n, 0, 0)
 	})
-	// /t/slow?n=N&bps=B sends N bytes at B bytes per second.
+	// /t/slow?n=N&bps=B sends N bytes at B bytes per second. With len=1 it
+	// sets Content-Length.
 	mux.HandleFunc("/t/slow", func(w http.ResponseWriter, r *http.Request) {
 		n, bps := intParam(r, "n", 64<<10), intParam(r, "bps", 16<<10)
 		w.Header().Set("Content-Type", "application/octet-stream")
+		if r.URL.Query().Get("len") == "1" {
+			w.Header().Set("Content-Length", strconv.Itoa(n))
+		}
 		writePattern(w, n, bps, 4<<10)
 	})
 	mux.HandleFunc("/t/gzip", func(w http.ResponseWriter, r *http.Request) {
