@@ -392,8 +392,12 @@ pub enum PumpMode {
     /// down its write side while the response arrives. The pump sends
     /// `ack <n>` after every [`crate::lazy::ACK_EVERY`] bytes it passes on
     /// to the pipe, and it closes the WebSocket when no bytes have crossed
-    /// in either direction for `idle`.
-    Stream { idle: Duration },
+    /// in either direction for `idle`. With `window`, the far end acks what
+    /// it receives the same way, and the pump keeps at most
+    /// [`crate::lazy::UPLOAD_WINDOW`] bytes sent and not acked. An ack that
+    /// is not a number, goes backwards, or is above the bytes sent closes
+    /// the WebSocket with 1008.
+    Stream { idle: Duration, window: bool },
 }
 
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
@@ -405,10 +409,14 @@ pub async fn pump(
     pipe: DuplexStream,
     mode: PumpMode,
 ) {
-    let (half_close, idle) = match mode {
-        PumpMode::Tunnel => (false, None),
-        PumpMode::Stream { idle } => (true, Some(idle)),
+    let (half_close, idle, window) = match mode {
+        PumpMode::Tunnel => (false, None, false),
+        PumpMode::Stream { idle, window } => (true, Some(idle), window),
     };
+    // The bytes sent and the far end's latest ack of them, with `window`.
+    let sent = Cell::new(0u64);
+    let peer_acked = Cell::new(0u64);
+    let ack_arrived = tokio::sync::Notify::new();
     let delivered = Cell::new(0u64);
     let acked = Cell::new(0u64);
     let (mut rd, mut wr) = tokio::io::split(pipe);
@@ -430,6 +438,12 @@ pub async fn pump(
                     break;
                 }
                 Ok(n) => {
+                    while window
+                        && sent.get() + n as u64 - peer_acked.get() > crate::lazy::UPLOAD_WINDOW
+                    {
+                        ack_arrived.notified().await;
+                    }
+                    sent.set(sent.get() + n as u64);
                     if let Err(err) = ws.send_with_bytes(&buf[..n]) {
                         console_error!("tunnel: websocket send: {err}");
                         break;
@@ -452,7 +466,21 @@ pub async fn pump(
             match event {
                 Ok(WebsocketEvent::Message(msg)) => {
                     let Some(bytes) = msg.bytes() else {
-                        continue;
+                        if !window {
+                            continue;
+                        }
+                        match msg.text().as_deref().and_then(parse_ack) {
+                            Some(n) if n >= peer_acked.get() && n <= sent.get() => {
+                                peer_acked.set(n);
+                                ack_arrived.notify_one();
+                                continue;
+                            }
+                            _ => {
+                                let _ = ws.close(Some(1008), Some("bad ack"));
+                                close_code = Some("1008, a bad ack".to_string());
+                                break;
+                            }
+                        }
                     };
                     in_msgs.set(in_msgs.get() + 1);
                     in_largest.set(in_largest.get().max(bytes.len()));
@@ -552,6 +580,16 @@ pub async fn pump(
         now.saturating_sub(last_in.get()),
         pipe_wait_max.get(),
     );
+}
+
+/// Returns `n` from a message "ack <n>", where `n` is decimal digits only,
+/// or None when `text` is any other message.
+fn parse_ack(text: &str) -> Option<u64> {
+    let n = text.strip_prefix("ack ")?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
 }
 
 /// Runs TLS and then the reverse tunnel SSH server on one end of the pipe.
@@ -817,6 +855,19 @@ mod tests {
         assert_eq!(block_on(&mut x2_rx), Ok(()));
         assert_eq!(agent_rx.try_recv(), Ok(None));
         assert_eq!(x3_rx.try_recv(), Ok(None));
+    }
+
+    #[test]
+    fn parse_ack_takes_a_decimal_count() {
+        assert_eq!(parse_ack("ack 0"), Some(0));
+        assert_eq!(parse_ack("ack 262144"), Some(262144));
+        assert_eq!(parse_ack("ack +1"), None);
+        assert_eq!(parse_ack("ack -1"), None);
+        assert_eq!(parse_ack("ack "), None);
+        assert_eq!(parse_ack("ack 1 "), None);
+        assert_eq!(parse_ack("ack 99999999999999999999"), None);
+        assert_eq!(parse_ack("ACK 1"), None);
+        assert_eq!(parse_ack(""), None);
     }
 
     #[test]

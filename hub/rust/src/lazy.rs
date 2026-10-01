@@ -15,6 +15,11 @@
 //! with "refuse <id>", and the dial then fails at once instead of after
 //! [`STREAM_WAIT`]. A refused id is used up.
 //!
+//! A callout that sets `Sallyport-Stream: ack` on a stream upgrade acks the
+//! bytes it receives from the hub, as the hub acks the bytes it receives,
+//! and the hub then keeps at most [`UPLOAD_WINDOW`] unacked on that stream.
+//! Without the header the hub sends without waiting.
+//!
 //! Streams are accepted without hibernation, so the object stays awake while
 //! one is open. A stream closes after [`STREAM_IDLE`] without bytes.
 
@@ -37,6 +42,9 @@ use crate::tunnel::{secret_bytes, PIPE_BYTES};
 const CONTROL: &str = "control";
 /// The request header that carries a stream's id.
 const STREAM_ID_HEADER: &str = "Sallyport-Stream-Id";
+/// The request header on a stream upgrade whose value `ack` says that the
+/// callout acks what it receives.
+const STREAM_HEADER: &str = "Sallyport-Stream";
 /// The response header on the control upgrade that lists what the hub
 /// accepts on the control socket after the challenge.
 const CONTROL_HEADER: &str = "Sallyport-Control";
@@ -64,6 +72,9 @@ pub const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// way. [`crate::wsevents`] closes a WebSocket that queues more than its
 /// `MAX_QUEUED_BYTES`, so that limit must stay at or above auth's window.
 pub(crate) const ACK_EVERY: u64 = 256 * 1024;
+/// Bytes the hub sends on a stream with acks before it waits for one. The
+/// callout closes a stream that has more than 8 MiB waiting for its reader.
+pub(crate) const UPLOAD_WINDOW: u64 = 1024 * 1024;
 
 thread_local! {
     /// The lazy hub of this Wasm instance, if `HUB_MODE` is `lazy`. The
@@ -293,6 +304,7 @@ impl Lazy {
             return Response::error("origin not allowed", 403);
         }
         let id = req.headers().get(STREAM_ID_HEADER)?.unwrap_or_default();
+        let window = acks(&req.headers().get(STREAM_HEADER)?.unwrap_or_default());
         let Some(dial) = self.dials.borrow_mut().remove(&id) else {
             return Response::error("unknown stream", 404);
         };
@@ -314,7 +326,10 @@ impl Lazy {
             let _ = ws.close(Some(1000), Some("dial gone"));
         } else {
             wasm_bindgen_futures::spawn_local(async move {
-                let mode = crate::tunnel::PumpMode::Stream { idle: STREAM_IDLE };
+                let mode = crate::tunnel::PumpMode::Stream {
+                    idle: STREAM_IDLE,
+                    window,
+                };
                 crate::tunnel::pump(&ws, events, pipe_side, mode).await;
                 drop(slot);
             });
@@ -440,6 +455,11 @@ impl Drop for DialGuard<'_> {
     }
 }
 
+/// Returns true if the `Sallyport-Stream` value `v` lists `ack`.
+fn acks(v: &str) -> bool {
+    v.split(',').any(|t| t.trim().eq_ignore_ascii_case("ack"))
+}
+
 /// Returns the id in a control message "refuse <id>", or None when `text`
 /// is any other message. The id is 43 characters of unpadded base64url, as
 /// the hub makes them.
@@ -514,6 +534,15 @@ mod tests {
         });
         assert!(dials.borrow().is_empty());
         assert_eq!(open.get(), 0);
+    }
+
+    #[test]
+    fn acks_reads_the_stream_header() {
+        assert!(acks("ack"));
+        assert!(acks("other, ack"));
+        assert!(acks("ACK"));
+        assert!(!acks(""));
+        assert!(!acks("acks"));
     }
 
     #[test]
