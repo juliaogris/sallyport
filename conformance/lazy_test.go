@@ -69,6 +69,14 @@ func TestLazyAppProxy(t *testing.T) {
 		require.Equal(t, Alice, e.Client)
 		require.Equal(t, host, e.Host)
 	})
+
+	// A body far larger than the window needs the hub's acks to arrive.
+	t.Run("32 MiB body", func(t *testing.T) {
+		resp := s.get(t, host, "/t/bytes?n=33554432&len=1", cookies...)
+		body := readBody(t, resp)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Len(t, body, 32<<20)
+	})
 }
 
 func TestLazyAutoResponsePong(t *testing.T) {

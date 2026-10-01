@@ -7,8 +7,11 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -135,17 +138,124 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 	if err != nil {
 		return
 	}
-	conn := NewWSConn(ws)
 	switch kind {
 	case "auth":
-		if !a.ln.put(conn) {
+		// Auth answers are small, so they never fill the window, and a
+		// plain WSConn is enough. Under wrangler dev, a FlowConn's
+		// reader delays the last message of a legacy HTTP answer to the
+		// Rust hub, which the real callout does not do.
+		if !a.ln.put(NewWSConn(ws)) {
 			ws.Close()
 		}
 	case "app":
-		if app == nil || !app.ln.put(conn) {
+		if app == nil || !app.ln.put(NewFlowConn(ws)) {
 			ws.Close()
 		}
 	default:
 		ws.Close()
 	}
 }
+
+// lazyWindow is the most bytes a lazy stream sender keeps unacknowledged,
+// as auth's callout does. The hub acks every 256 KiB.
+const lazyWindow = 1 << 20
+
+// FlowConn is a net.Conn over a lazy stream, as auth's callout makes it.
+// Binary messages carry stream bytes. The hub sends text "ack <n>" with
+// the total bytes it has passed on, and Write keeps at most lazyWindow
+// bytes unacknowledged. A reader goroutine reads the WebSocket at all
+// times, so acks arrive while nobody calls Read.
+type FlowConn struct {
+	ws      *websocket.Conn
+	mu      sync.Mutex
+	cond    *sync.Cond
+	pending []byte
+	err     error
+	sent    int64
+	acked   int64
+	wmu     sync.Mutex
+}
+
+// NewFlowConn wraps ws and starts its reader.
+func NewFlowConn(ws *websocket.Conn) *FlowConn {
+	c := &FlowConn{ws: ws}
+	c.cond = sync.NewCond(&c.mu)
+	go c.readLoop()
+	return c
+}
+
+func (c *FlowConn) readLoop() {
+	for {
+		typ, m, err := c.ws.ReadMessage()
+		c.mu.Lock()
+		if err != nil {
+			c.err = err
+			c.cond.Broadcast()
+			c.mu.Unlock()
+			return
+		}
+		if typ == websocket.TextMessage {
+			if n, perr := strconv.ParseInt(strings.TrimPrefix(string(m), "ack "), 10, 64); perr == nil && n >= c.acked {
+				c.acked = n
+			}
+		} else {
+			c.pending = append(c.pending, m...)
+		}
+		c.cond.Broadcast()
+		c.mu.Unlock()
+	}
+}
+
+func (c *FlowConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for len(c.pending) == 0 {
+		if c.err != nil {
+			return 0, c.err
+		}
+		c.cond.Wait()
+	}
+	n := copy(b, c.pending)
+	c.pending = c.pending[n:]
+	return n, nil
+}
+
+func (c *FlowConn) Write(b []byte) (int, error) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	written := 0
+	for len(b) > 0 {
+		chunk := b[:min(len(b), 64<<10)]
+		c.mu.Lock()
+		for c.sent-c.acked+int64(len(chunk)) > lazyWindow && c.err == nil {
+			c.cond.Wait()
+		}
+		if c.err != nil {
+			err := c.err
+			c.mu.Unlock()
+			return written, err
+		}
+		c.sent += int64(len(chunk))
+		c.mu.Unlock()
+		if err := c.ws.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+			return written, err
+		}
+		written += len(chunk)
+		b = b[len(chunk):]
+	}
+	return written, nil
+}
+
+// Close sends a close frame before it closes the connection, as auth's
+// callout does.
+func (c *FlowConn) Close() error {
+	c.wmu.Lock()
+	c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+	c.wmu.Unlock()
+	return c.ws.Close()
+}
+func (c *FlowConn) LocalAddr() net.Addr                { return c.ws.LocalAddr() }
+func (c *FlowConn) RemoteAddr() net.Addr               { return c.ws.RemoteAddr() }
+func (c *FlowConn) SetDeadline(t time.Time) error      { return nil }
+func (c *FlowConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *FlowConn) SetWriteDeadline(t time.Time) error { return nil }
