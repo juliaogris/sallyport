@@ -784,10 +784,21 @@ pub async fn call_as<Req: prost::Message, Resp: prost::Message + Default>(
 /// together share one connection instead of each taking a pool stream.
 /// The wait for a stream and [`connect`] each have a deadline, so the lock
 /// is held for at most their sum.
+///
+/// In the lazy hub the connection closes after [`AUTH_CONN_IDLE`] without a
+/// call, because its stream keeps the Durable Object awake while it is
+/// open. The next call opens a new one.
 #[derive(Clone, Default)]
 pub struct HubAuth {
     cached: Arc<futures::lock::Mutex<Cached>>,
+    /// The calls in progress, and when the last one ended, in ms since the
+    /// epoch.
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    used_ms: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// How long the lazy hub keeps its connection to auth without a call.
+const AUTH_CONN_IDLE: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Cached {
@@ -835,6 +846,25 @@ impl HubAuth {
         path: &str,
         req: &Req,
     ) -> std::result::Result<Resp, CallError> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let res = self.call_inner(env, pool, path, req).await;
+        self.calls.fetch_sub(1, Ordering::Relaxed);
+        self.used_ms
+            .store(worker::Date::now().as_millis(), Ordering::Relaxed);
+        if crate::lazy::get().is_some() {
+            wasm_bindgen_futures::spawn_local(self.clone().close_when_idle());
+        }
+        res
+    }
+
+    async fn call_inner<Req: prost::Message, Resp: prost::Message + Default>(
+        &self,
+        env: &Env,
+        pool: &crate::authpipe::Pool,
+        path: &str,
+        req: &Req,
+    ) -> std::result::Result<Resp, CallError> {
         let (generation, send) = self.conn(env, pool, None).await?;
         match unary(&send, path, req).await {
             Err(err @ CallError::Other(_)) => {
@@ -843,6 +873,27 @@ impl HubAuth {
                 unary(&send, path, req).await
             }
             res => res,
+        }
+    }
+
+    /// Drops the cached connection after [`AUTH_CONN_IDLE`] if no call has
+    /// used it in that time.
+    async fn close_when_idle(self) {
+        use std::sync::atomic::Ordering;
+        crate::sockets::sleep(AUTH_CONN_IDLE).await;
+        let idle = worker::Date::now()
+            .as_millis()
+            .saturating_sub(self.used_ms.load(Ordering::Relaxed));
+        if self.calls.load(Ordering::Relaxed) > 0 || idle < AUTH_CONN_IDLE.as_millis() as u64 {
+            return;
+        }
+        let mut cached = self.cached.lock().await;
+        // A call may have started while this waited for the lock.
+        if self.calls.load(Ordering::Relaxed) > 0 {
+            return;
+        }
+        if cached.send.take().is_some() {
+            console_log!("authrpc: closed the idle connection to auth");
         }
     }
 }
