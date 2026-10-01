@@ -71,6 +71,38 @@ one-time token, since revoked, and pins the auth CA with `ca_pin`. The
 fork `tctl` is at `~/sallyport/bin/tctl`; run it with
 `--config ~/sallyport/deploy/auth.yaml`.
 
+## On-demand, 2026-10-01
+
+All four clusters (julia, rust, go and lazy) now run in on-demand mode.
+The hub's Durable Object sleeps while nobody uses the cluster; see
+`hub/rust/src/lazy.rs` and the design in the notes repo,
+`tracks/sallyport/lazy-hub.md`.
+
+- **Home side.** Each cluster is one fork process with auth and the app
+  service, `deploy/<cluster>/teleport.yaml`, run by the cluster's auth
+  unit (`sallyport-auth`, `sallyport-rust-auth`, `sallyport-go-auth`,
+  `sallyport-lazy`). Auth's callout has `callout_mode: on_demand`. The
+  app service starts no reverse tunnel and serves the streams the
+  callout opens. The separate app units are stopped and disabled, and
+  `auth.yaml`, `app.yaml` and `firstjoin` are gone.
+- **Binary.** The fork with on-demand mode is built on homesrv from
+  `~/src/teleport-fork-coder`, branch `sallyport/lazy`, into
+  `~/sallyport-lazy/bin/` (`teleport`, `tctl`, `proxymint`,
+  `appsessmint`). Older `tctl` builds reject `callout_mode`, so use
+  `~/sallyport-lazy/bin/tctl --config <cluster>/deploy/teleport.yaml`.
+- **Hub.** The envs set `HUB_MODE = "lazy"`, and the Rust envs use the
+  JavaScript front Worker `hub/rust/front.mjs`. Without `HUB_MODE` a hub
+  runs as before, with the reverse tunnel and the auth stream pool.
+- **LAN web UI.** The `sallyport-proxy` UI still works for admin tasks,
+  but it cannot reach the apps, since there is no reverse tunnel.
+- **Rollback for one cluster.** Restore its `auth.yaml` and `app.yaml`
+  from git history, point its auth unit back at `~/sallyport/bin/teleport`
+  with `auth.yaml`, enable and start its app unit, remove `HUB_MODE` and
+  the `main = "front.mjs"` line from its env, and deploy the env.
+- **Probe.** julia, rust and go are still probed every minute, so they
+  stay awake; lazy is probed every 5 minutes. From 07:55 to 08:35 UTC
+  lazy was awake 435 s of 2,400 s, only in probe minutes.
+
 ## Known bugs
 
 - **A trap after a Wasm restart.** After a trap, workers-rs starts a new

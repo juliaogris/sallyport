@@ -1,11 +1,11 @@
 [Unit]
-Description=sallyport rust auth (fork, with the callout)
+Description=sallyport rust auth and app service (fork, on-demand callout)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/julia/sallyport-rust
-ExecStart=/home/julia/sallyport/bin/teleport start --config=/home/julia/sallyport-rust/deploy/auth.yaml
+ExecStart=/home/julia/sallyport-lazy/bin/teleport start --config=/home/julia/sallyport-rust/deploy/teleport.yaml
 Restart=always
 RestartSec=5
 

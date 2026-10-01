@@ -1,0 +1,45 @@
+# The rust test cluster on homesrv in on-demand mode: auth and the app service
+# in one fork process. Auth calls out to the hub on rust.example.com, and the
+# app service serves through the callout, with no reverse tunnel. This
+# replaces auth.yaml and app.yaml, which ran auth and the app service as two
+# processes with a reverse tunnel.
+version: v3
+teleport:
+  nodename: sallyport-rust-auth
+  data_dir: /home/julia/sallyport-rust/data/auth
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: true
+  cluster_name: sallyport-rust
+  listen_addr: 127.0.0.1:3126
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  callout_to: wss://rust.example.com/tunnel/auth
+  callout_key_file: /home/julia/sallyport-rust/callout.pem
+  callout_mode: on_demand
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      rp_id: rust.example.com
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # A local static server with index.html and a 10 MB file.
+  - name: bench
+    uri: http://127.0.0.1:18180
+    public_addr: bench-rust.example.com
+  # The same OctoPrint and webcam as the julia cluster. octocam shares
+  # julia's relay on 127.0.0.1:18081.
+  - name: octo
+    uri: http://octo.lan
+    public_addr: octo-rust.example.com
+  - name: octocam
+    uri: http://127.0.0.1:18081
+    public_addr: octocam-rust.example.com

@@ -1,11 +1,11 @@
 [Unit]
-Description=sallyport go auth (fork, with the callout)
+Description=sallyport go auth and app service (fork, on-demand callout)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/julia/sallyport-go
-ExecStart=/home/julia/sallyport/bin/teleport start --config=/home/julia/sallyport-go/deploy/auth.yaml
+ExecStart=/home/julia/sallyport-lazy/bin/teleport start --config=/home/julia/sallyport-go/deploy/teleport.yaml
 Restart=always
 RestartSec=5
 

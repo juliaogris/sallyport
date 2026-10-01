@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mints fresh app sessions for the probe user in each cluster. Each run signs
-# a 24 hour user cert with the fork tctl, then asks appsessmint for one app
+# a 24 hour user cert with the fork tctl that knows callout_mode, then asks appsessmint for one app
 # session per app. The sessions end with the cert. The timer runs this every
 # 6 hours, so a failed run leaves the last sessions valid for 18 more hours.
 #
@@ -10,10 +10,10 @@ set -euo pipefail
 umask 077
 
 base=$HOME/sallyport-probe
-tctl=$HOME/sallyport/bin/tctl
+tctl=$HOME/sallyport-lazy/bin/tctl
 mint=$base/bin/appsessmint
 
-# renew name auth.yaml auth-addr cluster-name proxy-identity app=public-addr...
+# renew name config.yaml auth-addr cluster-name proxy-identity app=public-addr...
 renew() {
   local name=$1 config=$2 auth=$3 cluster=$4 proxy=$5
   shift 5
@@ -44,13 +44,12 @@ renew() {
 }
 
 failed=0
-renew julia "$HOME/sallyport/deploy/auth.yaml" 127.0.0.1:3025 sallyport "$base/secrets/julia/proxy" \
+renew julia "$HOME/sallyport/deploy/teleport.yaml" 127.0.0.1:3025 sallyport "$base/secrets/julia/proxy" \
   bench=bench-julia.example.com octo=octo-julia.example.com octocam=octocam-julia.example.com || failed=1
-renew rust "$HOME/sallyport-rust/deploy/auth.yaml" 127.0.0.1:3126 sallyport-rust "$HOME/sallyport-rust/hub-identity" \
+renew rust "$HOME/sallyport-rust/deploy/teleport.yaml" 127.0.0.1:3126 sallyport-rust "$HOME/sallyport-rust/hub-identity" \
   bench=bench-rust.example.com octo=octo-rust.example.com octocam=octocam-rust.example.com || failed=1
-renew go "$HOME/sallyport-go/deploy/auth.yaml" 127.0.0.1:3226 sallyport-go "$HOME/sallyport-go/hub-identity" \
+renew go "$HOME/sallyport-go/deploy/teleport.yaml" 127.0.0.1:3226 sallyport-go "$HOME/sallyport-go/hub-identity" \
   bench=bench-go.example.com octo=octo-go.example.com octocam=octocam-go.example.com || failed=1
-# The lazy cluster's config has callout_mode, which only its own tctl knows.
-tctl=$HOME/sallyport-lazy/bin/tctl renew lazy "$HOME/sallyport-lazy/deploy/teleport.yaml" 127.0.0.1:3326 sallyport-lazy "$HOME/sallyport-lazy/hub-identity" \
+renew lazy "$HOME/sallyport-lazy/deploy/teleport.yaml" 127.0.0.1:3326 sallyport-lazy "$HOME/sallyport-lazy/hub-identity" \
   bench=bench-lazy.example.com octocam=octocam-lazy.example.com || failed=1
 exit "$failed"

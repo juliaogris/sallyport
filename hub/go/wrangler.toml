@@ -43,6 +43,7 @@ routes = [
 ]
 
 [env.go.vars]
+HUB_MODE = "lazy"
 CLUSTER_NAME = "sallyport-go"
 PUBLIC_ADDR = "go.example.com:443"
 SERVER_VERSION = "18.11.1"

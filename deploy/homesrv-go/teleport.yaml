@@ -1,0 +1,45 @@
+# The go test cluster on homesrv in on-demand mode: auth and the app service
+# in one fork process. Auth calls out to the hub on go.example.com, and the
+# app service serves through the callout, with no reverse tunnel. This
+# replaces auth.yaml and app.yaml, which ran auth and the app service as two
+# processes with a reverse tunnel.
+version: v3
+teleport:
+  nodename: sallyport-go-auth
+  data_dir: /home/julia/sallyport-go/data/auth
+  log:
+    output: stderr
+    severity: DEBUG
+auth_service:
+  enabled: true
+  cluster_name: sallyport-go
+  listen_addr: 127.0.0.1:3226
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  callout_to: wss://go.example.com/tunnel/auth
+  callout_key_file: /home/julia/sallyport-go/callout.pem
+  callout_mode: on_demand
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      rp_id: go.example.com
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # A local static server with index.html and a 10 MB file.
+  - name: bench
+    uri: http://127.0.0.1:18280
+    public_addr: bench-go.example.com
+  # The same OctoPrint and webcam as the julia cluster. octocam shares
+  # julia's relay on 127.0.0.1:18081.
+  - name: octo
+    uri: http://octo.lan
+    public_addr: octo-go.example.com
+  - name: octocam
+    uri: http://127.0.0.1:18081
+    public_addr: octocam-go.example.com
