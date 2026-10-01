@@ -590,9 +590,12 @@ impl Drop for DialGuard<'_> {
     }
 }
 
-/// Returns true if the `Sallyport-Stream` value `v` lists `ack`.
+/// Returns true if the `Sallyport-Stream` value `v` lists `ack`. The
+/// tokens may be separated by commas, spaces or both, as the callout reads
+/// `Sallyport-Control`.
 fn acks(v: &str) -> bool {
-    v.split(',').any(|t| t.trim().eq_ignore_ascii_case("ack"))
+    v.split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .any(|t| t.eq_ignore_ascii_case("ack"))
 }
 
 /// Returns the id in a control message "refuse <id>", or None when `text`
@@ -697,6 +700,9 @@ mod tests {
     fn acks_reads_the_stream_header() {
         assert!(acks("ack"));
         assert!(acks("other, ack"));
+        assert!(acks("other ack"));
+        assert!(acks("other,ack"));
+        assert!(!acks("other"));
         assert!(acks("ACK"));
         assert!(!acks(""));
         assert!(!acks("acks"));
