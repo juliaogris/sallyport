@@ -77,10 +77,18 @@ pub struct Hub {
     hub_auth: crate::authrpc::HubAuth,
     /// The privilege tokens that have added a passkey.
     used_tokens: crate::passkeys::UsedTokens,
+    mode: HubMode,
+}
+
+/// Which hub the Durable Object runs.
+enum HubMode {
+    /// The full hub, with agent tunnels and the auth pipe pool.
+    Full,
     /// The lazy hub, when `HUB_MODE` is `lazy`.
-    lazy: Option<Rc<crate::lazy::Lazy>>,
-    /// True when `HUB_MODE` is `lazy` but the lazy hub failed to install.
-    lazy_misconfigured: bool,
+    Lazy(Rc<crate::lazy::Lazy>),
+    /// `HUB_MODE` is `lazy`, but the lazy hub failed to install. Every
+    /// request gets a 503.
+    Misconfigured,
 }
 
 impl DurableObject for Hub {
@@ -96,18 +104,16 @@ impl DurableObject for Hub {
         }
         crate::lazy::clear();
         let used_tokens = crate::passkeys::UsedTokens::new(state.storage().sql());
-        // The lazy hub starts no timers, so that the object can hibernate.
-        let lazy_mode = crate::lazy::enabled(&env);
-        let lazy = if lazy_mode {
+        let mode = if !crate::lazy::enabled(&env) {
+            HubMode::Full
+        } else {
             match crate::lazy::Lazy::install(state, &env) {
-                Ok(l) => Some(l),
+                Ok(l) => HubMode::Lazy(l),
                 Err(err) => {
                     console_error!("lazy: the lazy hub is misconfigured, answering 503: {err}");
-                    None
+                    HubMode::Misconfigured
                 }
             }
-        } else {
-            None
         };
         let hub = Self {
             env,
@@ -118,11 +124,12 @@ impl DurableObject for Hub {
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
             used_tokens,
-            lazy_misconfigured: lazy_mode && lazy.is_none(),
-            lazy,
+            mode,
         };
-        // A misconfigured lazy hub must not run as the full hub either.
-        if lazy_mode {
+        // The lazy hub starts no timers, so that the object can hibernate. A
+        // misconfigured one starts none either, so that it does not run as
+        // the full hub.
+        if !matches!(hub.mode, HubMode::Full) {
             return hub;
         }
         wasm_bindgen_futures::spawn_local(heartbeat(
@@ -140,9 +147,9 @@ impl DurableObject for Hub {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        match &self.lazy {
-            Some(lazy) => lazy.on_message(ws, message),
-            None => {
+        match &self.mode {
+            HubMode::Lazy(lazy) => lazy.on_message(ws, message),
+            HubMode::Full | HubMode::Misconfigured => {
                 let _ = ws.close(Some(1011), Some("no handler"));
                 Ok(())
             }
@@ -169,7 +176,7 @@ impl DurableObject for Hub {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if self.lazy_misconfigured {
+        if let HubMode::Misconfigured = self.mode {
             return Response::error("lazy hub misconfigured", 503);
         }
         let host = req.url()?.host_str().unwrap_or_default().to_string();
@@ -194,7 +201,7 @@ impl DurableObject for Hub {
                 web::Host::Login => {}
             }
         }
-        if let Some(lazy) = &self.lazy {
+        if let HubMode::Lazy(lazy) = &self.mode {
             // The lazy hub has no reverse tunnel and no auth pipe pool.
             if req.path() != authpipe::PATH {
                 return Response::error("not found", 404);
