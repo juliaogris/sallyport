@@ -26,7 +26,8 @@ const (
 )
 
 // wsConn is a net.Conn over a Workers WebSocket. Incoming bytes are queued
-// without limit: the peer's SSH or TLS flow control bounds them. Writes are
+// without limit: the peer's SSH or TLS flow control bounds them, and on a
+// lazy stream the callout's window, which the acks from Read open. Writes are
 // coalesced: a write is queued, and a goroutine sends everything queued
 // once the writers have yielded, so the TLS records of one SSH packet go
 // out as one message.

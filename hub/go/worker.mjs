@@ -1,9 +1,10 @@
 // The Worker entry and the Durable Object glue of the Go hub.
 //
 // The Worker entry is plain JavaScript: it classifies the host, answers
-// /webapi/find and /webapi/ping, and forwards everything else to the one
-// Durable Object. Only the Durable Object runs the Go program, so a
-// stateless Worker isolate never pays for the Go runtime.
+// /webapi/find and /webapi/ping, answers the requests that need no session
+// and the paths that the Go program does not route, and forwards the rest
+// to the one Durable Object. Only the Durable Object runs the Go program,
+// so a stateless Worker isolate never pays for the Go runtime.
 //
 // Go and JavaScript share bytes through Uint8Arrays that live as long as
 // their connection or stream. JavaScript copies each WebSocket message into
@@ -471,10 +472,11 @@ export class Hub extends DurableObject {
       ) {
         return this.acceptControl(req);
       }
-      // The lazy hub has no reverse tunnel and no auth pipe pool, so only a
-      // stream reaches Go. A stream answers a dial, and a dial waits only
-      // while this instance's program runs, so a stream for no running
-      // program is 404 without starting one.
+      // The lazy hub has no reverse tunnel and no auth pipe pool, so on the
+      // login host and the bare domain only a stream on /tunnel/auth goes
+      // to Go. A stream answers a dial, and a dial waits only while this
+      // instance's program runs, so a stream for no running program is 404
+      // without starting one.
       if (classify(this.env, url.hostname) !== 'app') {
         if (url.pathname === '/webapi/connectionupgrade') return textError('not found', 404);
         if (url.pathname === '/tunnel/auth') {
@@ -590,7 +592,8 @@ export class Hub extends DurableObject {
     console.log('lazy: control socket verified');
   }
 
-  // Without the auto-reply flag the runtime needs the close echoed.
+  // A hibernatable WebSocket does not answer a close by itself, so the
+  // handler closes it.
   async webSocketClose(ws, code, reason) {
     console.log('lazy: control socket closed, code ' + code + ' ' + JSON.stringify(reason));
     closeWS(ws, 1000, 'closed');

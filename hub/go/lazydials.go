@@ -47,7 +47,7 @@ func (t *dialTable[T]) take(id string) (chan T, bool) {
 }
 
 // cancel removes the dial for id. It returns false when take already
-// removed it, and then the stream arrives on the dial's channel.
+// removed it, and then take's caller sends a value on the dial's channel.
 func (t *dialTable[T]) cancel(id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -48,7 +48,9 @@ const (
 	// including the dial and the TLS handshake.
 	appConnDeadline = 20 * time.Second
 	// appHandshakeDeadline is how long the TLS handshake with the app
-	// service may take.
+	// service may take. A lazy stream and a tunnel channel have no
+	// deadlines, so a peer that went away would block the handshake
+	// otherwise.
 	appHandshakeDeadline = 10 * time.Second
 )
 
