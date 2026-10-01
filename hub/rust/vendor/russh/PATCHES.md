@@ -168,12 +168,12 @@ key exchange. A `CHANNEL_WINDOW_ADJUST` from the client still flushed the
 channel's queued data, a `CHANNEL_DATA` still sent a window adjust back,
 and handler replies and keepalives went out too.
 
-- `src/server/session.rs`: `Session::flush` keeps everything in `enc.write`
-  while a key exchange is active, except after a disconnect. If `enc.write`
-  passes the new `Config::max_write_during_kex`, 4 MiB by default, during a
-  key exchange, `flush` ends the connection with `Error::Kex`, because a
-  peer that never finishes the exchange could otherwise grow it without
-  limit with requests that want a reply.
+- `src/server/session.rs`, `src/server/mod.rs`: `Session::flush` keeps
+  everything in `enc.write` while a key exchange is active, except after a
+  disconnect. If `enc.write` passes the new `Config::max_write_during_kex`,
+  4 MiB by default, during a key exchange, `flush` ends the connection with
+  `Error::Kex`, because a peer that never finishes the exchange could
+  otherwise grow it without limit with requests that want a reply.
 - `src/server/session.rs`: `Session::flush_pending` does nothing during a
   key exchange, because the exchange ends with `flush_all_pending`.
 - `src/session.rs`: `Encrypted::data` and `extended_data` queue during a key
@@ -204,9 +204,10 @@ and handler replies and keepalives went out too.
 - `tests/teleport_hooks.rs`, `tests/goclient/`: Tests for the hooks, the
   server-initiated channel and requests, the unconfirmed-channel checks,
   the close of a channel confirmed after its opener left, the packet size
-  and window checks, the key exchange limit and host certificates. A Go client on golang.org/x/crypto/ssh drives them, because
-  the russh client cannot open unknown channel types, send arbitrary
-  requests or answer custom channel requests. The Go client sends
+  and window checks, the key exchange limit and host certificates. A Go
+  client on golang.org/x/crypto/ssh drives them, because the russh client
+  cannot open unknown channel types, send arbitrary requests or answer
+  custom channel requests. The Go client sends
   out-of-order messages through x/crypto's unexported packet writers, which
   it reaches with `go:linkname`.
 - `tests/test_backpressure.rs`: Rewritten for the slow reader close on data
