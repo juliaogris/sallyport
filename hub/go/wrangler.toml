@@ -66,6 +66,7 @@ account_id = "11111111111111111111111111111111"
 routes = [
   { pattern = "go.example.net", custom_domain = true },
   { pattern = "bench-go.example.net", custom_domain = true },
+  { pattern = "octo-go.example.net", custom_domain = true },
   { pattern = "octocam-go.example.net", custom_domain = true },
 ]
 
@@ -77,7 +78,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "go.example.net"
 DOMAIN = "example.net"
 OWNER = "go"
-APPS = "bench,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.party-go.durable_objects.bindings]]
 name = "HUB"

@@ -177,6 +177,7 @@ main = "front.mjs"
 routes = [
   { pattern = "rust.example.net", custom_domain = true },
   { pattern = "bench-rust.example.net", custom_domain = true },
+  { pattern = "octo-rust.example.net", custom_domain = true },
   { pattern = "octocam-rust.example.net", custom_domain = true },
 ]
 
@@ -191,7 +192,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "rust.example.net"
 DOMAIN = "example.net"
 OWNER = "rust"
-APPS = "bench,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.party-rust.durable_objects.bindings]]
 name = "HUB"
