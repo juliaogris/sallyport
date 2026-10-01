@@ -216,11 +216,14 @@ fn build_response(
             .map_err(|e| format!("response header {name}: {e}"))?;
     }
     // The runtime accepts a 101 only with a WebSocket attached, and the hub
-    // does not forward WebSockets.
+    // sends no Upgrade header upstream, so a 101 cannot be forwarded. The
+    // app connection is closed, because it no longer speaks HTTP.
     let status = parts.status.as_u16();
     if status == 101 {
-        console_error!("appproxy: upstream 101 without a WebSocket");
-        return Response::error("app service error", 502).map_err(|e| format!("response: {e}"));
+        conn.abort();
+        console_error!("appproxy: app answered 101 Switching Protocols");
+        return Response::error("app answered 101 Switching Protocols", 502)
+            .map_err(|e| format!("response: {e}"));
     }
     // The runtime refuses a body on these statuses, and workers-rs panics
     // on that refusal, which restarts the Durable Object.
