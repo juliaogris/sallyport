@@ -59,8 +59,8 @@ type wsConn struct {
 	delivered, acked int64
 	// window is true when the callout acks what the hub sends. Write then
 	// keeps at most lazyWindow bytes sent and not acked. sent counts the
-	// bytes Write has taken, and peerAcked those up to the callout's last
-	// ack.
+	// bytes Write has taken on a lazy stream, and peerAcked those up to the
+	// callout's last ack.
 	window          bool
 	sent, peerAcked int64
 	// lastBytes is when bytes last crossed in either direction, in Unix
@@ -193,11 +193,11 @@ func (c *wsConn) Write(b []byte) (int, error) {
 				continue
 			}
 			n = int(min(int64(n), room))
-			c.sent += int64(n)
 		}
 		c.pend = append(c.pend, b[written:written+n]...)
 		written += n
 		if c.lazy {
+			c.sent += int64(n)
 			c.lastBytes.Store(time.Now().UnixMilli())
 		}
 		if len(c.pend) >= outBytes {
@@ -315,7 +315,10 @@ func (c *wsConn) startLazy(window bool) {
 func (c *wsConn) checkIdle() {
 	left := lazyStreamIdle - time.Since(time.UnixMilli(c.lastBytes.Load()))
 	if left <= 0 {
-		logf("lazy: stream idle for %v, closing", lazyStreamIdle)
+		c.mu.Lock()
+		logf("lazy: stream idle for %v, closing, %d bytes in (%d acked, %d unread), %d bytes out (%d acked by the callout)",
+			lazyStreamIdle, c.delivered+int64(len(c.rbuf)-c.roff), c.acked, len(c.rbuf)-c.roff, c.sent, c.peerAcked)
+		c.mu.Unlock()
 		c.CloseWith(1000, "idle")
 		return
 	}
