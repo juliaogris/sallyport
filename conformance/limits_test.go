@@ -3,6 +3,7 @@ package conformance
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -34,8 +35,11 @@ func TestTunnelAuthDeadline(t *testing.T) {
 	require.Less(t, took, 40*time.Second, "not closed after %v", took)
 }
 
-// TestTunnelConnectionLimit checks that the hub accepts 16 tunnels and
-// refuses a 17th with 503 until one closes.
+// TestTunnelConnectionLimit checks that with 8 tunnels that have not
+// authenticated, a 9th closes the oldest and stays open itself. Clients
+// that never authenticate must not keep a redialing agent out. Every tunnel
+// here has the same client address, so the oldest tunnel is the one that
+// goes.
 func TestTunnelConnectionLimit(t *testing.T) {
 	h := freshHub(t)
 	var open []*websocket.Conn
@@ -44,29 +48,42 @@ func TestTunnelConnectionLimit(t *testing.T) {
 			ws.Close()
 		}
 	}()
-	for i := range 16 {
+	for i := range 9 {
 		ws, _, err := h.DialTunnelWS(t.Context(), TunnelSubprotocol)
-		require.NoError(t, err, "tunnel %d", i+1)
+		require.NoError(t, err, "tunnel %d refused", i+1)
 		open = append(open, ws)
 	}
+
+	_, closeErr := WaitClosed(open[0], 5*time.Second)
+	require.Error(t, closeErr, "oldest tunnel still open after a 9th")
+	for i := 1; i < len(open); i++ {
+		_, closeErr := WaitClosed(open[i], 100*time.Millisecond)
+		require.NoError(t, closeErr, "tunnel %d closed", i+1)
+	}
+}
+
+// TestTunnelAuthenticatedLimit checks that with 16 authenticated tunnels
+// the hub refuses a 17th tunnel with 503.
+func TestTunnelAuthenticatedLimit(t *testing.T) {
+	h := freshHub(t)
+	id, err := pki.AgentIdentity("App")
+	require.NoError(t, err)
+	for i := range 16 {
+		a, err := h.DialAgent(t.Context(), pki, id)
+		require.NoError(t, err, "agent %d refused", i+1)
+		t.Cleanup(func() { a.Close() })
+	}
+
 	ws, resp, err := h.DialTunnelWS(t.Context(), TunnelSubprotocol)
 	if ws != nil {
 		ws.Close()
 	}
 	require.Error(t, err, "17th tunnel accepted")
-	require.NotNil(t, resp)
+	require.NotNil(t, resp, "no response for the 17th tunnel")
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-
-	open[0].Close()
-	open = open[1:]
-	require.Eventually(t, func() bool {
-		ws, _, err := h.DialTunnelWS(t.Context(), TunnelSubprotocol)
-		if err != nil {
-			return false
-		}
-		open = append(open, ws)
-		return true
-	}, 10*time.Second, 250*time.Millisecond, "no tunnel accepted after one closed")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "too many connections", string(body))
 }
 
 // TestDiscoveryInterval checks that the hub announces itself again about
