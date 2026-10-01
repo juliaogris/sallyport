@@ -188,12 +188,22 @@ fn login_host(env: &Env) -> Result<String> {
 pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Response> {
     let host = login_host(cx.env)?;
     let path = req.path();
+    // The body is read before routing and before the Origin check, so that
+    // one limit holds for every route on the login host.
+    let body = if matches!(req.method(), Method::Get | Method::Head) {
+        Vec::new()
+    } else {
+        let Some(body) = read_body(&mut req).await? else {
+            return too_large();
+        };
+        body
+    };
     if req.method() == Method::Post && !same_origin(&req, &host)? {
         return Response::error("bad origin", 403);
     }
     if req.method() == Method::Post {
         if let Some(rest) = path.strip_prefix("/webapi/invite/") {
-            return invite(&mut req, cx, rest).await;
+            return invite(&req, cx, rest, body).await;
         }
         if let Some(app) = path.strip_prefix("/web/launch/") {
             return launch(&req, cx, app).await;
@@ -213,9 +223,6 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
             if !finish_allowed(&req)? {
                 return too_many_requests();
             }
-            let Some(body) = read_body(&mut req).await? else {
-                return too_large();
-            };
             session_response(login_finish(cx, body).await)
         }
         (Method::Post, "/web/logout") => {
@@ -229,8 +236,8 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
 }
 
 /// Answers `POST /webapi/invite/<token>/begin` and `.../finish`. `rest` is
-/// the path after `/webapi/invite/`.
-async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response> {
+/// the path after `/webapi/invite/`, and `body` is the request body.
+async fn invite(req: &Request, cx: &Ctx<'_>, rest: &str, body: Vec<u8>) -> Result<Response> {
     let Some((token, step)) = rest.split_once('/') else {
         return Response::error("not found", 404);
     };
@@ -245,9 +252,6 @@ async fn invite(req: &mut Request, cx: &Ctx<'_>, rest: &str) -> Result<Response>
             if !finish_allowed(req)? {
                 return too_many_requests();
             }
-            let Some(body) = read_body(req).await? else {
-                return too_large();
-            };
             session_response(invite_finish(cx, token, body).await)
         }
         _ => Response::error("not found", 404),
@@ -853,29 +857,25 @@ fn session_response(res: std::result::Result<(String, String), String>) -> Resul
     }
 }
 
-/// Reads the body of `req`. It returns None, without reading the rest,
-/// when the body is over [`MAX_BODY`].
+/// Reads the body of `req`, or returns None when it is over [`MAX_BODY`].
+/// The rest of a long body is read and dropped, because an answer sent
+/// before the body is read, or a cancelled body, breaks keep-alive under
+/// `wrangler dev`.
 async fn read_body(req: &mut Request) -> Result<Option<Vec<u8>>> {
-    let length = req.headers().get("Content-Length")?;
-    if length
-        .and_then(|l| l.trim().parse::<usize>().ok())
-        .is_some_and(|l| l > MAX_BODY)
-    {
-        return Ok(None);
-    }
     if req.inner().body().is_none() {
         return Ok(Some(Vec::new()));
     }
     let mut stream = req.stream()?;
     let mut body = Vec::new();
+    let mut over = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        if body.len() + chunk.len() > MAX_BODY {
-            return Ok(None);
+        over = over || body.len() + chunk.len() > MAX_BODY;
+        if !over {
+            body.extend_from_slice(&chunk);
         }
-        body.extend_from_slice(&chunk);
     }
-    Ok(Some(body))
+    Ok((!over).then_some(body))
 }
 
 fn same_origin(req: &Request, host: &str) -> Result<bool> {
@@ -944,7 +944,7 @@ fn too_many_requests() -> Result<Response> {
 
 /// Returns a 413 for a body over [`MAX_BODY`].
 fn too_large() -> Result<Response> {
-    Response::error("request too large", 413)
+    Response::error("request body too large", 413)
 }
 
 /// Returns `s` with `&`, `<`, `>`, `"` and `'` written as HTML character
