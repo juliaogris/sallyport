@@ -227,8 +227,15 @@ fn build_response(
         );
     }
     let headers = Headers::new();
+    // With `Transfer-Encoding`, hyper reads the body by the transfer coding
+    // and ignores `Content-Length`. Passing that length on with a body of
+    // another length makes the runtime never answer the browser.
+    let chunked = parts.headers.contains_key(http::header::TRANSFER_ENCODING);
     for (name, value) in parts.headers.iter() {
         if HOP_BY_HOP.contains(&name.as_str()) {
+            continue;
+        }
+        if chunked && name == http::header::CONTENT_LENGTH {
             continue;
         }
         let value = value
