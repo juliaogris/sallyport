@@ -173,6 +173,10 @@ impl Lazy {
             let _ = ws.close(Some(1008), Some("unknown socket"));
             return Ok(());
         };
+        // `prune` has closed this socket, so a reply must not verify it.
+        if expired(&a, Date::now().as_millis()) {
+            return Ok(());
+        }
         if a.verified {
             console_log!("lazy: unexpected message on the control socket, closing it");
             let _ = ws.close(Some(1008), Some("unexpected message"));
@@ -235,12 +239,7 @@ impl Lazy {
     /// for it.
     pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, String> {
         let started = Date::now().as_millis();
-        let control = self
-            .controls()
-            .into_iter()
-            .find(|(a, _)| a.verified)
-            .map(|(_, ws)| ws)
-            .ok_or_else(|| "auth is not connected".to_string())?;
+        let control = self.control().ok_or_else(|| "auth is not connected".to_string())?;
         if self.dials.borrow().len() >= MAX_PENDING_DIALS {
             return Err(format!("{MAX_PENDING_DIALS} dials waiting"));
         }
@@ -249,8 +248,13 @@ impl Lazy {
         let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let (tx, rx) = oneshot::channel();
         self.dials.borrow_mut().insert(id.clone(), PendingDial { kind, tx });
+        // Removes the id however the dial ends, also when its future is
+        // dropped, so that the id does not count toward the cap.
+        let _guard = DialGuard {
+            dials: &self.dials,
+            id: id.clone(),
+        };
         if let Err(err) = control.send_with_str(format!("dial {} {id}", kind.as_str())) {
-            self.dials.borrow_mut().remove(&id);
             return Err(format!("sending dial: {err}"));
         }
         let res = match select(rx, pin!(crate::sockets::sleep(DIAL_DEADLINE))).await {
@@ -258,7 +262,6 @@ impl Lazy {
             Either::Left((Err(_), _)) => Err("dial cancelled".to_string()),
             Either::Right(_) => Err(format!("no {} stream within {DIAL_DEADLINE:?}", kind.as_str())),
         };
-        self.dials.borrow_mut().remove(&id);
         console_log!(
             "lazy: cold {} dial {} in {} ms",
             kind.as_str(),
@@ -270,7 +273,15 @@ impl Lazy {
 
     /// Returns true if a verified control socket is open.
     pub fn connected(&self) -> bool {
-        self.controls().iter().any(|(a, _)| a.verified)
+        self.control().is_some()
+    }
+
+    /// Returns the open verified control socket that the hub accepted last.
+    fn control(&self) -> Option<WebSocket> {
+        newest_open(self.controls().into_iter().map(|(a, ws)| {
+            let open = AsRef::<web_sys::WebSocket>::as_ref(&ws).ready_state() == web_sys::WebSocket::OPEN;
+            (a.accepted_ms, a.verified && open, ws)
+        }))
     }
 
     /// Returns the control sockets with their attachments.
@@ -289,10 +300,74 @@ impl Lazy {
     fn prune(&self) {
         let now = Date::now().as_millis();
         for (a, ws) in self.controls() {
-            if !a.verified && now.saturating_sub(a.accepted_ms) > CHALLENGE_DEADLINE_MS {
+            if expired(&a, now) {
                 console_log!("lazy: control challenge failed, no reply in time");
                 let _ = ws.close(Some(1008), Some("challenge timeout"));
             }
         }
+    }
+}
+
+/// Removes a dial's id from the pending dials when dropped.
+struct DialGuard<'a> {
+    dials: &'a RefCell<HashMap<String, PendingDial>>,
+    id: String,
+}
+
+impl Drop for DialGuard<'_> {
+    fn drop(&mut self) {
+        self.dials.borrow_mut().remove(&self.id);
+    }
+}
+
+/// Returns true if `a` is still in the challenge after its deadline, at
+/// `now` in ms since the epoch.
+fn expired(a: &Attachment, now: u64) -> bool {
+    !a.verified && now.saturating_sub(a.accepted_ms) > CHALLENGE_DEADLINE_MS
+}
+
+/// Returns the item with the largest accept time among those marked usable.
+/// Each item is its accept time, whether it is usable, and the item.
+fn newest_open<T>(items: impl IntoIterator<Item = (u64, bool, T)>) -> Option<T> {
+    items
+        .into_iter()
+        .filter(|(_, usable, _)| *usable)
+        .max_by_key(|(t, _, _)| *t)
+        .map(|(_, _, item)| item)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newest_open_picks_the_newest_usable() {
+        assert_eq!(newest_open([(1, true, "a"), (3, false, "b"), (2, true, "c")]), Some("c"));
+        assert_eq!(newest_open([(1, false, "a")]), None);
+        assert_eq!(newest_open(Vec::<(u64, bool, &str)>::new()), None);
+    }
+
+    #[test]
+    fn expired_only_in_the_challenge_after_the_deadline() {
+        let a = |verified| Attachment {
+            accepted_ms: 1_000,
+            nonce: Vec::new(),
+            verified,
+        };
+        assert!(!expired(&a(false), 1_000 + CHALLENGE_DEADLINE_MS));
+        assert!(expired(&a(false), 1_001 + CHALLENGE_DEADLINE_MS));
+        assert!(!expired(&a(true), 1_001 + CHALLENGE_DEADLINE_MS));
+    }
+
+    #[test]
+    fn dial_guard_removes_the_id() {
+        let dials = RefCell::new(HashMap::new());
+        let (tx, _rx) = oneshot::channel();
+        dials.borrow_mut().insert("x".to_string(), PendingDial { kind: Kind::App, tx });
+        drop(DialGuard {
+            dials: &dials,
+            id: "x".to_string(),
+        });
+        assert!(dials.borrow().is_empty());
     }
 }
