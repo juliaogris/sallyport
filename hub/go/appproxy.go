@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,10 +178,21 @@ func buildRequest(req *request, host string) (*http.Request, error) {
 	var body io.Reader
 	if req.method != "GET" && req.method != "HEAD" {
 		body = bytes.NewReader(req.body)
+		if req.bodyStream != nil {
+			body = req.bodyStream
+		}
 	}
 	up, err := http.NewRequest(req.method, "https://"+host+req.path+req.query, body)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if req.bodyStream != nil && body != nil {
+		// The transport closes the body once it has sent it or failed.
+		req.bodyTaken = true
+		up.ContentLength = -1
+		if n, err := strconv.ParseInt(req.header["content-length"], 10, 64); err == nil {
+			up.ContentLength = n
+		}
 	}
 	for name, value := range req.header {
 		switch {

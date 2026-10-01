@@ -239,6 +239,22 @@ func (h *Hub) LogHas(s string) bool {
 	return err == nil && strings.Contains(string(b), s)
 }
 
+// WaitLog waits up to d until the hub log has at least n lines that
+// contain s. It returns false if it did not.
+func (h *Hub) WaitLog(s string, n int, d time.Duration) bool {
+	end := time.Now().Add(d)
+	for {
+		b, err := os.ReadFile(h.LogPath)
+		if err == nil && strings.Count(string(b), s) >= n {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // LogTail returns the last n lines of the hub log.
 func (h *Hub) LogTail(n int) string {
 	b, err := os.ReadFile(h.LogPath)

@@ -29,7 +29,10 @@ func newLazyStack(t *testing.T) *stack {
 	t.Cleanup(app.Close)
 	auth.RunLazy(t.Context(), h, app)
 	// The hub sends dials only once the control socket is verified.
-	time.Sleep(time.Second)
+	require.True(t, h.WaitLog(controlVerified, 1, 20*time.Second), "no control socket verified")
+	t.Cleanup(func() {
+		require.Empty(t, auth.BadDialIDs(), "dial ids that are not 43 characters of base64url")
+	})
 	return &stack{hub: h, auth: auth}
 }
 
@@ -44,6 +47,10 @@ func lazyHub(t *testing.T) *Hub {
 	logOnFailure(t, h)
 	return h
 }
+
+// controlVerified is the log line both hubs write when a control socket
+// passes the challenge.
+const controlVerified = "lazy: control socket verified"
 
 func newID(t *testing.T) string {
 	b := make([]byte, 32)
@@ -84,7 +91,7 @@ func TestLazyAutoResponsePong(t *testing.T) {
 	ws, err := h.DialControl(t.Context(), pki, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { ws.Close() })
-	time.Sleep(500 * time.Millisecond)
+	require.True(t, h.WaitLog(controlVerified, 1, 10*time.Second))
 	require.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte("ping")))
 	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
 	typ, msg, err := ws.ReadMessage()
@@ -117,7 +124,7 @@ func TestLazyControlReplaced(t *testing.T) {
 	first, err := h.DialControl(t.Context(), pki, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { first.Close() })
-	time.Sleep(500 * time.Millisecond)
+	require.True(t, h.WaitLog(controlVerified, 1, 10*time.Second))
 	second, err := h.DialControl(t.Context(), pki, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { second.Close() })

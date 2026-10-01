@@ -15,7 +15,7 @@ import (
 // read once, so a call creates no new js.Value for the function.
 var glue struct {
 	accept, send, sendText, close, stream, chunk, linearMem, jsValues js.Value
-	tokenUsed, tokenUse, dial, connected                              js.Value
+	tokenUsed, tokenUse, dial, connected, readBody, cancelBody        js.Value
 }
 
 var uint8Array = js.Global().Get("Uint8Array")
@@ -33,6 +33,7 @@ func main() {
 		"linearMem": &glue.linearMem, "jsValues": &glue.jsValues,
 		"tokenUsed": &glue.tokenUsed, "tokenUse": &glue.tokenUse,
 		"dial": &glue.dial, "connected": &glue.connected,
+		"readBody": &glue.readBody, "cancelBody": &glue.cancelBody,
 	} {
 		*v = g.Get(name)
 	}
@@ -79,6 +80,10 @@ func main() {
 		if s := streams.get(args[0].Int()); s != nil {
 			s.cancel()
 		}
+		return nil
+	}))
+	api.Set("bodyChunk", js.FuncOf(func(this js.Value, args []js.Value) any {
+		bodyChunk(args[0].Int(), args[1].Int())
 		return nil
 	}))
 	api.Set("refuse", js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -130,6 +135,9 @@ func readRequest(r js.Value) *request {
 	if b := r.Get("body"); b.Truthy() {
 		req.body = make([]byte, b.Get("length").Int())
 		js.CopyBytesToGo(req.body, b)
+	}
+	if id := r.Get("bodyStream"); id.Truthy() {
+		req.bodyStream = newReqBody(id.Int())
 	}
 	return req
 }

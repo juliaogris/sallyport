@@ -20,12 +20,9 @@ const HUB_INSTANCE = 'hub';
 
 // The most bytes a login host request body, or the body of the handoff on
 // an app host, may have. A WebAuthn answer or credential is a few KB, and
-// the body is held in JavaScript and in Go.
+// the body is held in JavaScript and in Go. Any other app request body
+// goes to Go as it arrives.
 const LOGIN_BODY_LIMIT = 64 * 1024;
-// The most bytes an app request body may have. The body is held in
-// JavaScript and in Go before it goes to the app, and the isolate has 128
-// MB for both and the Go program's linear memory, which never shrinks.
-const APP_BODY_LIMIT = 8 << 20;
 
 // The app host path of the launch handoff, and the hub's app cookies.
 const AUTH_PATH = '/x-teleport-auth';
@@ -64,10 +61,14 @@ export default {
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
           return textError('upgrade required', 426);
         }
-        // The lazy hub takes only a control socket or a stream on
-        // /tunnel/auth. An auth pipe from a callout in pool mode would wake
-        // the Durable Object for nothing.
-        if (env.HUB_MODE === 'lazy' && url.pathname === '/tunnel/auth') {
+        // The lazy hub has no agent tunnel, and takes only a control socket
+        // or a stream on /tunnel/auth of CALLOUT_HOST. Anything else would
+        // wake the Durable Object for nothing, for example an auth pipe
+        // from a callout in pool mode.
+        if (env.HUB_MODE === 'lazy') {
+          if (url.pathname === '/webapi/connectionupgrade' || url.hostname !== env.CALLOUT_HOST) {
+            return textError('not found', 404);
+          }
           const mode = url.searchParams.get('mode');
           if (mode !== 'control' && mode !== 'stream') return textError('not found', 404);
         }
@@ -190,6 +191,10 @@ class program {
     this.sockets = new Map();
     this.streams = new Map();
     this.pending = new Set();
+    // The app request bodies Go reads as they arrive, by ID, each with its
+    // reader and the rest of the chunk Go has not taken.
+    this.bodies = new Map();
+    this.nextBody = 0;
     this.exited = false;
     this.ready = this.start(env);
   }
@@ -241,6 +246,12 @@ class program {
       s.resolve();
     }
     this.streams.clear();
+    for (const b of this.bodies.values()) {
+      try {
+        b.reader.cancel();
+      } catch {}
+    }
+    this.bodies.clear();
     for (const resolve of this.pending) resolve(new Response('service restart', { status: 503 }));
     this.pending.clear();
     if (current === this) current = null;
@@ -342,6 +353,46 @@ class program {
           else if (last) s.ctl.close();
         } catch {}
         s.resolve();
+      },
+      // Copies the next bytes of app request body id into buf, at most its
+      // length, and passes Go their count with api.bodyChunk, or -1 at the
+      // end of the body, or -2 for an error. Returns false when the body
+      // is gone.
+      readBody(id, buf) {
+        const b = p.bodies.get(id);
+        if (!b) return false;
+        (async () => {
+          let n;
+          try {
+            while (b.rest.length === 0) {
+              const { done, value } = await b.reader.read();
+              if (done) break;
+              b.rest = value;
+            }
+            n = Math.min(b.rest.length, buf.length);
+            if (n === 0) {
+              n = -1;
+              p.bodies.delete(id);
+            } else {
+              buf.set(b.rest.subarray(0, n));
+              b.rest = b.rest.subarray(n);
+            }
+          } catch (e) {
+            console.log('glue: request body: ' + e);
+            p.bodies.delete(id);
+            n = -2;
+          }
+          if (!p.exited) p.api.bodyChunk(id, n);
+        })();
+        return true;
+      },
+      // Stops reading app request body id.
+      cancelBody(id) {
+        const b = p.bodies.get(id);
+        p.bodies.delete(id);
+        try {
+          b?.reader.cancel();
+        } catch {}
       },
       // The size of the WASM linear memory in bytes.
       linearMem() {
@@ -494,10 +545,17 @@ export class Hub extends DurableObject {
     }
     const p = await programFor(this, this.env);
     let body = null;
+    let bodyStream = 0;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-      const app = classify(this.env, url.hostname) === 'app' && url.pathname !== AUTH_PATH;
-      body = await readBody(req, app ? APP_BODY_LIMIT : LOGIN_BODY_LIMIT);
-      if (body === null) return textError('request body too large', 413);
+      if (classify(this.env, url.hostname) === 'app' && url.pathname !== AUTH_PATH) {
+        // An app request body goes to Go as it arrives, as Go reads it, so
+        // that a large upload is never held whole.
+        bodyStream = ++p.nextBody;
+        p.bodies.set(bodyStream, { reader: req.body.getReader(), rest: new Uint8Array(0) });
+      } else {
+        body = await readBody(req, LOGIN_BODY_LIMIT);
+        if (body === null) return textError('request body too large', 413);
+      }
     }
     const headers = [];
     for (const [k, v] of req.headers) headers.push(k + ': ' + v);
@@ -508,6 +566,7 @@ export class Hub extends DurableObject {
       query: url.search,
       headers: headers.join('\n'),
       body,
+      bodyStream,
     };
     return new Promise((resolve) => {
       p.pending.add(resolve);
@@ -540,6 +599,7 @@ export class Hub extends DurableObject {
     const client = clientKey(req.headers.get('CF-Connecting-IP'));
     const pending = this.controls().filter((c) => !c.a.verified);
     if (pending.length >= MAX_PENDING_CONTROL) {
+      console.log('lazy: too many control sockets in the challenge, closing the oldest of the busiest client');
       closeWS(busiestOldest(pending, client).ws, 1013, 'try again later');
     }
     const pair = new WebSocketPair();
@@ -590,7 +650,11 @@ export class Hub extends DurableObject {
     // others, also when an older one passes the challenge after it.
     for (const c of this.controls()) {
       if (!c.a.verified || c.ws === ws) continue;
-      if (c.a.acceptedMs > a.acceptedMs) return closeWS(ws, 1000, 'replaced');
+      if (c.a.acceptedMs > a.acceptedMs) {
+        console.log('lazy: control socket replaced by a newer one');
+        return closeWS(ws, 1000, 'replaced');
+      }
+      console.log('lazy: control socket replaced by a newer one');
       closeWS(c.ws, 1000, 'replaced');
     }
     a.verified = true;
