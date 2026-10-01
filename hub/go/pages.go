@@ -66,10 +66,13 @@ document.getElementById('go').onclick = async () => {
 </script>`
 
 const passkeysPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport passkeys</title>
-<p><a href="/">Back</a></p><ul id="list"></ul>
-<p><input id="name" maxlength="30" size="24"> <button id="add">Add a passkey</button></p>
-<p><button id="link">Add a passkey on another device</button></p><pre id="out"></pre>
-<div id="other" hidden><p>Open this link on the other device, or scan the code. <span id="until"></span></p><p><a id="url" style="word-break:break-all"></a></p><canvas id="qr"></canvas></div><script>
+<style>main{max-width:40em}h1{font-size:28px;margin:8px 0 16px}h2{font-size:20px;margin:28px 0 4px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:8px 12px 8px 0;border-bottom:1px solid #ccc;vertical-align:middle}th{font-weight:600;color:#555}td.act{text-align:right;padding-right:0}td button{min-width:0;margin:0;padding:6px 14px;font-size:16px}label{display:block;margin:8px 0 4px}input{font-size:18px;padding:10px;width:100%;max-width:20em;box-sizing:border-box}#out{color:#b00;white-space:pre-wrap}#qr{display:block;margin-top:8px}</style>
+<main><p><a href="/">Back</a></p><h1>Passkeys</h1>
+<table><thead><tr><th>Name</th><th>Added</th><th></th></tr></thead><tbody id="list"></tbody></table>
+<h2>Add a passkey on this device</h2><label for="name">Name</label><input id="name" maxlength="30"><br><button id="add">Add a passkey</button>
+<h2>Add a passkey on another device</h2><button id="link">Show a link and QR code</button>
+<div id="other" hidden><p>Open this link on the other device, or scan the code. <span id="until"></span></p><p><a id="url" style="word-break:break-all"></a></p><canvas id="qr"></canvas></div>
+<pre id="out"></pre></main><script>
 // qr returns the modules of a QR code for text as rows of 0 and 1: byte mode, error correction level M, version 1 to 6, mask 0.
 function qr(text) {
   const bytes = new TextEncoder().encode(text);
@@ -171,14 +174,16 @@ async function answer() {
 async function load() {
   const { passkeys } = await get('/webapi/passkeys');
   list.replaceChildren(...passkeys.map(p => {
-    const li = document.createElement('li');
-    li.append(p.name + ', added ' + p.addedAt.slice(0, 10) + ' ');
+    const tr = document.createElement('tr'), name = document.createElement('td'), added = document.createElement('td'), act = document.createElement('td');
+    name.textContent = p.name;
+    added.textContent = p.addedAt.slice(0, 10);
+    act.className = 'act';
     const b = document.createElement('button');
     b.textContent = 'Remove';
-    b.style.minWidth = '0';
     b.onclick = () => remove(p.name);
-    li.append(b);
-    return li;
+    act.append(b);
+    tr.append(name, added, act);
+    return tr;
   }));
 }
 async function run(f) {
