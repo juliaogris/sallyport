@@ -103,6 +103,7 @@ async fn forward_inner(
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(Err(err)) = conn.await {
             console_log!("appproxy: connection ended: {err}");
+            crate::tunnel::keep_close_line(format!("appproxy: connection ended: {err:?}"));
         }
     });
 
@@ -275,6 +276,7 @@ fn body_stream(
                 None => return None,
                 Some(Err(err)) => {
                     console_error!("appproxy: response body: {err}");
+                    crate::tunnel::keep_close_line(format!("appproxy: response body: {err:?}"));
                     let err = Err(Error::RustError(err.to_string()));
                     return Some((err, (incoming, pulled, done)));
                 }

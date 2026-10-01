@@ -58,6 +58,27 @@ static WS_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
 /// waited for room since the last heartbeat.
 static PIPE_WAIT_MAX_MS: AtomicU64 = AtomicU64::new(0);
 static PIPE_WAIT_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// The last stream close lines, for the temporary lazy debug route,
+    /// because logs after a request ends do not reach `wrangler tail`.
+    pub static CLOSE_LOG: std::cell::RefCell<std::collections::VecDeque<String>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Keeps `line` in [`CLOSE_LOG`], at most 20 lines.
+pub fn keep_close_line(line: String) {
+    CLOSE_LOG.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.len() >= 20 {
+            l.pop_front();
+        }
+        l.push_back(line);
+    });
+}
+
+/// How many bytes a lazy stream passes on between two acks. The sender's
+/// window is larger, so it can keep sending while an ack is on its way.
+pub const ACK_EVERY: u64 = 256 * 1024;
 /// How often the hub logs its counters.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
@@ -153,6 +174,11 @@ impl DurableObject for Hub {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let host = req.url()?.host_str().unwrap_or_default().to_string();
+        // Temporary: the lazy hub's recent stream closes.
+        if self.lazy.is_some() && req.path() == "/webapi/lazy-debug" {
+            let lines = CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
+            return Response::ok(lines);
+        }
         // The login host is also the agents' `PUBLIC_ADDR` and auth's
         // `CALLOUT_HOST`, so the agent and auth reach these paths on it.
         // They are not browser requests.
@@ -367,9 +393,21 @@ pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexS
     pump_idle(ws, events, pipe, None).await
 }
 
-/// Runs [`pump`], and closes the WebSocket when no bytes have crossed in
-/// either direction for `idle`.
+/// Runs [`pump`] for a stream that serves one connection, such as a lazy
+/// hub's stream. When the hub's end stops writing, it keeps reading until
+/// the WebSocket closes, because the far end may still be sending: an
+/// HTTP/1.1 client shuts down its write side while the response arrives.
+/// It closes the WebSocket when no bytes have crossed in either direction
+/// for `idle`.
 pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream, idle: Option<Duration>) {
+    let half_close = idle.is_some();
+    // A lazy stream has no flow control of its own, so the hub tells the
+    // sender how many bytes it has passed on, and the sender keeps at most
+    // a window of bytes unacknowledged. Without it, a fast sender fills the
+    // buffer between it and the hub, and the runtime drops the WebSocket.
+    let ack = half_close;
+    let delivered = Cell::new(0u64);
+    let acked = Cell::new(0u64);
     let (mut rd, mut wr) = tokio::io::split(pipe);
     let started = Date::now().as_millis();
     let last_any = Cell::new(started);
@@ -400,7 +438,9 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
                 }
             }
         }
-        let _ = ws.close(Some(1000), Some("pipe closed"));
+        if !half_close {
+            let _ = ws.close(Some(1000), Some("pipe closed"));
+        }
     };
 
     let inbound = async {
@@ -426,6 +466,13 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
                     if let Err(err) = written {
                         console_error!("tunnel: pipe write: {err}");
                         break;
+                    }
+                    if ack {
+                        delivered.set(delivered.get() + bytes.len() as u64);
+                        if delivered.get() - acked.get() >= ACK_EVERY {
+                            acked.set(delivered.get());
+                            let _ = ws.send_with_str(format!("ack {}", delivered.get()));
+                        }
                     }
                 }
                 Ok(WebsocketEvent::Close(close)) => {
@@ -465,15 +512,30 @@ pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe
     };
     let outbound = pin!(outbound);
     let inbound = pin!(inbound);
-    let main = select(outbound, inbound);
-    let (close_code, queue_max, queue_wait_max) = match select(main, pin!(idle_watch)).await {
-        Either::Left((Either::Left(((), _)), _)) => (Some("none, the pipe closed first".to_string()), 0, 0),
-        Either::Left((Either::Right((stats, _)), _)) => stats,
+    let main = async {
+        match select(outbound, inbound).await {
+            // A half-closing stream keeps reading until the WebSocket closes.
+            Either::Left(((), inbound)) if half_close => inbound.await,
+            Either::Left(((), _)) => (Some("none, the pipe closed first".to_string()), 0, 0),
+            Either::Right((stats, _)) => stats,
+        }
+    };
+    let (close_code, queue_max, queue_wait_max) = match select(pin!(main), pin!(idle_watch)).await {
+        Either::Left((stats, _)) => stats,
         Either::Right(_) => (Some(format!("idle for {idle:?}")), 0, 0),
     };
     // Tunnel drops close with 1006. The counts show whether a drop follows a
     // burst of messages, and the waits whether the hub fell behind.
     let now = Date::now().as_millis();
+    keep_close_line(format!(
+        "{} close {}, after {} ms, in {} msgs, out {} msgs, last in {} ms before",
+        Date::now().to_string(),
+        close_code.clone().unwrap_or_else(|| "none".to_string()),
+        now.saturating_sub(started),
+        in_msgs.get(),
+        out_msgs.get(),
+        now.saturating_sub(last_in.get()),
+    ));
     console_log!(
         "tunnel: websocket closed, code {}, after {} s, in {} msgs largest {} bytes, out {} msgs, last in {} ms before, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} ms",
         close_code.unwrap_or_else(|| "none".to_string()),
