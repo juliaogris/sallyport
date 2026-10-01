@@ -54,16 +54,18 @@ const CHALLENGE_DEADLINE_MS: u64 = 10_000;
 /// oldest socket of the client address with the most in the challenge, with
 /// 1013, so that one address cannot close the callout's socket.
 const MAX_PENDING_CONTROL: usize = 4;
-/// Dials waiting for their stream. Above this a dial fails at once. Auth's
-/// callout allows a burst of 128 dials of each kind, and a page load can
-/// send more than 32 app requests at once, each of which is one dial.
+/// Dials waiting for their stream or for an app stream's place. Above this
+/// a dial fails at once. Auth's callout allows a burst of 128 dials of each
+/// kind, and a page load can send more than 32 app requests at once, each
+/// of which is one dial.
 const MAX_PENDING_DIALS: usize = 128;
 /// Dials for callers that have not signed in, such as a passkey login,
 /// that may wait at once. Above this such a dial fails at once, so that
 /// logins cannot take the pending dials of signed-in users.
 const MAX_PENDING_ANONYMOUS: usize = 8;
-/// App streams open at once, waiting for their stream or paired. Above
-/// this an app dial fails at once. Each stream can hold about 2.3 MiB: 1 MiB
+/// App streams open at once, waiting for their stream or paired. At this
+/// many, an app dial waits for one to close, and fails when none closes
+/// within [`STREAM_WAIT`]. Each stream can hold about 2.3 MiB: 1 MiB
 /// queued by [`crate::wsevents`], up to 1 MiB sent and not yet acked, two
 /// 64 KiB pipe halves, and TLS and HTTP buffers. 32 streams hold at most
 /// about 74 MiB, which leaves room under the Durable Object's 128 MB for the
@@ -178,22 +180,74 @@ struct PendingDial {
     slot: Option<Slot>,
 }
 
-/// One app stream's place in [`MAX_APP_STREAMS`]. Dropping it frees the
-/// place.
-struct Slot(Rc<Cell<usize>>);
+/// The places for app streams, of which `cap` can be taken at once.
+struct Slots {
+    open: Cell<usize>,
+    cap: usize,
+    /// Wakes one waiting dial when a place is freed.
+    freed: tokio::sync::Notify,
+}
+
+impl Slots {
+    fn new(cap: usize) -> Rc<Self> {
+        Rc::new(Self {
+            open: Cell::new(0),
+            cap,
+            freed: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+/// One app stream's place in [`Slots`]. Dropping it frees the place.
+struct Slot(Rc<Slots>);
 
 impl Slot {
-    /// Takes a place in `open`, or returns None when `cap` are taken.
-    fn take(open: &Rc<Cell<usize>>, cap: usize) -> Option<Self> {
-        if open.get() >= cap {
+    /// Takes a place, or returns None when all are taken.
+    fn take(slots: &Rc<Slots>) -> Option<Self> {
+        if slots.open.get() >= slots.cap {
             return None;
         }
-        open.set(open.get() + 1);
-        Some(Self(open.clone()))
+        slots.open.set(slots.open.get() + 1);
+        Some(Self(slots.clone()))
+    }
+
+    /// Takes a place, and waits for one to be freed when all are taken. It
+    /// returns None when `deadline` completes first.
+    async fn wait<D: std::future::Future + Unpin>(
+        slots: &Rc<Slots>,
+        deadline: &mut D,
+    ) -> Option<Self> {
+        loop {
+            if let Some(slot) = Self::take(slots) {
+                return Some(slot);
+            }
+            let freed = pin!(slots.freed.notified());
+            if let Either::Right(_) = select(freed, &mut *deadline).await {
+                return None;
+            }
+        }
     }
 }
 
 impl Drop for Slot {
+    fn drop(&mut self) {
+        let slots = &self.0;
+        slots.open.set(slots.open.get().saturating_sub(1));
+        slots.freed.notify_one();
+    }
+}
+
+/// Counts one dial in `waiting` while it lives.
+struct Waiting<'a>(&'a Cell<usize>);
+
+impl<'a> Waiting<'a> {
+    fn new(waiting: &'a Cell<usize>) -> Self {
+        waiting.set(waiting.get() + 1);
+        Self(waiting)
+    }
+}
+
+impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         self.0.set(self.0.get().saturating_sub(1));
     }
@@ -210,7 +264,10 @@ pub struct Lazy {
     /// Dials waiting for their stream, by id, for [`MAX_PENDING_DIALS`].
     dials: RefCell<HashMap<String, PendingDial>>,
     /// App streams waiting or open, for [`MAX_APP_STREAMS`].
-    app_streams: Rc<Cell<usize>>,
+    app_streams: Rc<Slots>,
+    /// App dials waiting for a place in `app_streams`, which count toward
+    /// [`MAX_PENDING_DIALS`].
+    waiting: Cell<usize>,
 }
 
 impl Lazy {
@@ -231,7 +288,8 @@ impl Lazy {
             key,
             host,
             dials: RefCell::new(HashMap::new()),
-            app_streams: Rc::new(Cell::new(0)),
+            app_streams: Slots::new(MAX_APP_STREAMS),
+            waiting: Cell::new(0),
         });
         LAZY.with(|l| *l.borrow_mut() = Some(lazy.clone()));
         console_log!("lazy: woke, {} sockets", lazy.state.get_websockets().len());
@@ -377,21 +435,23 @@ impl Lazy {
     }
 
     /// Asks auth's callout for a stream and waits up to [`STREAM_WAIT`]
-    /// for it. It returns [`DialError::Failed`] at once when
-    /// [`MAX_PENDING_DIALS`] dials wait. It returns [`DialError::Busy`] at
-    /// once for [`Caller::Anonymous`] when [`MAX_PENDING_ANONYMOUS`] such
-    /// dials wait, for an app stream when [`MAX_APP_STREAMS`] are open, and
-    /// when the callout refuses the dial.
+    /// for it. When [`MAX_APP_STREAMS`] are open, an app dial first waits
+    /// for one to close, within the same [`STREAM_WAIT`]. It returns
+    /// [`DialError::Failed`] at once when [`MAX_PENDING_DIALS`] dials wait.
+    /// It returns [`DialError::Busy`] at once for [`Caller::Anonymous`] when
+    /// [`MAX_PENDING_ANONYMOUS`] such dials wait, when no app stream closes
+    /// in time, and when the callout refuses the dial.
     pub async fn dial(
         &self,
         kind: Kind,
         caller: Caller,
     ) -> std::result::Result<DuplexStream, DialError> {
         let started = Date::now().as_millis();
-        let control = self
-            .control()
-            .ok_or_else(|| DialError::Failed("auth is not connected".to_string()))?;
-        if self.dials.borrow().len() >= MAX_PENDING_DIALS {
+        let not_connected = || DialError::Failed("auth is not connected".to_string());
+        if !self.connected() {
+            return Err(not_connected());
+        }
+        if self.dials.borrow().len() + self.waiting.get() >= MAX_PENDING_DIALS {
             return Err(DialError::Failed(format!(
                 "{MAX_PENDING_DIALS} dials waiting"
             )));
@@ -404,13 +464,22 @@ impl Lazy {
                 "{MAX_PENDING_ANONYMOUS} dials waiting for callers that have not signed in"
             )));
         }
-        let slot =
-            match kind {
-                Kind::App => Some(Slot::take(&self.app_streams, MAX_APP_STREAMS).ok_or_else(
-                    || DialError::Busy(format!("{MAX_APP_STREAMS} app streams open")),
-                )?),
-                Kind::Auth => None,
-            };
+        let mut deadline = pin!(crate::sockets::sleep(STREAM_WAIT));
+        let slot = match kind {
+            Kind::App => {
+                let _waiting = Waiting::new(&self.waiting);
+                let Some(slot) = Slot::wait(&self.app_streams, &mut deadline).await else {
+                    console_log!("lazy: no app stream closed within {STREAM_WAIT:?}");
+                    return Err(DialError::Busy(format!(
+                        "{MAX_APP_STREAMS} app streams open"
+                    )));
+                };
+                Some(slot)
+            }
+            Kind::Auth => None,
+        };
+        // The control socket can change while an app dial waits.
+        let control = self.control().ok_or_else(not_connected)?;
         let mut raw = [0u8; 32];
         getrandom::getrandom(&mut raw).map_err(|e| DialError::Failed(format!("stream id: {e}")))?;
         let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
@@ -433,7 +502,7 @@ impl Lazy {
         if let Err(err) = control.send_with_str(format!("dial {} {id}", kind.as_str())) {
             return Err(DialError::Failed(format!("sending dial: {err}")));
         }
-        let res = match select(rx, pin!(crate::sockets::sleep(STREAM_WAIT))).await {
+        let res = match select(rx, deadline).await {
             Either::Left((Ok(Some(stream)), _)) => Ok(stream),
             Either::Left((Ok(None), _)) => Err(DialError::Busy(format!(
                 "auth refused the {} dial",
@@ -603,7 +672,7 @@ mod tests {
 
     #[test]
     fn dial_guard_removes_the_id_and_frees_its_slot() {
-        let open = Rc::new(Cell::new(0));
+        let slots = Slots::new(1);
         let dials = RefCell::new(HashMap::new());
         let (tx, _rx) = oneshot::channel();
         dials.borrow_mut().insert(
@@ -612,16 +681,16 @@ mod tests {
                 kind: Kind::App,
                 caller: Caller::SignedIn,
                 tx,
-                slot: Slot::take(&open, 1),
+                slot: Slot::take(&slots),
             },
         );
-        assert_eq!(open.get(), 1);
+        assert_eq!(slots.open.get(), 1);
         drop(DialGuard {
             dials: &dials,
             id: "x".to_string(),
         });
         assert!(dials.borrow().is_empty());
-        assert_eq!(open.get(), 0);
+        assert_eq!(slots.open.get(), 0);
     }
 
     #[test]
@@ -648,13 +717,36 @@ mod tests {
 
     #[test]
     fn slot_take_stops_at_the_cap() {
-        let open = Rc::new(Cell::new(0));
-        let a = Slot::take(&open, 2).unwrap();
-        let _b = Slot::take(&open, 2).unwrap();
-        assert!(Slot::take(&open, 2).is_none());
-        assert_eq!(open.get(), 2);
+        let slots = Slots::new(2);
+        let a = Slot::take(&slots).unwrap();
+        let _b = Slot::take(&slots).unwrap();
+        assert!(Slot::take(&slots).is_none());
+        assert_eq!(slots.open.get(), 2);
         drop(a);
-        assert_eq!(open.get(), 1);
-        assert!(Slot::take(&open, 2).is_some());
+        assert_eq!(slots.open.get(), 1);
+        assert!(Slot::take(&slots).is_some());
+    }
+
+    #[test]
+    fn slot_wait_takes_a_freed_place_or_gives_up() {
+        use futures::executor::block_on;
+        use futures::future::{join, pending, ready};
+
+        let slots = Slots::new(1);
+        let held = Slot::take(&slots).unwrap();
+        assert!(block_on(Slot::wait(&slots, &mut ready(()))).is_none());
+
+        let mut never = pending::<()>();
+        let (got, ()) = block_on(join(Slot::wait(&slots, &mut never), async {
+            drop(held);
+        }));
+        assert!(got.is_some());
+        assert_eq!(slots.open.get(), 1);
+
+        let waiting = Cell::new(0);
+        let w = Waiting::new(&waiting);
+        assert_eq!(waiting.get(), 1);
+        drop(w);
+        assert_eq!(waiting.get(), 0);
     }
 }
