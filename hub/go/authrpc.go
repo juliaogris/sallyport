@@ -99,9 +99,9 @@ func (h *hub) connectAuth(ctx context.Context, cert tls.Certificate, h2 bool) (*
 		Protocols:          protos,
 		DisableCompression: true,
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			stream := h.pool.take()
-			if stream == nil {
-				return nil, errors.New("no auth pipe stream")
+			stream, err := h.authStream(ctx)
+			if err != nil {
+				return nil, err
 			}
 			tc := tls.Client(stream, h.authTLS(cert, alpn...))
 			if err := tc.HandshakeContext(ctx); err != nil {
@@ -116,6 +116,18 @@ func (h *hub) connectAuth(ctx context.Context, cert tls.Certificate, h2 bool) (*
 		},
 	}
 	return tr.NewClientConn(ctx, "https", authSNI+":443")
+}
+
+// authStream returns a stream to auth: a dial of kind auth in the lazy
+// hub, and otherwise a stream from the auth pipe pool.
+func (h *hub) authStream(ctx context.Context) (net.Conn, error) {
+	if h.lazy != nil {
+		return h.lazy.dial(ctx, "auth")
+	}
+	if stream := h.pool.take(); stream != nil {
+		return stream, nil
+	}
+	return nil, errors.New("no auth pipe stream")
 }
 
 // unary makes one unary call within callDeadline and returns the response

@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall/js"
 	"time"
 )
@@ -43,6 +45,17 @@ type wsConn struct {
 	// code is the close code from the peer, or 0.
 	code  int
 	flush chan struct{}
+
+	// lazy is true for a lazy hub's stream, which acks the bytes Read has
+	// passed on and closes after lazyStreamIdle without bytes.
+	lazy bool
+	// delivered and acked count the bytes Read has passed on, and those
+	// up to the last ack.
+	delivered, acked int64
+	// lastBytes is when bytes last crossed in either direction, in Unix
+	// milliseconds.
+	lastBytes atomic.Int64
+	idle      *time.Timer
 }
 
 // connTable maps connection IDs to connections for the JavaScript
@@ -92,6 +105,7 @@ func acceptWS() *wsConn {
 // block.
 func (c *wsConn) pushIn(n int) {
 	js.CopyBytesToGo(c.inBuf[:n], c.in)
+	c.lastBytes.Store(time.Now().UnixMilli())
 	c.mu.Lock()
 	if c.roff == len(c.rbuf) {
 		c.rbuf, c.roff = c.rbuf[:0], 0
@@ -107,6 +121,9 @@ func (c *wsConn) remoteClosed(code int) {
 	c.closed = true
 	c.code = code
 	c.pend = c.pend[:0]
+	if c.idle != nil {
+		c.idle.Stop()
+	}
 	c.cond.Broadcast()
 	c.mu.Unlock()
 	select {
@@ -126,6 +143,13 @@ func (c *wsConn) Read(b []byte) (int, error) {
 	}
 	n := copy(b, c.rbuf[c.roff:])
 	c.roff += n
+	if c.lazy {
+		c.delivered += int64(n)
+		if c.delivered-c.acked >= ackEvery {
+			c.acked = c.delivered
+			glue.sendText.Invoke(c.id, "ack "+strconv.FormatInt(c.delivered, 10))
+		}
+	}
 	if c.roff == len(c.rbuf) {
 		c.rbuf, c.roff = c.rbuf[:0], 0
 		if cap(c.rbuf) > keepReadBytes {
@@ -142,6 +166,9 @@ func (c *wsConn) Write(b []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	c.pend = append(c.pend, b...)
+	if c.lazy {
+		c.lastBytes.Store(time.Now().UnixMilli())
+	}
 	if len(c.pend) >= outBytes {
 		c.flushLocked()
 		return len(b), nil
@@ -200,6 +227,9 @@ func (c *wsConn) CloseWith(code int, reason string) error {
 	}
 	c.flushLocked()
 	c.closed = true
+	if c.idle != nil {
+		c.idle.Stop()
+	}
 	c.cond.Broadcast()
 	c.mu.Unlock()
 	conns.remove(c.id)
@@ -209,6 +239,33 @@ func (c *wsConn) CloseWith(code int, reason string) error {
 	default:
 	}
 	return nil
+}
+
+// startLazy makes c a lazy hub's stream: Read acks what it passes on, and
+// c closes after lazyStreamIdle without bytes. The timer runs only while c
+// is open, so an idle hub has none.
+func (c *wsConn) startLazy() {
+	c.lastBytes.Store(time.Now().UnixMilli())
+	c.mu.Lock()
+	c.lazy = true
+	c.idle = time.AfterFunc(lazyStreamIdle, c.checkIdle)
+	c.mu.Unlock()
+}
+
+// checkIdle closes c if no bytes have crossed for lazyStreamIdle, and
+// otherwise checks again when that time would be up.
+func (c *wsConn) checkIdle() {
+	left := lazyStreamIdle - time.Since(time.UnixMilli(c.lastBytes.Load()))
+	if left <= 0 {
+		logf("lazy: stream idle for %v, closing", lazyStreamIdle)
+		c.CloseWith(1000, "idle")
+		return
+	}
+	c.mu.Lock()
+	if !c.closed {
+		c.idle.Reset(left)
+	}
+	c.mu.Unlock()
 }
 
 // waitClosed returns once either side has closed the connection.

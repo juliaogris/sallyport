@@ -18,7 +18,7 @@ var envNames = []string{
 	"CLUSTER_NAME", "PUBLIC_ADDR", "SERVER_VERSION", "CALLOUT_HOST",
 	"DOMAIN", "OWNER", "APPS",
 	"HUB_TLS_CERT", "HUB_TLS_KEY", "HUB_SSH_KEY", "HUB_SSH_CERT",
-	"HOST_CA_SSH", "HOST_CA_TLS", "AUTH_CALLOUT_PUBKEY",
+	"HOST_CA_SSH", "HOST_CA_TLS", "AUTH_CALLOUT_PUBKEY", "HUB_MODE",
 }
 
 // config is the hub's parsed env. A secret that does not parse leaves its
@@ -30,6 +30,9 @@ type config struct {
 	owner       string
 	domain      string
 	apps        []app
+	// lazy is true when HUB_MODE is lazy: auth's callout keeps one control
+	// socket open, and the hub asks it for a stream each time it needs one.
+	lazy bool
 
 	// tlsCert is the hub TLS identity: the tunnel's server certificate and
 	// the client certificate toward auth.
@@ -58,6 +61,7 @@ func parseConfig(env map[string]string) *config {
 		owner:       env["OWNER"],
 		domain:      env["DOMAIN"],
 		apps:        parseApps(env["APPS"]),
+		lazy:        env["HUB_MODE"] == "lazy",
 		errs:        make(map[string]error),
 	}
 	secret := func(name string) []byte {

@@ -38,12 +38,33 @@ const spCookiePrefix = "__Host-sp_"
 // own 502 body. Every other failure gets the same fixed body.
 var errSwitchingProtocols = errors.New("app answered 101 Switching Protocols")
 
-// forward sends req to the app service at host through the tunnel, as the
-// user with the given certificate. A dial, TLS or HTTP failure logs the
+// appDialer opens a connection to the app service: a channel of the agent
+// tunnel, or a stream from auth's callout in the lazy hub.
+type appDialer func(ctx context.Context) (net.Conn, error)
+
+// tunnelDialer returns the appDialer that dials into the agent over t.
+func tunnelDialer(t *appTunnel) appDialer {
+	return func(context.Context) (net.Conn, error) {
+		ch, err := t.dial()
+		if err != nil {
+			return nil, err
+		}
+		return chanConn{ch}, nil
+	}
+}
+
+// appDialer returns the appDialer that asks auth's callout for an app
+// stream.
+func (l *lazyHub) appDialer() appDialer {
+	return func(ctx context.Context) (net.Conn, error) { return l.dial(ctx, "app") }
+}
+
+// forward sends req to the app service at host over a connection from
+// dial, as the user with the given certificate. A dial, TLS or HTTP failure logs the
 // error and returns a 502 "app unavailable". A 101 from the app returns a
 // 502 that says so.
-func (h *hub) forward(t *appTunnel, cert tls.Certificate, host string, req *request) *response {
-	res, err := h.forwardInner(t, cert, host, req)
+func (h *hub) forward(dial appDialer, cert tls.Certificate, host string, req *request) *response {
+	res, err := h.forwardInner(dial, cert, host, req)
 	if errors.Is(err, errSwitchingProtocols) {
 		logf("appproxy: %v", err)
 		return textError(err.Error(), 502)
@@ -55,7 +76,7 @@ func (h *hub) forward(t *appTunnel, cert tls.Certificate, host string, req *requ
 	return res
 }
 
-func (h *hub) forwardInner(t *appTunnel, cert tls.Certificate, host string, req *request) (*response, error) {
+func (h *hub) forwardInner(dial appDialer, cert tls.Certificate, host string, req *request) (*response, error) {
 	if err := h.cfg.err("HOST_CA_TLS"); err != nil {
 		return nil, err
 	}
@@ -66,17 +87,24 @@ func (h *hub) forwardInner(t *appTunnel, cert tls.Certificate, host string, req 
 		Protocols:          protos,
 		DisableCompression: true,
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			ch, err := t.dial()
+			conn, err := dial(ctx)
 			if err != nil {
 				return nil, err
 			}
-			tc := tls.Client(chanConn{ch}, &tls.Config{
+			// The handshake on a lazy stream must finish within
+			// lazyDialDeadline. A tunnel channel has no such deadline.
+			if h.lazy != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, lazyDialDeadline)
+				defer cancel()
+			}
+			tc := tls.Client(conn, &tls.Config{
 				ServerName:   sni,
 				RootCAs:      h.cfg.hostCATLS,
 				Certificates: []tls.Certificate{cert},
 			})
 			if err := tc.HandshakeContext(ctx); err != nil {
-				ch.Close()
+				conn.Close()
 				return nil, fmt.Errorf("tls connect: %w", err)
 			}
 			return tc, nil

@@ -46,11 +46,16 @@ type hub struct {
 
 	pool *authPool
 	auth *hubAuth
+	// lazy is the lazy hub, when HUB_MODE is lazy, or nil.
+	lazy *lazyHub
 }
 
 func newHub(env map[string]string) *hub {
 	h := &hub{cfg: parseConfig(env), pool: &authPool{}}
 	h.auth = &hubAuth{h: h}
+	if h.cfg.lazy {
+		h.lazy = &lazyHub{}
+	}
 	for _, err := range h.cfg.errs {
 		logf("hub: config: %v", err)
 	}
@@ -78,6 +83,9 @@ func (h *hub) serve(req *request) (res *response) {
 		return h.appHostRequest(req, name)
 	case kind == hostLogin && !special:
 		return h.loginHostRequest(req)
+	}
+	if h.lazy != nil {
+		return h.lazy.serve(req)
 	}
 	if req.path == authPipePath {
 		return h.acceptAuthPipe(req)

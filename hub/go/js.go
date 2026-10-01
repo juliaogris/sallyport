@@ -14,7 +14,8 @@ import (
 // glue holds the JavaScript functions of worker.mjs that Go calls. They are
 // read once, so a call creates no new js.Value for the function.
 var glue struct {
-	accept, send, close, stream, chunk, linearMem, jsValues, tokenUsed, tokenUse js.Value
+	accept, send, sendText, close, stream, chunk, linearMem, jsValues js.Value
+	tokenUsed, tokenUse, dial, connected                              js.Value
 }
 
 var uint8Array = js.Global().Get("Uint8Array")
@@ -27,10 +28,11 @@ func main() {
 
 	g := js.Global().Get("sallyportGlue")
 	for name, v := range map[string]*js.Value{
-		"accept": &glue.accept, "send": &glue.send, "close": &glue.close,
-		"stream": &glue.stream, "chunk": &glue.chunk,
+		"accept": &glue.accept, "send": &glue.send, "sendText": &glue.sendText,
+		"close": &glue.close, "stream": &glue.stream, "chunk": &glue.chunk,
 		"linearMem": &glue.linearMem, "jsValues": &glue.jsValues,
 		"tokenUsed": &glue.tokenUsed, "tokenUse": &glue.tokenUse,
+		"dial": &glue.dial, "connected": &glue.connected,
 	} {
 		*v = g.Get(name)
 	}
@@ -79,7 +81,11 @@ func main() {
 		return nil
 	}))
 	js.Global().Set("sallyport", api)
-	go h.heartbeat()
+	// The lazy hub starts no timers while idle, so that the object can
+	// hibernate.
+	if !h.cfg.lazy {
+		go h.heartbeat()
+	}
 	select {}
 }
 

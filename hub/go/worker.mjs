@@ -204,6 +204,18 @@ class program {
           return false;
         }
       },
+      // Sends s as a text message, for a lazy stream's ack.
+      sendText(id, s) {
+        const ws = p.sockets.get(id);
+        if (!ws) return false;
+        try {
+          ws.send(s);
+          return true;
+        } catch (e) {
+          console.log('glue: websocket send: ' + e);
+          return false;
+        }
+      },
       close(id, code, reason) {
         const ws = p.sockets.get(id);
         p.sockets.delete(id);
@@ -272,6 +284,23 @@ class program {
         sql.exec('DELETE FROM used_tokens WHERE expires <= ?', now);
         sql.exec('INSERT OR REPLACE INTO used_tokens (id, expires) VALUES (?, ?)', id, expires);
       },
+      // Asks auth's callout for a stream of kind auth or app with the given
+      // id, on the verified control socket. Returns false if there is none.
+      dial(kind, id) {
+        const c = p.owner.controls().find((c) => c.a.verified);
+        if (!c) return false;
+        try {
+          c.ws.send('dial ' + kind + ' ' + id);
+          return true;
+        } catch (e) {
+          console.log('lazy: sending dial: ' + e);
+          return false;
+        }
+      },
+      // Reports whether a verified control socket is open.
+      connected() {
+        return p.owner.controls().some((c) => c.a.verified);
+      },
     };
   }
 }
@@ -293,6 +322,24 @@ async function programFor(owner, env) {
   return p;
 }
 
+// The lazy hub's control socket. Auth's callout keeps one open with
+// callout_mode: on_demand. The hub sends a 32-byte nonce, and auth replies
+// with its own nonce and an Ed25519 signature, by AUTH_CALLOUT_PUBKEY, over
+// "sallyport/authpipe/v1" || CALLOUT_HOST || hub nonce || auth nonce, as on
+// the auth pipe. The socket is accepted with the hibernation API, and its
+// state is in its attachment, so it survives hibernation. Go sends dials on
+// it through glue.dial.
+const CONTROL = 'control';
+const AUTHPIPE_DOMAIN = 'sallyport/authpipe/v1';
+const NONCE_BYTES = 32;
+const SIGNATURE_BYTES = 64;
+// A control socket that has not passed the challenge by then is closed.
+const CHALLENGE_DEADLINE_MS = 10_000;
+// Control sockets in the challenge. Above this the oldest is closed.
+const MAX_PENDING_CONTROL = 4;
+// The readyState of an open WebSocket.
+const OPEN = 1;
+
 export class Hub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -300,12 +347,31 @@ export class Hub extends DurableObject {
     // The privilege tokens that have added a passkey, so that a token is
     // used once. Storage outlives a deploy, which restarts the Go program.
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS used_tokens (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)');
+    this.lazy = env.HUB_MODE === 'lazy';
+    if (this.lazy) {
+      // The runtime answers "ping" without waking the object. The lazy hub
+      // starts the Go program on the first request that needs it, so a
+      // control socket message does not start it.
+      ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+      console.log('lazy: woke, ' + ctx.getWebSockets().length + ' sockets');
+      return;
+    }
     this.program = programFor(this, env);
   }
 
   async fetch(req) {
-    const p = await programFor(this, this.env);
     const url = new URL(req.url);
+    if (this.lazy) {
+      this.prune();
+      if (
+        url.pathname === '/tunnel/auth' &&
+        url.searchParams.get('mode') === 'control' &&
+        classify(this.env, url.hostname) !== 'app'
+      ) {
+        return this.acceptControl(req);
+      }
+    }
+    const p = await programFor(this, this.env);
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
       const limit = classify(this.env, url.hostname) === 'login' ? LOGIN_BODY_LIMIT : Infinity;
@@ -336,6 +402,143 @@ export class Hub extends DurableObject {
       });
     });
   }
+
+  // Accepts a control socket and sends it the challenge nonce.
+  async acceptControl(req) {
+    // Auth's callout sends no Origin, and a browser always sends one.
+    if (req.headers.has('Origin')) return textError('origin not allowed', 403);
+    const key = await this.calloutKey();
+    if (typeof key === 'string') {
+      console.log('lazy: ' + key);
+      return textError(key, 500);
+    }
+    const pending = this.controls().filter((c) => !c.a.verified);
+    if (pending.length >= MAX_PENDING_CONTROL) {
+      const oldest = pending.reduce((x, y) => (y.a.acceptedMs < x.a.acceptedMs ? y : x));
+      closeWS(oldest.ws, 1008, 'too many sockets in the challenge');
+    }
+    const pair = new WebSocketPair();
+    const ws = pair[1];
+    this.ctx.acceptWebSocket(ws, [CONTROL]);
+    const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
+    ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false });
+    ws.send(nonce);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  // Handles a message on a control socket: the challenge reply while it is
+  // pending. A verified socket that sends anything is closed. "ping" never
+  // arrives here.
+  async webSocketMessage(ws, msg) {
+    if (!this.lazy) return closeWS(ws, 1011, 'no handler');
+    this.prune();
+    if (ws.readyState !== OPEN) return;
+    const a = ws.deserializeAttachment();
+    if (!a) return closeWS(ws, 1008, 'unknown socket');
+    if (a.verified) {
+      console.log('lazy: unexpected message on the control socket, closing it');
+      return closeWS(ws, 1008, 'unexpected message');
+    }
+    const reply = typeof msg === 'string' ? new Uint8Array(0) : new Uint8Array(msg);
+    const err = await this.verifyReply(a.nonce, reply);
+    if (err) {
+      console.log('lazy: control challenge failed, ' + err);
+      return closeWS(ws, 1008, 'challenge');
+    }
+    if (ws.readyState !== OPEN) return;
+    // A newly verified control socket replaces the older ones.
+    for (const c of this.controls()) {
+      if (c.a.verified && c.ws !== ws) closeWS(c.ws, 1000, 'replaced');
+    }
+    a.verified = true;
+    a.nonce = [];
+    ws.serializeAttachment(a);
+    console.log('lazy: control socket verified');
+  }
+
+  // Without the auto-reply flag the runtime needs the close echoed.
+  async webSocketClose(ws, code, reason) {
+    console.log('lazy: control socket closed, code ' + code + ' ' + JSON.stringify(reason));
+    closeWS(ws, 1000, 'closed');
+  }
+
+  async webSocketError(ws, err) {
+    console.log('lazy: control socket error: ' + err);
+  }
+
+  // Returns the open control sockets with their attachments.
+  controls() {
+    const out = [];
+    for (const ws of this.ctx.getWebSockets(CONTROL)) {
+      if (ws.readyState !== OPEN) continue;
+      let a = null;
+      try {
+        a = ws.deserializeAttachment();
+      } catch {}
+      if (a) out.push({ ws, a });
+    }
+    return out;
+  }
+
+  // Closes control sockets that have not passed the challenge in time.
+  prune() {
+    const now = Date.now();
+    for (const c of this.controls()) {
+      if (!c.a.verified && now - c.a.acceptedMs > CHALLENGE_DEADLINE_MS) {
+        console.log('lazy: control challenge failed, no reply in time');
+        closeWS(c.ws, 1008, 'challenge timeout');
+      }
+    }
+  }
+
+  // Returns the callout's public key as a CryptoKey, or a string that says
+  // what is wrong with AUTH_CALLOUT_PUBKEY.
+  async calloutKey() {
+    if (this.key) return this.key;
+    let raw;
+    try {
+      raw = Uint8Array.from(atob((this.env.AUTH_CALLOUT_PUBKEY || '').trim()), (ch) => ch.charCodeAt(0));
+    } catch (e) {
+      return 'AUTH_CALLOUT_PUBKEY: ' + e;
+    }
+    if (raw.length !== 32) return 'AUTH_CALLOUT_PUBKEY is not 32 bytes';
+    try {
+      this.key = await crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, false, ['verify']);
+    } catch (e) {
+      return 'AUTH_CALLOUT_PUBKEY: ' + e;
+    }
+    return this.key;
+  }
+
+  // Checks auth's reply to the challenge nonce, and returns null or what is
+  // wrong with it.
+  async verifyReply(nonce, reply) {
+    if (reply.length !== NONCE_BYTES + SIGNATURE_BYTES) return 'bad reply length';
+    if (!nonce || nonce.length !== NONCE_BYTES) return 'no nonce';
+    const key = await this.calloutKey();
+    if (typeof key === 'string') return key;
+    const enc = new TextEncoder();
+    const parts = [
+      enc.encode(AUTHPIPE_DOMAIN),
+      enc.encode(this.env.CALLOUT_HOST || ''),
+      Uint8Array.from(nonce),
+      reply.subarray(0, NONCE_BYTES),
+    ];
+    const msg = new Uint8Array(parts.reduce((n, x) => n + x.length, 0));
+    let off = 0;
+    for (const x of parts) {
+      msg.set(x, off);
+      off += x.length;
+    }
+    const ok = await crypto.subtle.verify({ name: 'Ed25519' }, key, reply.subarray(NONCE_BYTES), msg);
+    return ok ? null : 'bad signature';
+  }
+}
+
+function closeWS(ws, code, reason) {
+  try {
+    ws.close(code, reason);
+  } catch {}
 }
 
 // Reads the whole body of req into one Uint8Array, or returns null when it
