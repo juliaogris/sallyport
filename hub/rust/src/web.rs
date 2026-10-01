@@ -732,7 +732,7 @@ async fn login_finish(
     let body = json!({ "username": "", "webauthn": assertion })
         .to_string()
         .into_bytes();
-    let stream = cx.pool.take_wait().await?;
+    let stream = cx.pool.take_wait_anonymous().await?;
     let (status, body) = authrpc::post_json(
         stream,
         Arc::new(tls),

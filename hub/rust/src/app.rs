@@ -130,7 +130,9 @@ pub(crate) async fn dial_app_lazy(
     cluster: &str,
 ) -> std::result::Result<AppStream, crate::lazy::DialError> {
     use crate::lazy::DialError;
-    let stream = lazy.dial(crate::lazy::Kind::App).await?;
+    let stream = lazy
+        .dial(crate::lazy::Kind::App, crate::lazy::Caller::SignedIn)
+        .await?;
     let tls = match select(
         pin!(connect_tls(tls, cluster, stream)),
         pin!(crate::sockets::sleep(DIAL_DEADLINE)),

@@ -103,10 +103,23 @@ impl Pool {
     /// the lazy hub it asks auth's callout for a stream instead and waits up
     /// to [`crate::lazy::STREAM_WAIT`].
     pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
+        self.take_wait_for(crate::lazy::Caller::SignedIn).await
+    }
+
+    /// Runs [`Pool::take_wait`] for a request that has not signed in. In the
+    /// lazy hub such requests may hold only a few of the pending dials.
+    pub async fn take_wait_anonymous(&self) -> std::result::Result<DuplexStream, String> {
+        self.take_wait_for(crate::lazy::Caller::Anonymous).await
+    }
+
+    async fn take_wait_for(
+        &self,
+        caller: crate::lazy::Caller,
+    ) -> std::result::Result<DuplexStream, String> {
         // The lazy hub asks auth's callout for a stream instead.
         if let Some(lazy) = crate::lazy::get() {
             return lazy
-                .dial(crate::lazy::Kind::Auth)
+                .dial(crate::lazy::Kind::Auth, caller)
                 .await
                 .map_err(|e| e.to_string());
         }

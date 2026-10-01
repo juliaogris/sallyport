@@ -56,6 +56,10 @@ const CHALLENGE_DEADLINE_MS: u64 = 10_000;
 const MAX_PENDING_CONTROL: usize = 4;
 /// Dials waiting for their stream. Above this a dial fails at once.
 const MAX_PENDING_DIALS: usize = 32;
+/// Dials for callers that have not signed in, such as a passkey login,
+/// that may wait at once. Above this such a dial fails at once, so that
+/// logins cannot take the pending dials of signed-in users.
+const MAX_PENDING_ANONYMOUS: usize = 8;
 /// App streams open at once, waiting for their stream or paired. Above
 /// this an app dial fails at once. Each stream can hold about 2.3 MiB: 1 MiB
 /// queued by [`crate::wsevents`], up to 1 MiB sent and not yet acked, two
@@ -119,6 +123,16 @@ impl Kind {
     }
 }
 
+/// Who a dial is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caller {
+    /// A signed-in user, or the hub itself.
+    SignedIn,
+    /// A request that has not signed in, which counts toward
+    /// [`MAX_PENDING_ANONYMOUS`].
+    Anonymous,
+}
+
 /// The state of a control socket, kept in its attachment.
 #[derive(Serialize, Deserialize)]
 struct Attachment {
@@ -153,6 +167,7 @@ impl std::fmt::Display for DialError {
 /// A dial waiting for its stream.
 struct PendingDial {
     kind: Kind,
+    caller: Caller,
     /// Sends the stream, or None when the callout refused the dial.
     tx: oneshot::Sender<Option<DuplexStream>>,
     /// An app dial's place in [`MAX_APP_STREAMS`]. The stream's pump keeps
@@ -327,7 +342,7 @@ impl Lazy {
         ws.accept()?;
         let events = crate::wsevents::events(&ws)?;
         let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
-        let PendingDial { kind, tx, slot } = dial;
+        let PendingDial { kind, tx, slot, .. } = dial;
         if tx.send(Some(hub_side)).is_err() {
             console_log!(
                 "lazy: {} stream arrived after its dial gave up",
@@ -349,9 +364,14 @@ impl Lazy {
 
     /// Asks auth's callout for a stream and waits up to [`STREAM_WAIT`]
     /// for it. It returns [`DialError::Busy`] at once when
-    /// [`MAX_PENDING_DIALS`] dials wait, or for an app stream when
+    /// [`MAX_PENDING_DIALS`] dials wait, for [`Caller::Anonymous`] when
+    /// [`MAX_PENDING_ANONYMOUS`] such dials wait, or for an app stream when
     /// [`MAX_APP_STREAMS`] are open.
-    pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, DialError> {
+    pub async fn dial(
+        &self,
+        kind: Kind,
+        caller: Caller,
+    ) -> std::result::Result<DuplexStream, DialError> {
         let started = Date::now().as_millis();
         let control = self
             .control()
@@ -359,6 +379,14 @@ impl Lazy {
         if self.dials.borrow().len() >= MAX_PENDING_DIALS {
             return Err(DialError::Busy(format!(
                 "{MAX_PENDING_DIALS} dials waiting"
+            )));
+        }
+        let anonymous = |d: &&PendingDial| d.caller == Caller::Anonymous;
+        if caller == Caller::Anonymous
+            && self.dials.borrow().values().filter(anonymous).count() >= MAX_PENDING_ANONYMOUS
+        {
+            return Err(DialError::Busy(format!(
+                "{MAX_PENDING_ANONYMOUS} dials waiting for callers that have not signed in"
             )));
         }
         let slot =
@@ -372,9 +400,15 @@ impl Lazy {
         getrandom::getrandom(&mut raw).map_err(|e| DialError::Failed(format!("stream id: {e}")))?;
         let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let (tx, rx) = oneshot::channel();
-        self.dials
-            .borrow_mut()
-            .insert(id.clone(), PendingDial { kind, tx, slot });
+        self.dials.borrow_mut().insert(
+            id.clone(),
+            PendingDial {
+                kind,
+                caller,
+                tx,
+                slot,
+            },
+        );
         // Removes the id however the dial ends, also when its future is
         // dropped, so that the id does not count toward the cap.
         let _guard = DialGuard {
@@ -558,6 +592,7 @@ mod tests {
             "x".to_string(),
             PendingDial {
                 kind: Kind::App,
+                caller: Caller::SignedIn,
                 tx,
                 slot: Slot::take(&open, 1),
             },
