@@ -777,7 +777,8 @@ pub async fn call_as<Req: prost::Message, Resp: prost::Message + Default>(
 /// calls. A call that fails at the transport opens a new connection from
 /// the pool and is retried once. A gRPC error status is not retried. When
 /// the pool has no stream, opening a connection waits up to
-/// [`crate::authpipe::TAKE_WAIT`] for auth to open one.
+/// [`crate::authpipe::TAKE_WAIT`] for auth to open one. In the lazy hub it
+/// waits up to [`crate::lazy::STREAM_WAIT`] for the callout's stream.
 ///
 /// The lock is held while a connection opens, so callers that arrive
 /// together share one connection instead of each taking a pool stream.

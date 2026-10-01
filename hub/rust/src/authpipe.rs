@@ -99,7 +99,9 @@ impl Pool {
         }
     }
 
-    /// Takes the oldest open stream, waiting up to [`TAKE_WAIT`] for one.
+    /// Takes the oldest open stream, waiting up to [`TAKE_WAIT`] for one. In
+    /// the lazy hub it asks auth's callout for a stream instead and waits up
+    /// to [`crate::lazy::STREAM_WAIT`].
     pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
         // The lazy hub asks auth's callout for a stream instead.
         if let Some(lazy) = crate::lazy::get() {

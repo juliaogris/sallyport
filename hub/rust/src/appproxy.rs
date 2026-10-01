@@ -1,8 +1,9 @@
 //! Forwards one browser HTTP request to a Teleport app service.
 //!
 //! The hub dials the app service through the agent tunnel with
-//! `crate::app::dial_app`, then runs hyper's HTTP/1.1 client over the TLS
-//! stream. The response streams back to the browser as it arrives, instead
+//! `crate::app::dial_app`, or through auth's on-demand callout with
+//! `crate::app::dial_app_lazy`, then runs hyper's HTTP/1.1 client over the
+//! TLS stream. The response streams back to the browser as it arrives, instead
 //! of buffering the whole body in memory.
 
 use std::cell::Cell;
@@ -48,8 +49,16 @@ const SP_COOKIE_PREFIX: &str = "__Host-sp_";
 /// the stream, and the connection and its channel would stay open.
 const STREAM_IDLE: Duration = Duration::from_secs(30);
 
+/// Where an app connection comes from: the agent's tunnel, or auth's
+/// on-demand callout in the lazy hub.
+pub enum AppDialer<'a> {
+    Tunnel(&'a AppTunnel),
+    Lazy(std::rc::Rc<crate::lazy::Lazy>),
+}
+
 /// Sends one HTTP request to the app service at `host` through the agent
-/// tunnel, and returns the app service's response.
+/// tunnel or auth's on-demand callout, and returns the app service's
+/// response.
 ///
 /// `tls` is the client identity to present, built with
 /// `crate::authrpc::client_tls`.
@@ -59,13 +68,6 @@ const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this logs the error and returns a 502 "app
 /// unavailable" response.
-/// Where an app connection comes from: the agent's tunnel, or auth's
-/// on-demand callout in the lazy hub.
-pub enum AppDialer<'a> {
-    Tunnel(&'a AppTunnel),
-    Lazy(std::rc::Rc<crate::lazy::Lazy>),
-}
-
 pub async fn forward(
     tunnel: AppDialer<'_>,
     tls: Arc<rustls::ClientConfig>,

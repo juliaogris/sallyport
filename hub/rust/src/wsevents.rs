@@ -42,7 +42,9 @@ pub fn take_stats() -> (u64, u64) {
 /// counts in `queued`.
 type Item = (u64, usize, Result<WebsocketEvent>);
 
-/// Message bytes one WebSocket may have waiting for its reader.
+/// Message bytes one WebSocket may have waiting for its reader. A lazy
+/// stream's sender keeps at most 1 MiB unacknowledged, which is this limit
+/// with no slack, so this must not go below that window.
 const MAX_QUEUED_BYTES: usize = 1024 * 1024;
 /// The close code for "message too big".
 const TOO_BIG: u16 = 1009;

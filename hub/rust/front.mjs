@@ -1,6 +1,6 @@
-// A plain JavaScript Worker entry for the Rust hub, used by the `lazy`
-// env. It routes like the Rust entry in src/lib.rs, and the Durable Object
-// is still the Rust `Hub`.
+// A plain JavaScript Worker entry for the Rust hub, used by every env that
+// sets `main = "front.mjs"` in wrangler.toml. It routes like the Rust entry
+// in src/lib.rs, and the Durable Object is still the Rust `Hub`.
 //
 // The free plan allows 10 ms of CPU per Worker request, and the Rust entry
 // peaks at about 21 ms because every request runs the hub's Wasm. This

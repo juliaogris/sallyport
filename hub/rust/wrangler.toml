@@ -1,5 +1,5 @@
 name = "sallyport-hub"
-# The gmail account. Env party overrides it with the free account.
+# The Gmail account. The party envs override it with the free account.
 account_id = "00000000000000000000000000000000"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
@@ -27,7 +27,7 @@ CALLOUT_HOST = "localhost:8787"
 # The deployment on Cloudflare: `wrangler deploy --env edge`. Secrets are
 # set per env with `wrangler secret put --env edge`.
 [env.edge]
-# On-demand: see the lazy env below and src/lazy.rs.
+# On-demand: see `[env.lazy]` and src/lazy.rs.
 main = "front.mjs"
 routes = [
   { pattern = "julia.example.com", custom_domain = true },
@@ -55,13 +55,13 @@ APPS = "bench,octo,octocam:/stream"
 name = "HUB"
 class_name = "Hub"
 
-# Two test clusters on homesrv that compare hubs, with nothing else different:
-# `wrangler deploy --env rust` and `--env go`. Each env is its own Worker,
-# with its own Durable Object namespace and secrets. Both build the Rust
-# hub. `--env go` from this directory replaces the Go hub that
-# `hub/go/wrangler.toml` deploys.
+# Two test clusters on homesrv: `wrangler deploy --env rust` deploys the lazy
+# hub behind the JavaScript front, and `--env go` the full hub with the
+# Rust entry. Each env is its own Worker, with its own Durable Object
+# namespace and secrets. `--env go` from this directory replaces the Go
+# hub that `hub/go/wrangler.toml` deploys.
 [env.rust]
-# On-demand: see the lazy env below and src/lazy.rs.
+# On-demand: see `[env.lazy]` and src/lazy.rs.
 main = "front.mjs"
 routes = [
   { pattern = "rust.example.com", custom_domain = true },

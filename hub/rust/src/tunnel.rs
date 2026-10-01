@@ -164,7 +164,8 @@ impl DurableObject for Hub {
         _was_clean: bool,
     ) -> Result<()> {
         console_log!("lazy: control socket closed, code {code} {reason:?}");
-        // Without the auto-reply flag the runtime needs the close echoed.
+        // The runtime completes the close handshake only when the object
+        // closes its end too.
         let _ = ws.close(Some(1000), Some("closed"));
         Ok(())
     }
@@ -500,14 +501,12 @@ pub async fn pump_idle(
         (close_code, queue_max, queue_wait_max)
     };
 
-    // A stream that waits in the auth pipe pool has nobody reading or
-    // writing its far end. When the WebSocket closes, only `inbound` ends,
-    // so waiting for both would never return.
     let idle_watch = async {
         let Some(idle) = idle else {
             return futures::future::pending::<()>().await;
         };
         loop {
+            // Polls, so a stream ends up to 5 s after `idle`.
             crate::sockets::sleep(Duration::from_secs(5)).await;
             if Date::now().as_millis().saturating_sub(last_any.get()) >= idle.as_millis() as u64 {
                 let _ = ws.close(Some(1000), Some("idle"));
@@ -517,6 +516,9 @@ pub async fn pump_idle(
     };
     let outbound = pin!(outbound);
     let inbound = pin!(inbound);
+    // A stream that waits in the auth pipe pool has nobody reading or
+    // writing its far end. When the WebSocket closes, only `inbound` ends,
+    // so waiting for both would never return.
     let main = async {
         match select(outbound, inbound).await {
             // A half-closing stream keeps reading until the WebSocket closes.

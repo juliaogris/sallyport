@@ -39,7 +39,7 @@ const MAX_PENDING_CONTROL: usize = 4;
 /// Dials waiting for their stream. Above this a dial fails at once.
 const MAX_PENDING_DIALS: usize = 32;
 /// How long a dial waits for its stream.
-const DIAL_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const STREAM_WAIT: Duration = Duration::from_secs(10);
 /// A stream closes after this long without bytes in either direction. This
 /// also closes an app response that sends nothing for that long, such as a
 /// quiet server-sent events stream or a long poll.
@@ -102,10 +102,15 @@ struct PendingDial {
     tx: oneshot::Sender<DuplexStream>,
 }
 
+/// The lazy hub's state: the Durable Object's socket list and the dials
+/// waiting for a stream.
 pub struct Lazy {
     state: State,
+    /// Auth's Ed25519 public key, which signs the control challenge.
     key: Vec<u8>,
+    /// The host auth signs in the challenge, `CALLOUT_HOST`.
     host: String,
+    /// Dials waiting for their stream, by id, for [`MAX_PENDING_DIALS`].
     dials: RefCell<HashMap<String, PendingDial>>,
 }
 
@@ -167,7 +172,8 @@ impl Lazy {
     }
 
     /// Handles a message on a control socket: the challenge reply while it
-    /// is pending, and nothing after that. "ping" never arrives here.
+    /// is pending, and nothing after that. The runtime answers "ping"
+    /// itself, so it never reaches the hub.
     pub fn on_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
         self.prune();
         let Some(mut a) = ws.deserialize_attachment::<Attachment>()? else {
@@ -239,7 +245,7 @@ impl Lazy {
         Response::from_websocket(pair.client)
     }
 
-    /// Asks auth's callout for a stream and waits up to [`DIAL_DEADLINE`]
+    /// Asks auth's callout for a stream and waits up to [`STREAM_WAIT`]
     /// for it.
     pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, String> {
         let started = Date::now().as_millis();
@@ -265,11 +271,11 @@ impl Lazy {
         if let Err(err) = control.send_with_str(format!("dial {} {id}", kind.as_str())) {
             return Err(format!("sending dial: {err}"));
         }
-        let res = match select(rx, pin!(crate::sockets::sleep(DIAL_DEADLINE))).await {
+        let res = match select(rx, pin!(crate::sockets::sleep(STREAM_WAIT))).await {
             Either::Left((Ok(stream), _)) => Ok(stream),
             Either::Left((Err(_), _)) => Err("dial cancelled".to_string()),
             Either::Right(_) => Err(format!(
-                "no {} stream within {DIAL_DEADLINE:?}",
+                "no {} stream within {STREAM_WAIT:?}",
                 kind.as_str()
             )),
         };
