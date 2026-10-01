@@ -44,6 +44,11 @@ pub(crate) const STREAM_WAIT: Duration = Duration::from_secs(10);
 /// also closes an app response that sends nothing for that long, such as a
 /// quiet server-sent events stream or a long poll.
 pub const STREAM_IDLE: Duration = Duration::from_secs(30);
+/// How many bytes a stream passes on between two acks. Auth's window is
+/// 1 MiB, larger than this, so it can keep sending while an ack is on its
+/// way. [`crate::wsevents`] closes a WebSocket that queues more than its
+/// `MAX_QUEUED_BYTES`, so that limit must stay at or above auth's window.
+pub(crate) const ACK_EVERY: u64 = 256 * 1024;
 
 thread_local! {
     /// The lazy hub of this Wasm instance, if `HUB_MODE` is `lazy`. The
@@ -239,7 +244,8 @@ impl Lazy {
             let _ = ws.close(Some(1000), Some("dial gone"));
         } else {
             wasm_bindgen_futures::spawn_local(async move {
-                crate::tunnel::pump_idle(&ws, events, pipe_side, Some(STREAM_IDLE)).await;
+                let mode = crate::tunnel::PumpMode::Stream { idle: STREAM_IDLE };
+                crate::tunnel::pump(&ws, events, pipe_side, mode).await;
             });
         }
         Response::from_websocket(pair.client)

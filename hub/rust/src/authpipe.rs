@@ -254,7 +254,7 @@ async fn serve(
     if closed {
         console_log!("tunnel/auth: {MAX_STREAMS} streams open, closed the oldest waiting one");
     }
-    pump(&ws, events, pipe_side).await;
+    pump(&ws, events, pipe_side, crate::tunnel::PumpMode::Tunnel).await;
     alive.store(false, Ordering::Relaxed);
     pool.open.fetch_sub(1, Ordering::Relaxed);
     console_log!("tunnel/auth: stream closed");

@@ -58,13 +58,6 @@ static WS_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
 /// waited for room since the last heartbeat.
 static PIPE_WAIT_MAX_MS: AtomicU64 = AtomicU64::new(0);
 static PIPE_WAIT_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
-/// How many bytes a lazy stream passes on between two acks. The sender's
-/// window is larger, so it can keep sending while an ack is on its way. The
-/// sender is auth's side, whose window is 1 MiB (`streamWindow` in
-/// lib/authcallout/flowconn.go in the fork). [`crate::wsevents`] closes a
-/// WebSocket that queues more than its `MAX_QUEUED_BYTES`, so that limit
-/// must stay at or above the window.
-pub const ACK_EVERY: u64 = 256 * 1024;
 /// How often the hub logs its counters.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
@@ -384,34 +377,38 @@ async fn bridge(ws: WebSocket, pipe: DuplexStream) {
             return;
         }
     };
-    pump(&ws, events, pipe).await;
+    pump(&ws, events, pipe, PumpMode::Tunnel).await;
+}
+
+/// How [`pump`] runs.
+#[derive(Clone, Copy, Debug)]
+pub enum PumpMode {
+    /// A tunnel or an auth pipe stream. The WebSocket closes when the pipe
+    /// closes.
+    Tunnel,
+    /// A lazy hub stream, which serves one connection. When the hub's end
+    /// stops writing, the pump keeps reading until the WebSocket closes,
+    /// because the far end may still be sending: an HTTP/1.1 client shuts
+    /// down its write side while the response arrives. The pump sends
+    /// `ack <n>` after every [`crate::lazy::ACK_EVERY`] bytes it passes on
+    /// to the pipe, and it closes the WebSocket when no bytes have crossed
+    /// in either direction for `idle`.
+    Stream { idle: Duration },
 }
 
 /// Copies bytes between a WebSocket, read from `events`, and one end of an
-/// in-memory pipe until either side closes. When it returns, the pipe end
-/// is dropped, so the far end reads EOF.
-pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexStream) {
-    pump_idle(ws, events, pipe, None).await
-}
-
-/// Runs [`pump`] for a stream that serves one connection, such as a lazy
-/// hub's stream. When the hub's end stops writing, it keeps reading until
-/// the WebSocket closes, because the far end may still be sending: an
-/// HTTP/1.1 client shuts down its write side while the response arrives.
-/// It closes the WebSocket when no bytes have crossed in either direction
-/// for `idle`.
-pub async fn pump_idle(
+/// in-memory pipe until either side closes, as `mode` says. When it
+/// returns, the pipe end is dropped, so the far end reads EOF.
+pub async fn pump(
     ws: &WebSocket,
     mut events: crate::wsevents::Events,
     pipe: DuplexStream,
-    idle: Option<Duration>,
+    mode: PumpMode,
 ) {
-    let half_close = idle.is_some();
-    // A lazy stream has no flow control of its own, so the hub tells the
-    // sender how many bytes it has passed on, and the sender keeps at most
-    // a window of bytes unacknowledged. Without it, a fast sender fills the
-    // buffer between it and the hub, and the runtime drops the WebSocket.
-    let ack = half_close;
+    let (half_close, idle) = match mode {
+        PumpMode::Tunnel => (false, None),
+        PumpMode::Stream { idle } => (true, Some(idle)),
+    };
     let delivered = Cell::new(0u64);
     let acked = Cell::new(0u64);
     let (mut rd, mut wr) = tokio::io::split(pipe);
@@ -473,9 +470,13 @@ pub async fn pump_idle(
                         console_error!("tunnel: pipe write: {err}");
                         break;
                     }
-                    if ack {
+                    // A lazy stream has no flow control of its own, so the
+                    // sender keeps at most a window unacknowledged. Without
+                    // it, a fast sender fills the buffer between it and the
+                    // hub, and the runtime drops the WebSocket.
+                    if half_close {
                         delivered.set(delivered.get() + bytes.len() as u64);
-                        if delivered.get() - acked.get() >= ACK_EVERY {
+                        if delivered.get() - acked.get() >= crate::lazy::ACK_EVERY {
                             acked.set(delivered.get());
                             let _ = ws.send_with_str(format!("ack {}", delivered.get()));
                         }
