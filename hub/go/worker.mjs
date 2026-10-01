@@ -64,10 +64,14 @@ export default {
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
           return textError('upgrade required', 426);
         }
-        // The lazy hub takes only a control socket or a stream on
-        // /tunnel/auth. An auth pipe from a callout in pool mode would wake
-        // the Durable Object for nothing.
-        if (env.HUB_MODE === 'lazy' && url.pathname === '/tunnel/auth') {
+        // The lazy hub has no agent tunnel, and takes only a control socket
+        // or a stream on /tunnel/auth of CALLOUT_HOST. Anything else would
+        // wake the Durable Object for nothing, for example an auth pipe
+        // from a callout in pool mode.
+        if (env.HUB_MODE === 'lazy') {
+          if (url.pathname === '/webapi/connectionupgrade' || url.hostname !== env.CALLOUT_HOST) {
+            return textError('not found', 404);
+          }
           const mode = url.searchParams.get('mode');
           if (mode !== 'control' && mode !== 'stream') return textError('not found', 404);
         }
