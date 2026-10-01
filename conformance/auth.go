@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -270,9 +272,20 @@ func (a *FakeAuth) record(r *http.Request) string {
 	return client
 }
 
-// newSession creates a session for user with a user TLS certificate.
-func (a *FakeAuth) newSession(user string) (*session, error) {
-	certPEM, keyPEM, err := a.pki.tlsLeaf(user, nil)
+// appPublicAddrOID is Teleport's AppPublicAddrASN1ExtensionOID, the subject
+// attribute of an app session certificate that holds the app's public
+// address.
+var appPublicAddrOID = asn1.ObjectIdentifier{1, 3, 9999, 1, 6}
+
+// newSession creates a session for user with a user TLS certificate. An app
+// session's certificate carries publicAddr as Teleport writes it. A web
+// session passes "".
+func (a *FakeAuth) newSession(user, publicAddr string) (*session, error) {
+	subject := a.pki.subject(user)
+	if publicAddr != "" {
+		subject.ExtraNames = []pkix.AttributeTypeAndValue{{Type: appPublicAddrOID, Value: publicAddr}}
+	}
+	certPEM, keyPEM, err := a.pki.tlsLeaf(subject, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +300,7 @@ func (a *FakeAuth) newSession(user string) (*session, error) {
 }
 
 func (a *FakeAuth) newWebSession(user string) (*session, error) {
-	s, err := a.newSession(user)
+	s, err := a.newSession(user, "")
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +362,7 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 			code, message = codePermissionDenied, fmt.Sprintf("CreateAppSession for %q as %q", user, client)
 			break
 		}
-		s, err := a.newSession(user)
+		s, err := a.newSession(user, req.str(3))
 		if err != nil {
 			code, message = codeInvalidArgument, err.Error()
 			break

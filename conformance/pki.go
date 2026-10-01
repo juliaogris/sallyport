@@ -80,7 +80,7 @@ func NewPKI(cluster, hubHost string) (*PKI, error) {
 	p.TLSCAPool = x509.NewCertPool()
 	p.TLSCAPool.AddCert(p.TLSCA)
 
-	if p.hubTLSCertPEM, p.hubTLSKeyPEM, err = p.tlsLeaf(hubHost, []string{hubHost}); err != nil {
+	if p.hubTLSCertPEM, p.hubTLSKeyPEM, err = p.tlsLeaf(p.subject(hubHost), []string{hubHost}); err != nil {
 		return nil, err
 	}
 
@@ -176,8 +176,13 @@ func signWith(ca ssh.Signer, pub ssh.PublicKey, spec CertSpec, cluster string) (
 	return cert, nil
 }
 
+// subject returns the certificate subject for cn in the test cluster.
+func (p *PKI) subject(cn string) pkix.Name {
+	return pkix.Name{CommonName: cn, Organization: []string{p.Cluster}}
+}
+
 // tlsLeaf returns a PEM certificate and PKCS #8 key signed by the TLS CA.
-func (p *PKI) tlsLeaf(cn string, dnsNames []string) (certPEM, keyPEM []byte, err error) {
+func (p *PKI) tlsLeaf(subject pkix.Name, dnsNames []string) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -188,7 +193,7 @@ func (p *PKI) tlsLeaf(cn string, dnsNames []string) (certPEM, keyPEM []byte, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: cn, Organization: []string{p.Cluster}},
+		Subject:      subject,
 		DNSNames:     dnsNames,
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
@@ -210,7 +215,7 @@ func (p *PKI) tlsLeaf(cn string, dnsNames []string) (certPEM, keyPEM []byte, err
 
 // TLSLeaf returns a TLS certificate signed by the TLS CA.
 func (p *PKI) TLSLeaf(cn string, dnsNames ...string) (tls.Certificate, error) {
-	certPEM, keyPEM, err := p.tlsLeaf(cn, dnsNames)
+	certPEM, keyPEM, err := p.tlsLeaf(p.subject(cn), dnsNames)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
