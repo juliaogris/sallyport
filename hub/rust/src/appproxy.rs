@@ -258,11 +258,7 @@ fn build_response(
         let res = Response::empty().map_err(|e| format!("response: {e}"))?;
         return Ok(res.with_headers(headers).with_status(status));
     }
-    let want = parts
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
-        .filter(|_| !head);
+    let want = body_length(&parts.headers, head);
     let stream = body_stream(incoming, conn, want);
     let mut body = match want {
         // The runtime ends a streamed body that errors with a clean last
@@ -284,6 +280,23 @@ fn build_response(
         body = body.with_encode_body(EncodeBody::Manual);
     }
     Ok(body.with_headers(headers).with_status(status))
+}
+
+/// Returns the length of a response body from its `Content-Length`, or
+/// None when the length is not known. A response to a HEAD request has no
+/// body. A response with `Transfer-Encoding` has no known length, also when
+/// it carries a `Content-Length`, because hyper then reads it by the
+/// transfer coding.
+fn body_length(headers: &http::HeaderMap, head: bool) -> Option<u64> {
+    if head || headers.contains_key(http::header::TRANSFER_ENCODING) {
+        return None;
+    }
+    headers
+        .get(http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// Turns a hyper `Incoming` body into the byte stream `Response::from_stream`
@@ -443,6 +456,30 @@ impl<T: tokio::io::AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_length_needs_content_length_alone() {
+        let h = |pairs: &[(&str, &str)]| -> http::HeaderMap {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap()))
+                .collect()
+        };
+        assert_eq!(
+            body_length(&h(&[("content-length", "12")]), false),
+            Some(12)
+        );
+        assert_eq!(body_length(&h(&[("content-length", "12")]), true), None);
+        assert_eq!(
+            body_length(
+                &h(&[("content-length", "12"), ("transfer-encoding", "chunked")]),
+                false
+            ),
+            None
+        );
+        assert_eq!(body_length(&h(&[("content-length", "x")]), false), None);
+        assert_eq!(body_length(&h(&[]), false), None);
+    }
 
     #[test]
     fn strip_sp_cookies_cases() {

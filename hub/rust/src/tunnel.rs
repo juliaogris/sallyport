@@ -167,6 +167,9 @@ impl DurableObject for Hub {
         // The runtime completes the close handshake only when the object
         // closes its end too.
         let _ = ws.close(Some(1000), Some("closed"));
+        if let HubMode::Lazy(lazy) = &self.mode {
+            lazy.on_close();
+        }
         Ok(())
     }
 
@@ -201,23 +204,30 @@ impl DurableObject for Hub {
                 web::Host::Login => {}
             }
         }
+        let mode = || -> Result<Option<String>> {
+            Ok(req
+                .url()?
+                .query_pairs()
+                .find(|(k, _)| k == "mode")
+                .map(|(_, v)| v.to_string()))
+        };
         if let HubMode::Lazy(lazy) = &self.mode {
             // The lazy hub has no reverse tunnel and no auth pipe pool.
             if req.path() != authpipe::PATH {
                 return Response::error("not found", 404);
             }
-            let mode = req
-                .url()?
-                .query_pairs()
-                .find(|(k, _)| k == "mode")
-                .map(|(_, v)| v.to_string());
-            return match mode.as_deref() {
+            return match mode()?.as_deref() {
                 Some("control") => lazy.accept_control(&req),
                 Some("stream") => lazy.accept_stream(&req),
                 _ => Response::error("not found", 404),
             };
         }
         if req.path() == authpipe::PATH {
+            // A control socket or a stream is for the lazy hub, from a
+            // callout in on-demand mode.
+            if matches!(mode()?.as_deref(), Some("control" | "stream")) {
+                return Response::error("not found", 404);
+            }
             return authpipe::accept(&req, &self.env, &self.auth_pipe);
         }
         let protocols = req
@@ -398,9 +408,9 @@ pub enum PumpMode {
     /// because the far end may still be sending: an HTTP/1.1 client shuts
     /// down its write side while the response arrives. The pump sends
     /// `ack <n>` after every [`crate::lazy::ACK_EVERY`] bytes it passes on
-    /// to the pipe, and it closes the WebSocket when no bytes have crossed
-    /// in either direction for `idle`. With `window`, the far end acks what
-    /// it receives the same way, and the pump keeps at most
+    /// to the pipe, and it closes the WebSocket when no bytes and no ack
+    /// have crossed in either direction for `idle`. With `window`, the far
+    /// end acks what it receives the same way, and the pump keeps at most
     /// [`crate::lazy::UPLOAD_WINDOW`] bytes sent and not acked. An ack that
     /// is not a number, goes backwards, or is above the bytes sent closes
     /// the WebSocket with 1008.
@@ -479,6 +489,9 @@ pub async fn pump(
                         match msg.text().as_deref().and_then(parse_ack) {
                             Some(n) if n >= peer_acked.get() && n <= sent.get() => {
                                 peer_acked.set(n);
+                                // An ack shows that the far end still reads,
+                                // also while the hub waits for room to send.
+                                last_any.set(Date::now().as_millis());
                                 ack_arrived.notify_one();
                                 continue;
                             }
