@@ -50,4 +50,7 @@ renew rust "$HOME/sallyport-rust/deploy/auth.yaml" 127.0.0.1:3126 sallyport-rust
   bench=bench-rust.example.com octo=octo-rust.example.com octocam=octocam-rust.example.com || failed=1
 renew go "$HOME/sallyport-go/deploy/auth.yaml" 127.0.0.1:3226 sallyport-go "$HOME/sallyport-go/hub-identity" \
   bench=bench-go.example.com octo=octo-go.example.com octocam=octocam-go.example.com || failed=1
+# The lazy cluster's config has callout_mode, which only its own tctl knows.
+tctl=$HOME/sallyport-lazy/bin/tctl renew lazy "$HOME/sallyport-lazy/deploy/teleport.yaml" 127.0.0.1:3326 sallyport-lazy "$HOME/sallyport-lazy/hub-identity" \
+  bench=bench-lazy.example.com octocam=octocam-lazy.example.com || failed=1
 exit "$failed"

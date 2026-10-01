@@ -32,6 +32,9 @@ CLUSTERS = {
     "julia": {"streams": ["octocam"]},
     "rust": {"streams": ["octocam"]},
     "go": {"streams": ["octocam"]},
+    # The lazy hub sleeps while nobody uses it, so it is probed only every
+    # 5 minutes, and its cluster has no octo app.
+    "lazy": {"streams": ["octocam"], "every": 5, "octo": False},
 }
 BENCH_FILE = "/10mb.bin"
 BENCH_BYTES = 10 * 1024 * 1024
@@ -210,7 +213,7 @@ def stream(cluster, app, row, errors):
 def main():
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     ts = now.isoformat().replace("+00:00", "Z")
-    names = list(CLUSTERS)
+    names = [c for c in CLUSTERS if now.minute % CLUSTERS[c].get("every", 1) == 0]
     shift = now.minute % len(names)
     names = names[shift:] + names[:shift]
 
@@ -221,7 +224,8 @@ def main():
         latency(c, rows[c], errors[c])
         download(c, rows[c], errors[c])
         snapshot(c, rows[c], errors[c])
-        octo(c, rows[c], errors[c])
+        if CLUSTERS[c].get("octo", True):
+            octo(c, rows[c], errors[c])
 
     threads = [
         threading.Thread(target=stream, args=(c, app, rows[c], errors[c]))
@@ -239,7 +243,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=FIELDS)
         if new:
             w.writeheader()
-        for c in CLUSTERS:
+        for c in names:
             rows[c]["error"] = "; ".join(errors[c])[:500]
             w.writerow(rows[c])
             print(",".join(str(rows[c][k]) for k in FIELDS), file=sys.stderr)
