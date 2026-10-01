@@ -301,6 +301,11 @@ func (h *hub) loginFinish(assertion []byte) *response {
 		if err := json.Unmarshal(assertion, &a); err != nil {
 			return "", "", fmt.Errorf("assertion: %w", err)
 		}
+		// Each call to auth takes a stream, so a body that is not an
+		// assertion is refused before one is taken.
+		if err := checkAssertion(a); err != nil {
+			return "", "", err
+		}
 		if err := h.cfg.err("HUB_TLS_CERT", "HUB_TLS_KEY"); err != nil {
 			return "", "", err
 		}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -104,4 +106,20 @@ func ctEq(a, b string) bool {
 		v |= a[i] ^ b[i]
 	}
 	return v == 0
+}
+
+// checkAssertion returns an error unless a is a JSON object with an id
+// and the type "public-key", as a WebAuthn assertion has.
+func checkAssertion(a []byte) error {
+	var v struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(a, &v); err != nil {
+		return fmt.Errorf("assertion: %w", err)
+	}
+	if v.ID == "" || v.Type != "public-key" {
+		return errors.New("assertion: not a public-key credential")
+	}
+	return nil
 }

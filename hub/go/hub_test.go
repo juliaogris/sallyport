@@ -277,3 +277,24 @@ func TestParseConfigHubMode(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckAssertion(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "assertion", body: `{"id":"a","type":"public-key","response":{}}`, wantErr: false},
+		{name: "empty object", body: `{}`, wantErr: true},
+		{name: "not an object", body: `"x"`, wantErr: true},
+		{name: "no id", body: `{"type":"public-key"}`, wantErr: true},
+		{name: "other type", body: `{"id":"a","type":"password"}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := checkAssertion([]byte(tt.body)); (err != nil) != tt.wantErr {
+				t.Errorf("checkAssertion error = %v, want error %v", err, tt.wantErr)
+			}
+		})
+	}
+}
