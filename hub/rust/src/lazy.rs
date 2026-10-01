@@ -40,7 +40,9 @@ const MAX_PENDING_CONTROL: usize = 4;
 const MAX_PENDING_DIALS: usize = 32;
 /// How long a dial waits for its stream.
 const DIAL_DEADLINE: Duration = Duration::from_secs(10);
-/// A stream closes after this long without bytes in either direction.
+/// A stream closes after this long without bytes in either direction. This
+/// also closes an app response that sends nothing for that long, such as a
+/// quiet server-sent events stream or a long poll.
 pub const STREAM_IDLE: Duration = Duration::from_secs(30);
 
 thread_local! {

@@ -77,7 +77,11 @@ pub fn keep_close_line(line: String) {
 }
 
 /// How many bytes a lazy stream passes on between two acks. The sender's
-/// window is larger, so it can keep sending while an ack is on its way.
+/// window is larger, so it can keep sending while an ack is on its way. The
+/// sender is auth's side, whose window is 1 MiB (`streamWindow` in
+/// lib/authcallout/flowconn.go in the fork). [`crate::wsevents`] closes a
+/// WebSocket that queues more than its `MAX_QUEUED_BYTES`, so that limit
+/// must stay at or above the window.
 pub const ACK_EVERY: u64 = 256 * 1024;
 /// How often the hub logs its counters.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
