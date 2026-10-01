@@ -206,9 +206,9 @@ class program {
       },
       // Sends s as a text message, for a lazy stream's ack.
       sendText(id, s) {
-        const ws = p.sockets.get(id);
-        if (!ws) return false;
         try {
+          const ws = p.sockets.get(id);
+          if (!ws) return false;
           ws.send(s);
           return true;
         } catch (e) {
@@ -286,10 +286,11 @@ class program {
       },
       // Asks auth's callout for a stream of kind auth or app with the given
       // id, on the verified control socket. Returns false if there is none.
+      // A throw here would come out in Go as a panic, so it stays here.
       dial(kind, id) {
-        const c = p.owner.controls().find((c) => c.a.verified);
-        if (!c) return false;
         try {
+          const c = p.owner.verifiedControl();
+          if (!c) return false;
           c.ws.send('dial ' + kind + ' ' + id);
           return true;
         } catch (e) {
@@ -299,7 +300,12 @@ class program {
       },
       // Reports whether a verified control socket is open.
       connected() {
-        return p.owner.controls().some((c) => c.a.verified);
+        try {
+          return p.owner.verifiedControl() !== null;
+        } catch (e) {
+          console.log('lazy: connected: ' + e);
+          return false;
+        }
       },
     };
   }
@@ -369,6 +375,17 @@ export class Hub extends DurableObject {
         classify(this.env, url.hostname) !== 'app'
       ) {
         return this.acceptControl(req);
+      }
+      // The lazy hub has no reverse tunnel and no auth pipe pool, so only a
+      // stream reaches Go. A stream answers a dial, and a dial waits only
+      // while this instance's program runs, so a stream for no running
+      // program is 404 without starting one.
+      if (classify(this.env, url.hostname) !== 'app') {
+        if (url.pathname === '/webapi/connectionupgrade') return textError('not found', 404);
+        if (url.pathname === '/tunnel/auth') {
+          const running = current && current.owner === this && !current.exited;
+          if (url.searchParams.get('mode') !== 'stream' || !running) return textError('not found', 404);
+        }
       }
     }
     const p = await programFor(this, this.env);
@@ -478,6 +495,16 @@ export class Hub extends DurableObject {
       if (a) out.push({ ws, a });
     }
     return out;
+  }
+
+  // Returns the open verified control socket that the hub accepted last, or
+  // null.
+  verifiedControl() {
+    let best = null;
+    for (const c of this.controls()) {
+      if (c.a.verified && (!best || c.a.acceptedMs > best.a.acceptedMs)) best = c;
+    }
+    return best;
   }
 
   // Closes control sockets that have not passed the challenge in time.
