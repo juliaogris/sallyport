@@ -64,6 +64,13 @@ export default {
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
           return textError('upgrade required', 426);
         }
+        // The lazy hub takes only a control socket or a stream on
+        // /tunnel/auth. An auth pipe from a callout in pool mode would wake
+        // the Durable Object for nothing.
+        if (env.HUB_MODE === 'lazy' && url.pathname === '/tunnel/auth') {
+          const mode = url.searchParams.get('mode');
+          if (mode !== 'control' && mode !== 'stream') return textError('not found', 404);
+        }
         return hub(env).fetch(req);
     }
     if (kind === 'login' && loginPath(url.pathname)) return hub(env).fetch(req);
