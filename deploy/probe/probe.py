@@ -35,6 +35,8 @@ CLUSTERS = {
     # The lazy hub sleeps while nobody uses it, so it is probed only every
     # 5 minutes, and its cluster has no octo app.
     "lazy": {"streams": ["octocam"], "every": 5, "octo": False},
+    # The free-plan test on example.net, in a separate Cloudflare account.
+    "party": {"streams": ["octocam"], "every": 5, "octo": False, "domain": "example.net", "owner": "julia"},
 }
 BENCH_FILE = "/10mb.bin"
 BENCH_BYTES = 10 * 1024 * 1024
@@ -60,7 +62,8 @@ CTX = ssl.create_default_context()
 
 
 def host(cluster, app):
-    return f"{app}-{cluster}.{DOMAIN}"
+    c = CLUSTERS[cluster]
+    return f"{app}-{c.get('owner', cluster)}.{c.get('domain', DOMAIN)}"
 
 
 def cookie(cluster, app):

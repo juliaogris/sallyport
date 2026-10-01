@@ -1,4 +1,6 @@
 name = "sallyport-hub"
+# The gmail account. Env party overrides it with the free account.
+account_id = "00000000000000000000000000000000"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
@@ -135,5 +137,33 @@ OWNER = "lazy"
 APPS = "bench,octocam:/stream"
 
 [[env.lazy.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# The free-plan test: the lazy hub in a separate account on Cloudflare's
+# free Workers plan, for the domain example.net.
+[env.party]
+account_id = "11111111111111111111111111111111"
+main = "front.mjs"
+routes = [
+  { pattern = "julia.example.net", custom_domain = true },
+  { pattern = "bench-julia.example.net", custom_domain = true },
+  { pattern = "octocam-julia.example.net", custom_domain = true },
+]
+
+[env.party.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[env.party.vars]
+HUB_MODE = "lazy"
+CLUSTER_NAME = "sallyport-party"
+PUBLIC_ADDR = "julia.example.net:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "julia.example.net"
+DOMAIN = "example.net"
+OWNER = "julia"
+APPS = "bench,octocam:/stream"
+
+[[env.party.durable_objects.bindings]]
 name = "HUB"
 class_name = "Hub"

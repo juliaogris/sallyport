@@ -7,6 +7,8 @@
 # go test cluster on homesrv needs no change. To go back to the Rust hub, run
 # `npx wrangler@4 deploy --env go` in the Rust hub's directory.
 name = "julia-sallyport-gohub-dev"
+# The gmail account, so that wrangler does not ask when a login sees two.
+account_id = "00000000000000000000000000000000"
 main = "worker.mjs"
 compatibility_date = "2026-09-01"
 
