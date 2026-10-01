@@ -42,7 +42,7 @@ const (
 	streamIDHeader = "sallyport-stream-id"
 	// maxPendingDials is the number of dials that may wait for their
 	// stream. Above this a dial fails at once.
-	maxPendingDials = 32
+	maxPendingDials = 128
 	// lazyDialDeadline is how long a dial waits for its stream.
 	lazyDialDeadline = 10 * time.Second
 	// lazyStreamIdle closes a stream after this long without bytes in

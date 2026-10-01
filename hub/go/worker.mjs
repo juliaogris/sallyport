@@ -330,7 +330,13 @@ class program {
               if (p.exited) return ctl.error(new Error('service restart'));
               return new Promise((resolve) => {
                 p.streams.set(sid, { ctl, buf, resolve });
-                p.api.pull(sid);
+                // Go ends a stream the runtime has not pulled from for 30 s,
+                // and a later pull would wait for good.
+                if (!p.api.pull(sid)) {
+                  p.streams.delete(sid);
+                  ctl.error(new Error('response body closed'));
+                  resolve();
+                }
               });
             },
             cancel() {
@@ -530,11 +536,10 @@ export class Hub extends DurableObject {
       ) {
         return this.acceptControl(req);
       }
-      // The lazy hub has no reverse tunnel and no auth pipe pool, so on the
-      // login host and the bare domain only a stream on /tunnel/auth goes
-      // to Go. A stream answers a dial, and a dial waits only while this
-      // instance's program runs, so a stream for no running program is 404
-      // without starting one.
+      // The lazy hub has no reverse tunnel and no auth pipe pool, so off the
+      // app hosts, /tunnel/auth takes only a stream. A stream answers a
+      // dial, and a dial waits only while this instance's program runs, so
+      // a stream for no running program is 404 without starting one.
       if (classify(this.env, url.hostname) !== 'app') {
         if (url.pathname === '/webapi/connectionupgrade') return textError('not found', 404);
         if (url.pathname === '/tunnel/auth') {
@@ -553,7 +558,7 @@ export class Hub extends DurableObject {
         bodyStream = ++p.nextBody;
         p.bodies.set(bodyStream, { reader: req.body.getReader(), rest: new Uint8Array(0) });
       } else {
-        body = await readBody(req, LOGIN_BODY_LIMIT);
+        body = await readWholeBody(req, LOGIN_BODY_LIMIT);
         if (body === null) return textError('request body too large', 413);
       }
     }
@@ -577,6 +582,11 @@ export class Hub extends DurableObject {
           resolve(respond(status, head, b, flags, ws, stream));
         } catch (e) {
           console.log('glue: response: ' + e);
+          // Cancelling the body stream lets Go close the upstream
+          // connection.
+          try {
+            stream?.cancel();
+          } catch {}
           resolve(new Response('bad response', { status: 502 }));
         }
       });
@@ -800,7 +810,7 @@ function closeWS(ws, code, reason) {
 // Reads the whole body of req into one Uint8Array, or returns null when it
 // is longer than limit bytes. The rest of a long body is read and dropped,
 // because a response before the body is read closes the connection.
-async function readBody(req, limit) {
+async function readWholeBody(req, limit) {
   const reader = req.body.getReader();
   const chunks = [];
   let n = 0;

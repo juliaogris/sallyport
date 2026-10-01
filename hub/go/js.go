@@ -71,10 +71,11 @@ func main() {
 		return nil
 	}))
 	api.Set("pull", js.FuncOf(func(this js.Value, args []js.Value) any {
-		if s := streams.get(args[0].Int()); s != nil {
+		s := streams.get(args[0].Int())
+		if s != nil {
 			s.pull()
 		}
-		return nil
+		return s != nil
 	}))
 	api.Set("cancel", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if s := streams.get(args[0].Int()); s != nil {
@@ -137,7 +138,7 @@ func readRequest(r js.Value) *request {
 		js.CopyBytesToGo(req.body, b)
 	}
 	if id := r.Get("bodyStream"); id.Truthy() {
-		req.bodyStream = newReqBody(id.Int())
+		req.bodyReader = newReqBody(id.Int())
 	}
 	return req
 }

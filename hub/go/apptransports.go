@@ -28,9 +28,9 @@ type appTransport struct {
 }
 
 // get returns the transport of the app session sid, and makes it with
-// newTr if there is none. It first drops the transports unused for
-// appTransportIdle, and the least recently used one when maxAppTransports
-// are kept, and closes their idle connections.
+// newTr if there is none. Before it makes one, it drops the transports
+// unused for appTransportIdle, and the least recently used one when
+// maxAppTransports are kept, and closes their idle connections.
 func (t *appTransports) get(sid string, now time.Time, newTr func() *http.Transport) *http.Transport {
 	t.mu.Lock()
 	defer t.mu.Unlock()

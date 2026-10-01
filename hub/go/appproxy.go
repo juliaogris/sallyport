@@ -41,7 +41,7 @@ const spCookiePrefix = "__Host-sp_"
 const (
 	// appConnsPerSession is the most connections that the requests of one
 	// app session use at once. A request above that waits for one.
-	appConnsPerSession = 8
+	appConnsPerSession = 32
 	// appConnIdle closes a connection that has had no request for this
 	// long. A lazy stream keeps the Durable Object awake while it is open.
 	appConnIdle = 5 * time.Second
@@ -116,6 +116,15 @@ func (h *hub) forwardInner(sid string, cert tls.Certificate, host string, req *r
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) { connTimer.Stop() },
 	})
+	if req.bodyReader != nil {
+		// The app may answer before it has read the whole body, and the
+		// transport then keeps reading it until the browser ends it.
+		done := cancel
+		cancel = func() {
+			done()
+			req.bodyReader.Close()
+		}
+	}
 	resp, err := tr.RoundTrip(up.WithContext(ctx))
 	connTimer.Stop()
 	if err != nil {
@@ -178,15 +187,15 @@ func buildRequest(req *request, host string) (*http.Request, error) {
 	var body io.Reader
 	if req.method != "GET" && req.method != "HEAD" {
 		body = bytes.NewReader(req.body)
-		if req.bodyStream != nil {
-			body = req.bodyStream
+		if req.bodyReader != nil {
+			body = req.bodyReader
 		}
 	}
 	up, err := http.NewRequest(req.method, "https://"+host+req.path+req.query, body)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	if req.bodyStream != nil && body != nil {
+	if req.bodyReader != nil && body != nil {
 		// The transport closes the body once it has sent it or failed.
 		req.bodyTaken = true
 		up.ContentLength = -1
@@ -254,9 +263,11 @@ func buildResponse(resp *http.Response, done context.CancelFunc) *response {
 	if resp.ContentLength >= 0 {
 		body = &exactBody{body, resp.ContentLength}
 	}
-	// The runtime refuses a body on these statuses.
-	switch resp.StatusCode {
-	case 204, 205, 304:
+	// The runtime refuses a body on these statuses. A HEAD response has no
+	// body, though it may have a Content-Length.
+	switch {
+	case resp.StatusCode == 204, resp.StatusCode == 205, resp.StatusCode == 304,
+		resp.Request != nil && resp.Request.Method == "HEAD":
 		body.Close()
 		return res
 	}

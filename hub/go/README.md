@@ -18,8 +18,9 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   starts the Go program, so a stateless Worker isolate never pays the Go
   runtime's startup CPU and 38 MiB of memory. The Durable Object passes
   an app request body to Go as Go reads it. It reads any other request
-  body before Go runs, and answers 413 for one over 64 KiB. It also owns the SQLite table of used
-  privilege tokens, which Go reads and writes through the glue.
+  body before Go runs, and answers 413 for one over 64 KiB. It also owns
+  the SQLite table of used privilege tokens, which Go reads and writes
+  through the glue.
 - `js.go` and `wsconn.go` are the Go side of the glue. `wsconn.go` is a
   `net.Conn` over a Workers WebSocket and a response body stream.
 - `tunnel.go` is the reverse tunnel: TLS with `crypto/tls` and the SSH

@@ -69,7 +69,7 @@ func parseConfig(env map[string]string) *config {
 	switch env["HUB_MODE"] {
 	case "", "pool", "lazy":
 	default:
-		c.errs["HUB_MODE"] = fmt.Errorf("HUB_MODE: %q is not pool or lazy, so the hub runs as pool", env["HUB_MODE"])
+		c.errs["HUB_MODE"] = fmt.Errorf("HUB_MODE: %q is not pool or lazy", env["HUB_MODE"])
 	}
 	secret := func(name string) []byte {
 		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env[name]))

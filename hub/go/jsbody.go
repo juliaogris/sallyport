@@ -64,6 +64,8 @@ func bodyChunk(id, n int) {
 	if b == nil {
 		return
 	}
+	// Read asks for one chunk at a time and waits for it, so the channel
+	// has room for this answer.
 	select {
 	case b.chunks <- n:
 	default:
@@ -94,7 +96,7 @@ func (b *reqBody) Read(p []byte) (int, error) {
 	case n == bodyChunkLast:
 		b.err = io.EOF
 		return 0, b.err
-	case n < 0:
+	case n == bodyChunkError:
 		b.err = errors.New("request body: read failed")
 		return 0, b.err
 	}

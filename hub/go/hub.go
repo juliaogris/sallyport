@@ -69,8 +69,8 @@ func newHub(env map[string]string) *hub {
 // serve answers one request to the Durable Object.
 func (h *hub) serve(req *request) (res *response) {
 	defer func() {
-		if req.bodyStream != nil && !req.bodyTaken {
-			req.bodyStream.Close()
+		if req.bodyReader != nil && !req.bodyTaken {
+			req.bodyReader.Close()
 		}
 	}()
 	defer func() {

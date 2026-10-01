@@ -220,7 +220,6 @@ func (c *wsConn) Write(b []byte) (int, error) {
 // Text on a stream without a window is ignored. It runs inside the
 // JavaScript message event, so it must not block.
 func (c *wsConn) peerAck(s string) {
-	c.lastBytes.Store(time.Now().UnixMilli())
 	c.mu.Lock()
 	if !c.window || c.closed {
 		c.mu.Unlock()
@@ -233,6 +232,9 @@ func (c *wsConn) peerAck(s string) {
 		logf("lazy: bad ack %q, closing the stream", s)
 		c.CloseWith(1008, "bad ack")
 		return
+	}
+	if total > c.peerAcked {
+		c.lastBytes.Store(time.Now().UnixMilli())
 	}
 	c.peerAcked = total
 	c.cond.Broadcast()

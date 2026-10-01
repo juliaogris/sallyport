@@ -89,6 +89,9 @@ func (h *hub) loginHostRequest(req *request) *response {
 		if rateLimited(err) {
 			return textError(rateLimitedMsg, 429)
 		}
+		if errors.Is(err, errDialRefused) {
+			return textError("auth unavailable", 503)
+		}
 		return textError("request failed", 502)
 	}
 	return jsonResponse(v)
@@ -298,8 +301,8 @@ func (h *hub) loginFinish(assertion []byte) *response {
 		if err := json.Unmarshal(assertion, &a); err != nil {
 			return "", "", fmt.Errorf("assertion: %w", err)
 		}
-		// Each call to auth takes a stream, so a body that is not an
-		// assertion is refused before one is taken.
+		// A call to auth takes a stream, or a dial in the lazy hub, so a
+		// body that is not an assertion is refused before one is taken.
 		if err := checkAssertion(a); err != nil {
 			return "", "", err
 		}
@@ -382,6 +385,10 @@ func (h *hub) inviteFinish(token string, body []byte) *response {
 // sessionResponse sets the session cookie for a new web session, or
 // reports the failure.
 func sessionResponse(user, sid string, err error) *response {
+	if errors.Is(err, errDialRefused) {
+		logf("web: %v", err)
+		return textError("auth unavailable", 503)
+	}
 	if err != nil {
 		logf("web: %v", err)
 		return textError("login failed", 401)
