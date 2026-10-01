@@ -343,8 +343,15 @@ const NONCE_BYTES = 32;
 const SIGNATURE_BYTES = 64;
 // A control socket that has not passed the challenge by then is closed.
 const CHALLENGE_DEADLINE_MS = 10_000;
-// Control sockets in the challenge. Above this the oldest is closed.
+// Control sockets in the challenge. At this many, a new one closes the
+// oldest of the client address with the most, counting the new one, with
+// 1013, so that one address that opens many evicts its own, and auth's
+// callout tries again soon.
 const MAX_PENDING_CONTROL = 4;
+// A verified control socket with no ping for this long is closed as dead.
+// Auth's callout pings every 30 s, and the runtime answers each ping and
+// notes when.
+const CONTROL_STALE_MS = 90_000;
 // The readyState of an open WebSocket.
 const OPEN = 1;
 
@@ -428,19 +435,21 @@ export class Hub extends DurableObject {
     if (req.headers.has('Origin')) return textError('origin not allowed', 403);
     const key = await this.calloutKey();
     if (typeof key === 'string') {
+      // The error is logged, and not sent to a caller who has not
+      // authenticated.
       console.log('lazy: ' + key);
-      return textError(key, 500);
+      return textError('bad AUTH_CALLOUT_PUBKEY', 500);
     }
+    const client = clientKey(req.headers.get('CF-Connecting-IP'));
     const pending = this.controls().filter((c) => !c.a.verified);
     if (pending.length >= MAX_PENDING_CONTROL) {
-      const oldest = pending.reduce((x, y) => (y.a.acceptedMs < x.a.acceptedMs ? y : x));
-      closeWS(oldest.ws, 1008, 'too many sockets in the challenge');
+      closeWS(busiestOldest(pending, client).ws, 1013, 'try again later');
     }
     const pair = new WebSocketPair();
     const ws = pair[1];
     this.ctx.acceptWebSocket(ws, [CONTROL]);
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
-    ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false });
+    ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false, client });
     ws.send(nonce);
     // The header tells the callout that it may answer a dial with
     // "refuse <id>".
@@ -480,9 +489,12 @@ export class Hub extends DurableObject {
       return closeWS(ws, 1008, 'challenge');
     }
     if (ws.readyState !== OPEN) return;
-    // A newly verified control socket replaces the older ones.
+    // The verified control socket that the hub accepted last replaces the
+    // others, also when an older one passes the challenge after it.
     for (const c of this.controls()) {
-      if (c.a.verified && c.ws !== ws) closeWS(c.ws, 1000, 'replaced');
+      if (!c.a.verified || c.ws === ws) continue;
+      if (c.a.acceptedMs > a.acceptedMs) return closeWS(ws, 1000, 'replaced');
+      closeWS(c.ws, 1000, 'replaced');
     }
     a.verified = true;
     a.nonce = [];
@@ -515,11 +527,20 @@ export class Hub extends DurableObject {
   }
 
   // Returns the open verified control socket that the hub accepted last, or
-  // null.
+  // null. It first closes the verified ones with no ping for
+  // CONTROL_STALE_MS, so that a dial on a dead socket fails at once.
   verifiedControl() {
+    const now = Date.now();
     let best = null;
     for (const c of this.controls()) {
-      if (c.a.verified && (!best || c.a.acceptedMs > best.a.acceptedMs)) best = c;
+      if (!c.a.verified) continue;
+      const ping = this.ctx.getWebSocketAutoResponseTimestamp(c.ws);
+      if (now - Math.max(c.a.acceptedMs, ping ? ping.getTime() : 0) > CONTROL_STALE_MS) {
+        console.log('lazy: no ping on the control socket for ' + CONTROL_STALE_MS / 1000 + ' s, closing it');
+        closeWS(c.ws, 1001, 'no ping');
+        continue;
+      }
+      if (!best || c.a.acceptedMs > best.a.acceptedMs) best = c;
     }
     return best;
   }
@@ -577,6 +598,35 @@ export class Hub extends DurableObject {
     const ok = await crypto.subtle.verify({ name: 'Ed25519' }, key, reply.subarray(NONCE_BYTES), msg);
     return ok ? null : 'bad signature';
   }
+}
+
+// Returns the client address ip, from CF-Connecting-IP, with an IPv6
+// address cut to its /64, because one host usually holds a whole /64. It
+// is empty when the header is missing, as under wrangler dev.
+function clientKey(ip) {
+  ip = (ip || '').split('%')[0];
+  if (!ip.includes(':') || ip.includes('.')) return ip;
+  const [head, tail] = ip.split('::');
+  let groups = head ? head.split(':') : [];
+  if (tail !== undefined) {
+    const t = tail ? tail.split(':') : [];
+    groups = [...groups, ...Array(Math.max(8 - groups.length - t.length, 0)).fill('0'), ...t];
+  }
+  return groups.slice(0, 4).map((g) => parseInt(g || '0', 16).toString(16)).join(':') + '::/64';
+}
+
+// Returns the oldest of the pending control sockets whose client address
+// has the most pending, counting a new one from client.
+function busiestOldest(pending, client) {
+  const counts = new Map([[client, 1]]);
+  for (const c of pending) counts.set(c.a.client || '', (counts.get(c.a.client || '') || 0) + 1);
+  const most = Math.max(...counts.values());
+  let best = null;
+  for (const c of pending) {
+    if (counts.get(c.a.client || '') !== most) continue;
+    if (!best || c.a.acceptedMs < best.a.acceptedMs) best = c;
+  }
+  return best;
 }
 
 function closeWS(ws, code, reason) {
