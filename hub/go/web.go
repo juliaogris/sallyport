@@ -85,6 +85,9 @@ func (h *hub) loginHostRequest(req *request) *response {
 	}
 	if err != nil {
 		logf("web: %v", err)
+		if rateLimited(err) {
+			return textError(rateLimitedMsg, 429)
+		}
 		return textError("request failed", 502)
 	}
 	return jsonResponse(v)
