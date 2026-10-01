@@ -256,11 +256,18 @@ document.getElementById('go').onclick = async () => {
 nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 </script>`
 
-const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport</title>
+const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><meta name="referrer" content="no-referrer"><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
-try { const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/')); if (p.startsWith('/') && !p.startsWith('//') && !p.includes('\\')) path = p; } catch (e) {}
+// The start path must pass the same rule as start_path_ok, including no
+// "." or ".." segment, because a path such as "/.//host" resolves to the
+// path "//host".
+try {
+  const p = atob((start || '').replace(/-/g, '+').replace(/_/g, '/'));
+  const segs = p.split(/[?#]/)[0].toLowerCase().replace(/%2e/g, '.').split('/');
+  if (/^\/(?!\/)[\x21-\x5b\x5d-\x7e]*$/.test(p) && !segs.some(s => s === '.' || s === '..')) path = p;
+} catch (e) {}
 history.replaceState(null, '', location.pathname);
 fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
   .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));

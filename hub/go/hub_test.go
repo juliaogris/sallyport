@@ -45,6 +45,38 @@ func TestParseApps(t *testing.T) {
 	}
 }
 
+func TestValidStart(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/", true},
+		{"/stream", true},
+		{"/a?b=1#c", true},
+		{"/%2F/x", true},
+		{"/a/./b", false},
+		{"/.//evil.example", false},
+		{"/a/%2E%2e/b", false},
+		{"/a/..", false},
+		{"/a/b?x=/../", true},
+		{"/a.b/.c", true},
+		{"", false},
+		{"stream", false},
+		{"//evil.example", false},
+		{"/\t/evil.example", false},
+		{"/\n/evil.example", false},
+		{"/\r/evil.example", false},
+		{`/\evil.example`, false},
+		{"/ /x", false},
+		{"/é", false},
+	}
+	for _, tt := range tests {
+		if got := validStart(tt.path); got != tt.want {
+			t.Errorf("validStart(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestProtoRoundTrip(t *testing.T) {
 	msg := changeUserAuthenticationRequest("tok", credentialCreation("public-key", []byte{1, 2}, []byte("cd"), []byte("att")))
 	f, err := decode(msg)

@@ -167,16 +167,36 @@ func parseApps(s string) []app {
 	return out
 }
 
+// validStart reports whether p starts with one `/`, has only bytes 0x21
+// to 0x7e other than `\`, and has no `.` or `..` segment. The URL parser
+// removes tab, CR and LF, reads `\` as `/` and removes dot segments, so any
+// of them could turn the path into `//host`. handoffPage applies the same
+// rule to the start path it is sent.
 func validStart(p string) bool {
 	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
 		return false
 	}
-	for i := 0; i < len(p); i++ {
-		if p[i] <= ' ' || p[i] > '~' {
+	for i := range len(p) {
+		if p[i] <= ' ' || p[i] > '~' || p[i] == '\\' {
 			return false
 		}
 	}
-	return true
+	return !hasDotSegment(p)
+}
+
+// hasDotSegment reports whether the path part of p has a `.` or `..`
+// segment, also written `%2e`.
+func hasDotSegment(p string) bool {
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	for _, seg := range strings.Split(p, "/") {
+		seg = strings.ReplaceAll(strings.ToLower(seg), "%2e", ".")
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // validName reports whether name matches ^[a-z][a-z0-9]*$ and is at most
