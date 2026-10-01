@@ -599,6 +599,7 @@ export class Hub extends DurableObject {
     const client = clientKey(req.headers.get('CF-Connecting-IP'));
     const pending = this.controls().filter((c) => !c.a.verified);
     if (pending.length >= MAX_PENDING_CONTROL) {
+      console.log('lazy: too many control sockets in the challenge, closing the oldest of the busiest client');
       closeWS(busiestOldest(pending, client).ws, 1013, 'try again later');
     }
     const pair = new WebSocketPair();
@@ -649,7 +650,11 @@ export class Hub extends DurableObject {
     // others, also when an older one passes the challenge after it.
     for (const c of this.controls()) {
       if (!c.a.verified || c.ws === ws) continue;
-      if (c.a.acceptedMs > a.acceptedMs) return closeWS(ws, 1000, 'replaced');
+      if (c.a.acceptedMs > a.acceptedMs) {
+        console.log('lazy: control socket replaced by a newer one');
+        return closeWS(ws, 1000, 'replaced');
+      }
+      console.log('lazy: control socket replaced by a newer one');
       closeWS(c.ws, 1000, 'replaced');
     }
     a.verified = true;
