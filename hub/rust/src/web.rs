@@ -185,6 +185,83 @@ pub(crate) fn login_host(env: &Env) -> Result<String> {
     Ok(format!("{owner}.{domain}"))
 }
 
+/// The login host paths that [`login_host_request`] routes. Any other path
+/// is 404.
+const LOGIN_PATHS: &[&str] = &[
+    "/",
+    "/web/login",
+    "/webapi/login/begin",
+    "/webapi/login/finish",
+    "/web/logout",
+    "/web/passkeys",
+    "/webapi/passkeys",
+    "/web/add-passkey",
+    "/webapi/add-passkey/begin",
+    "/webapi/add-passkey/finish",
+];
+/// The login host path prefixes that [`login_host_request`] routes.
+const LOGIN_PREFIXES: &[&str] = &[
+    "/web/invite/",
+    "/webapi/invite/",
+    "/web/launch/",
+    "/webapi/passkeys/",
+];
+
+/// Answers a request that needs no session and no state as the Durable
+/// Object would answer it, so that the Worker entry can answer it without
+/// waking the object. It returns None for every other request.
+///
+/// On the login host it answers a path that has no route with 404. On an
+/// app host it answers `/teleport-logout`, the device-bound session paths,
+/// a cross-origin request that can change state, and a request without
+/// both app cookies. The agent and auth paths on the login host are not
+/// passed here.
+pub fn answer_without_hub(req: &Request, env: &Env, kind: &Host) -> Result<Option<Response>> {
+    let path = req.path();
+    if let Host::Login = kind {
+        return if login_routed(&path) {
+            Ok(None)
+        } else {
+            Response::error("not found", 404).map(Some)
+        };
+    }
+    if path == AUTH_PATH {
+        return Ok(None);
+    }
+    if path == "/teleport-logout" {
+        return to_login(env).map(Some);
+    }
+    if path.starts_with("/x-teleport-dbsc") {
+        return Response::error("not found", 404).map(Some);
+    }
+    let host = req.url()?.host_str().unwrap_or_default().to_string();
+    if !matches!(req.method(), Method::Get | Method::Head | Method::Options)
+        && !same_origin_fetch(req, &host)?
+    {
+        return Response::error("bad origin", 403).map(Some);
+    }
+    let has = |name| -> Result<bool> { Ok(cookie(req, name)?.is_some_and(|v| !v.is_empty())) };
+    if !has(APP_COOKIE)? || !has(SUBJECT_COOKIE)? {
+        return to_login(env).map(Some);
+    }
+    Ok(None)
+}
+
+/// Returns true if [`login_host_request`] has a route for `path`.
+fn login_routed(path: &str) -> bool {
+    LOGIN_PATHS.contains(&path) || LOGIN_PREFIXES.iter().any(|p| path.starts_with(p))
+}
+
+/// Returns a 303 to the login host that clears the app cookies.
+fn to_login(env: &Env) -> Result<Response> {
+    let mut res = redirect(&format!("https://{}/", login_host(env)?))?;
+    res.headers_mut()
+        .append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
+    res.headers_mut()
+        .append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
+    Ok(res)
+}
+
 /// Answers a request for the login host.
 pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Response> {
     let host = login_host(cx.env)?;
@@ -310,14 +387,7 @@ pub async fn app_host_request(mut req: Request, cx: &Ctx<'_>, app: &str) -> Resu
             _ => Response::error("method not allowed", 405),
         };
     }
-    let to_login = || -> Result<Response> {
-        let mut res = redirect(&format!("https://{}/", login_host(cx.env)?))?;
-        res.headers_mut()
-            .append("Set-Cookie", &expire_cookie(APP_COOKIE))?;
-        res.headers_mut()
-            .append("Set-Cookie", &expire_cookie(SUBJECT_COOKIE))?;
-        Ok(res)
-    };
+    let to_login = || to_login(cx.env);
     if path == "/teleport-logout" {
         return to_login();
     }
@@ -1242,6 +1312,29 @@ mod tests {
                 want,
                 "{site:?} {origin:?}"
             );
+        }
+    }
+
+    #[test]
+    fn login_routed_cases() {
+        for path in [
+            "/",
+            "/web/login",
+            "/webapi/passkeys",
+            "/web/invite/x",
+            "/webapi/passkeys/x/y",
+        ] {
+            assert!(login_routed(path), "{path}");
+        }
+        for path in [
+            "",
+            "/index.html",
+            "/web/login/",
+            "/web/invite",
+            "/wp-login.php",
+            "/webapi/find",
+        ] {
+            assert!(!login_routed(path), "{path}");
         }
     }
 
