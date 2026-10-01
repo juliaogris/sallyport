@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -47,3 +48,34 @@ func (c *WSConn) RemoteAddr() net.Addr               { return c.ws.RemoteAddr() 
 func (c *WSConn) SetDeadline(t time.Time) error      { return c.ws.NetConn().SetDeadline(t) }
 func (c *WSConn) SetReadDeadline(t time.Time) error  { return c.ws.SetReadDeadline(t) }
 func (c *WSConn) SetWriteDeadline(t time.Time) error { return c.ws.SetWriteDeadline(t) }
+
+// ackConn is a WSConn for a lazy auth stream, as auth's callout makes it.
+// It skips text frames from the hub, and with acks it sends "ack <total>"
+// each time the bytes it passed on cross a multiple of ackEvery.
+type ackConn struct {
+	*WSConn
+	acks     bool
+	received int64
+}
+
+func (c *ackConn) Read(b []byte) (int, error) {
+	for len(c.buf) == 0 {
+		typ, m, err := c.ws.ReadMessage()
+		if err != nil {
+			return 0, err
+		}
+		if typ == websocket.BinaryMessage {
+			c.buf = m
+		}
+	}
+	n := copy(b, c.buf)
+	c.buf = c.buf[n:]
+	before := c.received
+	c.received += int64(n)
+	if c.acks && c.received/ackEvery != before/ackEvery {
+		c.mu.Lock()
+		c.ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("ack %d", c.received)))
+		c.mu.Unlock()
+	}
+	return n, nil
+}

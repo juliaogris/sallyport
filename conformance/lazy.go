@@ -5,7 +5,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -65,19 +67,26 @@ func (h *Hub) DialLazy(ctx context.Context, mode string, header http.Header) (*w
 // DialControl opens a control socket and answers the hub's challenge with
 // key, or the cluster's callout key if key is nil.
 func (h *Hub) DialControl(ctx context.Context, p *PKI, key ed25519.PrivateKey) (*websocket.Conn, error) {
-	ws, resp, err := h.DialLazy(ctx, "control", nil)
+	ws, _, err := h.DialControlResp(ctx, p, key, nil)
+	return ws, err
+}
+
+// DialControlResp is DialControl with extra request headers, and it also
+// returns the upgrade response.
+func (h *Hub) DialControlResp(ctx context.Context, p *PKI, key ed25519.PrivateKey, header http.Header) (*websocket.Conn, *http.Response, error) {
+	ws, resp, err := h.DialLazy(ctx, "control", header)
 	if err != nil {
 		if resp != nil {
-			return nil, fmt.Errorf("control websocket: %w (status %d)", err, resp.StatusCode)
+			return nil, resp, fmt.Errorf("control websocket: %w (status %d)", err, resp.StatusCode)
 		}
-		return nil, fmt.Errorf("control websocket: %w", err)
+		return nil, nil, fmt.Errorf("control websocket: %w", err)
 	}
 	ws.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, hubNonce, err := ws.ReadMessage()
 	ws.SetReadDeadline(time.Time{})
 	if err != nil || len(hubNonce) != NonceBytes {
 		ws.Close()
-		return nil, fmt.Errorf("control nonce: %v, %d bytes", err, len(hubNonce))
+		return nil, resp, fmt.Errorf("control nonce: %v, %d bytes", err, len(hubNonce))
 	}
 	if key == nil {
 		key = p.Callout
@@ -87,9 +96,25 @@ func (h *Hub) DialControl(ctx context.Context, p *PKI, key ed25519.PrivateKey) (
 	msg := append(append(append([]byte(CalloutDomain), LoginHost...), hubNonce...), authNonce...)
 	if err := ws.WriteMessage(websocket.BinaryMessage, append(authNonce, ed25519.Sign(key, msg)...)); err != nil {
 		ws.Close()
-		return nil, fmt.Errorf("control reply: %w", err)
+		return nil, resp, fmt.Errorf("control reply: %w", err)
 	}
-	return ws, nil
+	return ws, resp, nil
+}
+
+// Lazy protocol headers and capability values.
+const (
+	ControlHeader = "Sallyport-Control"
+	StreamHeader  = "Sallyport-Stream"
+)
+
+// ValidDialID returns true when id is 43 characters of unpadded base64url
+// that encodes 32 bytes, so that it encodes back to the same string.
+func ValidDialID(id string) bool {
+	if len(id) != 43 {
+		return false
+	}
+	b, err := base64.RawURLEncoding.DecodeString(id)
+	return err == nil && len(b) == 32 && base64.RawURLEncoding.EncodeToString(b) == id
 }
 
 // RunLazy keeps a control socket open to h, as auth's callout does with
@@ -107,10 +132,11 @@ func (a *FakeAuth) RunLazy(ctx context.Context, h *Hub, app *AppServer) {
 }
 
 func (a *FakeAuth) serveControl(ctx context.Context, h *Hub, app *AppServer) error {
-	ws, err := h.DialControl(ctx, a.pki, nil)
+	ws, resp, err := h.DialControlResp(ctx, a.pki, nil, nil)
 	if err != nil {
 		return err
 	}
+	ctl := &control{ws: ws, refuse: resp.Header.Get(ControlHeader) == "refuse"}
 	a.mu.Lock()
 	a.sockets[ws] = true
 	a.mu.Unlock()
@@ -129,8 +155,28 @@ func (a *FakeAuth) serveControl(ctx context.Context, h *Hub, app *AppServer) err
 		if len(parts) != 3 || parts[0] != "dial" {
 			continue
 		}
-		go a.serveLazyStream(ctx, h, app, parts[1], parts[2])
+		if !ValidDialID(parts[2]) {
+			a.mu.Lock()
+			a.badIDs = append(a.badIDs, parts[2])
+			a.mu.Unlock()
+			continue
+		}
+		go a.serveLazyStream(ctx, h, app, ctl, parts[1], parts[2])
 	}
+}
+
+// control is a verified control socket. Writes from several dials are
+// serialized.
+type control struct {
+	ws     *websocket.Conn
+	mu     sync.Mutex
+	refuse bool
+}
+
+func (c *control) send(text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ws.WriteMessage(websocket.TextMessage, []byte(text))
 }
 
 // LazyDial is how the fake auth answers a dial on its control socket.
@@ -150,13 +196,60 @@ const (
 	// LazyDialTwice opens a second stream with the same id, then serves
 	// the first.
 	LazyDialTwice
+	// LazyDialRefuse sends "refuse <id>" when the hub supports it, and
+	// otherwise opens no stream.
+	LazyDialRefuse
+	// LazyDialAckText, LazyDialAckBackwards and LazyDialAckAbove open a
+	// stream with upload acks and send a bad ack: not a number, below the
+	// last ack, and above the bytes the hub sent.
+	LazyDialAckText
+	LazyDialAckBackwards
+	LazyDialAckAbove
 )
 
-// SetLazyDial sets how the fake auth answers the dials that follow.
+// SetLazyDial sets how the fake auth answers the app dials that follow.
 func (a *FakeAuth) SetLazyDial(d LazyDial) {
 	a.mu.Lock()
 	a.lazyDial = d
 	a.mu.Unlock()
+}
+
+// SetLazyAuthDial sets how the fake auth answers the auth dials that
+// follow.
+func (a *FakeAuth) SetLazyAuthDial(d LazyDial) {
+	a.mu.Lock()
+	a.lazyAuthDial = d
+	a.mu.Unlock()
+}
+
+// SetStreamAcks sets whether new streams ask for upload acks. It is on by
+// default, as in auth's callout.
+func (a *FakeAuth) SetStreamAcks(on bool) {
+	a.mu.Lock()
+	a.noStreamAcks = !on
+	a.mu.Unlock()
+}
+
+// Refused returns the dial ids the fake auth refused.
+func (a *FakeAuth) Refused() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.refused...)
+}
+
+// BadDialIDs returns the dial ids from the hub that ValidDialID refused.
+func (a *FakeAuth) BadDialIDs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.badIDs...)
+}
+
+// AckCloses returns the close code of each stream a bad ack was sent on,
+// or 0 when the hub did not close it within 10 s.
+func (a *FakeAuth) AckCloses() []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]int(nil), a.ackCloses...)
 }
 
 // Duplicates returns the upgrade status of each second stream with a used
@@ -174,20 +267,36 @@ func (a *FakeAuth) Dials() int {
 	return a.dials
 }
 
-func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, kind, id string) {
+func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, ctl *control, kind, id string) {
 	a.mu.Lock()
 	a.dials++
 	mode := a.lazyDial
-	a.mu.Unlock()
-	// The hub's own calls to auth are always served.
 	if kind != "app" {
-		mode = LazyDialServe
+		mode = a.lazyAuthDial
 	}
-	if mode == LazyDialIgnore {
+	acks := !a.noStreamAcks
+	a.mu.Unlock()
+	switch mode {
+	case LazyDialIgnore:
+		return
+	case LazyDialRefuse:
+		if ctl.refuse && ctl.send("refuse "+id) == nil {
+			a.mu.Lock()
+			a.refused = append(a.refused, id)
+			a.mu.Unlock()
+		}
 		return
 	}
-	ws, _, err := h.DialLazy(ctx, "stream", http.Header{StreamIDHeader: {id}})
+	header := http.Header{StreamIDHeader: {id}}
+	if acks || mode >= LazyDialAckText {
+		header.Set(StreamHeader, "ack")
+	}
+	ws, _, err := h.DialLazy(ctx, "stream", header)
 	if err != nil {
+		return
+	}
+	if mode >= LazyDialAckText {
+		a.badAck(ws, mode)
 		return
 	}
 	switch mode {
@@ -223,21 +332,72 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 	}
 	switch kind {
 	case "auth":
-		// Auth answers are small, so they never fill the window, and a
-		// plain WSConn is enough. Under wrangler dev, a FlowConn's
+		// Auth answers are small, so they never fill the window, and the
+		// stream needs no FlowConn. Under wrangler dev, a FlowConn's
 		// reader delays the last message of a legacy HTTP answer to the
-		// Rust hub, which the real callout does not do.
-		if !a.ln.put(NewWSConn(ws)) {
+		// Rust hub, which the real callout does not do. Acks go both ways
+		// as on app streams.
+		if !a.ln.put(&ackConn{WSConn: NewWSConn(ws), acks: acks}) {
 			ws.Close()
 		}
 	case "app":
-		if app == nil || !app.ln.put(NewFlowConn(ws)) {
+		if app == nil || !app.ln.put(newFlowConn(ws, acks)) {
 			ws.Close()
 		}
 	default:
 		ws.Close()
 	}
 }
+
+// badAck reads the first bytes the hub sends on ws, sends the bad ack of
+// mode, and records how the hub closes the stream.
+func (a *FakeAuth) badAck(ws *websocket.Conn, mode LazyDial) {
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var got int
+	for got == 0 {
+		typ, m, err := ws.ReadMessage()
+		if err != nil {
+			a.recordAckClose(err)
+			return
+		}
+		if typ == websocket.BinaryMessage {
+			got += len(m)
+		}
+	}
+	var acks []string
+	switch mode {
+	case LazyDialAckText:
+		acks = []string{"ack many"}
+	case LazyDialAckBackwards:
+		acks = []string{fmt.Sprintf("ack %d", got), "ack 0"}
+	case LazyDialAckAbove:
+		acks = []string{fmt.Sprintf("ack %d", got+1<<20)}
+	}
+	for _, m := range acks {
+		ws.WriteMessage(websocket.TextMessage, []byte(m))
+	}
+	for {
+		if _, _, err := ws.ReadMessage(); err != nil {
+			a.recordAckClose(err)
+			return
+		}
+	}
+}
+
+func (a *FakeAuth) recordAckClose(err error) {
+	code := 0
+	var ce *websocket.CloseError
+	if errors.As(err, &ce) {
+		code = ce.Code
+	}
+	a.mu.Lock()
+	a.ackCloses = append(a.ackCloses, code)
+	a.mu.Unlock()
+}
+
+// ackEvery is how many bytes a stream receiver passes on between acks.
+const ackEvery = 256 << 10
 
 // maxUnread is the most bytes from the hub that auth's callout holds on a
 // lazy stream before it closes the stream. Bytes towards the callout have
@@ -254,19 +414,27 @@ const lazyWindow = 1 << 20
 // bytes unacknowledged. A reader goroutine reads the WebSocket at all
 // times, so acks arrive while nobody calls Read.
 type FlowConn struct {
-	ws      *websocket.Conn
-	mu      sync.Mutex
-	cond    *sync.Cond
-	pending []byte
-	err     error
-	sent    int64
-	acked   int64
-	wmu     sync.Mutex
+	ws *websocket.Conn
+	// acks is true when the stream asked for upload acks, so the conn acks
+	// the bytes it passes on, which received counts. fmu serializes
+	// WebSocket writes.
+	acks     bool
+	received int64
+	fmu      sync.Mutex
+	mu       sync.Mutex
+	cond     *sync.Cond
+	pending  []byte
+	err      error
+	sent     int64
+	acked    int64
+	wmu      sync.Mutex
 }
 
-// NewFlowConn wraps ws and starts its reader.
-func NewFlowConn(ws *websocket.Conn) *FlowConn {
-	c := &FlowConn{ws: ws}
+// NewFlowConn wraps ws and starts its reader. It sends no upload acks.
+func NewFlowConn(ws *websocket.Conn) *FlowConn { return newFlowConn(ws, false) }
+
+func newFlowConn(ws *websocket.Conn, acks bool) *FlowConn {
+	c := &FlowConn{ws: ws, acks: acks}
 	c.cond = sync.NewCond(&c.mu)
 	go c.readLoop()
 	return c
@@ -276,6 +444,15 @@ func (c *FlowConn) readLoop() {
 	for {
 		typ, m, err := c.ws.ReadMessage()
 		c.mu.Lock()
+		if err == nil && typ == websocket.BinaryMessage && len(c.pending)+len(m) > maxUnread {
+			// Auth's callout closes a stream with more than maxUnread
+			// bytes it has not passed on.
+			err = fmt.Errorf("more than %d bytes unread", maxUnread)
+			c.fmu.Lock()
+			c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "unread limit"), time.Now().Add(time.Second))
+			c.fmu.Unlock()
+			c.ws.Close()
+		}
 		if err != nil {
 			c.err = err
 			c.cond.Broadcast()
@@ -294,17 +471,31 @@ func (c *FlowConn) readLoop() {
 	}
 }
 
+// Read passes on bytes from the hub. With acks, it sends "ack <total>"
+// each time the bytes passed on cross a multiple of ackEvery. Reads come
+// from one reader, so the acks leave in order.
 func (c *FlowConn) Read(b []byte) (int, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for len(c.pending) == 0 {
 		if c.err != nil {
-			return 0, c.err
+			err := c.err
+			c.mu.Unlock()
+			return 0, err
 		}
 		c.cond.Wait()
 	}
 	n := copy(b, c.pending)
 	c.pending = c.pending[n:]
+	before := c.received
+	c.received += int64(n)
+	var ack int64
+	if c.acks && c.received/ackEvery != before/ackEvery {
+		ack = c.received
+	}
+	c.mu.Unlock()
+	if ack > 0 {
+		c.writeFrame(websocket.TextMessage, []byte(fmt.Sprintf("ack %d", ack)))
+	}
 	return n, nil
 }
 
@@ -325,7 +516,7 @@ func (c *FlowConn) Write(b []byte) (int, error) {
 		}
 		c.sent += int64(len(chunk))
 		c.mu.Unlock()
-		if err := c.ws.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+		if err := c.writeFrame(websocket.BinaryMessage, chunk); err != nil {
 			return written, err
 		}
 		written += len(chunk)
@@ -334,12 +525,18 @@ func (c *FlowConn) Write(b []byte) (int, error) {
 	return written, nil
 }
 
+func (c *FlowConn) writeFrame(typ int, b []byte) error {
+	c.fmu.Lock()
+	defer c.fmu.Unlock()
+	return c.ws.WriteMessage(typ, b)
+}
+
 // Close sends a close frame before it closes the connection, as auth's
 // callout does.
 func (c *FlowConn) Close() error {
-	c.wmu.Lock()
+	c.fmu.Lock()
 	c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
-	c.wmu.Unlock()
+	c.fmu.Unlock()
 	return c.ws.Close()
 }
 func (c *FlowConn) LocalAddr() net.Addr                { return c.ws.LocalAddr() }

@@ -106,6 +106,16 @@ func Handler(dir string) http.Handler {
 		w.Header().Add("Set-Cookie", "app=1; Path=/")
 		w.WriteHeader(http.StatusOK)
 	})
+	// /t/quiet?secs=S sends nothing for S seconds, then answers 200, like a
+	// long poll.
+	mux.HandleFunc("/t/quiet", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(time.Duration(intParam(r, "secs", 35)) * time.Second):
+		}
+		w.Write([]byte("done\n"))
+	})
 	// /t/upload counts the request body and returns the count. With
 	// bps=B it reads B bytes per second, like an app that writes the
 	// upload to a slow disk.
