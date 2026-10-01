@@ -835,5 +835,15 @@ function respond(status, head, body, flags, ws, stream) {
   if (ws) init.webSocket = ws;
   if (flags & 1) init.encodeBody = 'manual';
   if (flags & 2) body = new TextEncoder().encode(body);
+  // An errored chunked body reaches the client as a clean end, also on the
+  // edge. A body of known length goes out through a FixedLengthStream, which
+  // the runtime aborts when the body is cut short, so that the client sees
+  // an error.
+  const len = h.get('content-length');
+  if (stream && len !== null && /^[0-9]+$/.test(len)) {
+    const fixed = new FixedLengthStream(Number(len));
+    stream.pipeTo(fixed.writable).catch(() => {});
+    stream = fixed.readable;
+  }
   return new Response(stream || body || null, init);
 }
