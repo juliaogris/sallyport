@@ -42,29 +42,34 @@ func TestDialTableRefusesAboveMax(t *testing.T) {
 	}
 }
 
-func TestDialTableCancelAfterTake(t *testing.T) {
-	var d dialTable[int]
-	ch, _ := d.add("a", 2)
-	got, _ := d.take("a")
-	got <- 7
-	if d.cancel("a") {
-		t.Error("cancel removed a dial that take had removed")
-	}
-	if v := <-ch; v != 7 {
-		t.Errorf("dial got %d, want 7", v)
-	}
-	ch, _ = d.add("b", 2)
-	if !d.cancel("b") {
-		t.Error("cancel did not remove a waiting dial")
-	}
-	if _, ok := d.take("b"); ok {
-		t.Error("take found a cancelled dial")
-	}
-	select {
-	case <-ch:
-		t.Error("a cancelled dial got a stream")
-	default:
-	}
+func TestDialTableCancel(t *testing.T) {
+	t.Run("after take", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("a", 2)
+		got, _ := d.take("a")
+		got <- 7
+		if d.cancel("a") {
+			t.Error("cancel removed a dial that take had removed")
+		}
+		if v := <-ch; v != 7 {
+			t.Errorf("dial got %d, want 7", v)
+		}
+	})
+	t.Run("waiting dial", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("b", 2)
+		if !d.cancel("b") {
+			t.Error("cancel did not remove a waiting dial")
+		}
+		if _, ok := d.take("b"); ok {
+			t.Error("take found a cancelled dial")
+		}
+		select {
+		case <-ch:
+			t.Error("a cancelled dial got a stream")
+		default:
+		}
+	})
 }
 
 func TestDialTableWait(t *testing.T) {
