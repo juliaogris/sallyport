@@ -102,3 +102,32 @@ APPS = "bench,octo,octocam:/stream"
 [[env.go.durable_objects.bindings]]
 name = "HUB"
 class_name = "Hub"
+
+# The lazy hub: auth's callout keeps one hibernating control socket open and
+# opens a stream per request, so the Durable Object sleeps while nobody uses
+# the cluster. A JavaScript front Worker keeps each request under the free
+# plan's 10 ms of CPU.
+[env.lazy]
+main = "front.mjs"
+routes = [
+  { pattern = "lazy.example.com", custom_domain = true },
+  { pattern = "bench-lazy.example.com", custom_domain = true },
+  { pattern = "octocam-lazy.example.com", custom_domain = true },
+]
+
+[env.lazy.build]
+command = "CC_wasm32_unknown_unknown=${LLVM_CLANG:-/opt/homebrew/opt/llvm/bin/clang} AR_wasm32_unknown_unknown=${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar} RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' worker-build --release"
+
+[env.lazy.vars]
+HUB_MODE = "lazy"
+CLUSTER_NAME = "sallyport-lazy"
+PUBLIC_ADDR = "lazy.example.com:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "lazy.example.com"
+DOMAIN = "example.com"
+OWNER = "lazy"
+APPS = "bench,octocam:/stream"
+
+[[env.lazy.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
