@@ -363,10 +363,11 @@ impl Lazy {
     }
 
     /// Asks auth's callout for a stream and waits up to [`STREAM_WAIT`]
-    /// for it. It returns [`DialError::Busy`] at once when
-    /// [`MAX_PENDING_DIALS`] dials wait, for [`Caller::Anonymous`] when
-    /// [`MAX_PENDING_ANONYMOUS`] such dials wait, or for an app stream when
-    /// [`MAX_APP_STREAMS`] are open.
+    /// for it. It returns [`DialError::Failed`] at once when
+    /// [`MAX_PENDING_DIALS`] dials wait. It returns [`DialError::Busy`] at
+    /// once for [`Caller::Anonymous`] when [`MAX_PENDING_ANONYMOUS`] such
+    /// dials wait, for an app stream when [`MAX_APP_STREAMS`] are open, and
+    /// when the callout refuses the dial.
     pub async fn dial(
         &self,
         kind: Kind,
@@ -377,7 +378,7 @@ impl Lazy {
             .control()
             .ok_or_else(|| DialError::Failed("auth is not connected".to_string()))?;
         if self.dials.borrow().len() >= MAX_PENDING_DIALS {
-            return Err(DialError::Busy(format!(
+            return Err(DialError::Failed(format!(
                 "{MAX_PENDING_DIALS} dials waiting"
             )));
         }
