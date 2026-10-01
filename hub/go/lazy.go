@@ -38,7 +38,9 @@ const (
 	// lazyDialDeadline is how long a dial waits for its stream.
 	lazyDialDeadline = 10 * time.Second
 	// lazyStreamIdle closes a stream after this long without bytes in
-	// either direction.
+	// either direction. This also closes an app response that sends nothing
+	// for that long, such as a quiet server-sent events stream or a long
+	// poll.
 	lazyStreamIdle = 30 * time.Second
 	// ackEvery is how many bytes a stream passes on between two acks. The
 	// sender's window is larger, so it can keep sending while an ack is on
@@ -68,9 +70,23 @@ func (l *lazyHub) serve(req *request) *response {
 	if !ok {
 		return textError("unknown stream", 404)
 	}
-	c := acceptWS()
+	// If accepting the stream panics, the dial still gets an answer, so
+	// that it does not wait on ch for good.
+	var c *wsConn
+	sent := false
+	defer func() {
+		if sent {
+			return
+		}
+		ch <- nil
+		if c != nil {
+			c.CloseWith(1011, "accept failed")
+		}
+	}()
+	c = acceptWS()
 	c.startLazy()
 	ch <- c
+	sent = true
 	return &response{status: 101, ws: c}
 }
 
@@ -103,6 +119,10 @@ func (l *lazyHub) dial(ctx context.Context, kind string) (net.Conn, error) {
 	// A stream that arrived as the dial gave up is used.
 	if err != nil && !l.dials.cancel(id) {
 		c, err = <-ch, nil
+	}
+	// A nil stream means the hub failed to accept it.
+	if err == nil && c == nil {
+		err = fmt.Errorf("%s stream not accepted", kind)
 	}
 	result := "paired"
 	if err != nil {

@@ -167,6 +167,9 @@ func (c *wsConn) Write(b []byte) (int, error) {
 	}
 	c.pend = append(c.pend, b...)
 	if c.lazy {
+		// Bytes from the hub to auth's callout have no window: nothing
+		// here waits for an ack. The callout closes a stream with more
+		// than 8 MiB unread, so a large upload to a slow app fails.
 		c.lastBytes.Store(time.Now().UnixMilli())
 	}
 	if len(c.pend) >= outBytes {
