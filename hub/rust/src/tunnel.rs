@@ -58,24 +58,6 @@ static WS_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
 /// waited for room since the last heartbeat.
 static PIPE_WAIT_MAX_MS: AtomicU64 = AtomicU64::new(0);
 static PIPE_WAIT_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
-thread_local! {
-    /// The last stream close lines, for the temporary lazy debug route,
-    /// because logs after a request ends do not reach `wrangler tail`.
-    pub static CLOSE_LOG: std::cell::RefCell<std::collections::VecDeque<String>> =
-        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-}
-
-/// Keeps `line` in [`CLOSE_LOG`], at most 20 lines.
-pub fn keep_close_line(line: String) {
-    CLOSE_LOG.with(|l| {
-        let mut l = l.borrow_mut();
-        if l.len() >= 20 {
-            l.pop_front();
-        }
-        l.push_back(line);
-    });
-}
-
 /// How many bytes a lazy stream passes on between two acks. The sender's
 /// window is larger, so it can keep sending while an ack is on its way. The
 /// sender is auth's side, whose window is 1 MiB (`streamWindow` in
@@ -197,16 +179,6 @@ impl DurableObject for Hub {
             return Response::error("lazy hub misconfigured", 503);
         }
         let host = req.url()?.host_str().unwrap_or_default().to_string();
-        // Temporary: the lazy hub's recent stream closes. Without the right
-        // token the route answers as if it did not exist.
-        if self.lazy.is_some() && req.path() == "/webapi/lazy-debug" {
-            if !self.debug_token_ok(&req)? {
-                return Response::error("not found", 404);
-            }
-            let lines =
-                CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
-            return Response::ok(lines);
-        }
         // The login host is also the agents' `PUBLIC_ADDR` and auth's
         // `CALLOUT_HOST`, so the agent and auth reach these paths on it.
         // They are not browser requests.
@@ -341,22 +313,6 @@ impl DurableObject for Hub {
         let headers = Headers::new();
         headers.set("Sec-WebSocket-Protocol", SUBPROTOCOL)?;
         Ok(Response::from_websocket(pair.client)?.with_headers(headers))
-    }
-}
-
-impl Hub {
-    /// Returns true if `req` carries the `Sallyport-Debug` header and it
-    /// equals the `LAZY_DEBUG_TOKEN` secret. It returns false when the
-    /// secret is not set or is empty.
-    fn debug_token_ok(&self, req: &Request) -> Result<bool> {
-        let Ok(token) = self.env.secret("LAZY_DEBUG_TOKEN") else {
-            return Ok(false);
-        };
-        let token = token.to_string();
-        let Some(got) = req.headers().get("Sallyport-Debug")? else {
-            return Ok(false);
-        };
-        Ok(!token.is_empty() && web::ct_eq(token.as_bytes(), got.as_bytes()))
     }
 }
 
@@ -583,15 +539,6 @@ pub async fn pump_idle(
     // Tunnel drops close with 1006. The counts show whether a drop follows a
     // burst of messages, and the waits whether the hub fell behind.
     let now = Date::now().as_millis();
-    keep_close_line(format!(
-        "{} close {}, after {} ms, in {} msgs, out {} msgs, last in {} ms before",
-        Date::now().to_string(),
-        close_code.clone().unwrap_or_else(|| "none".to_string()),
-        now.saturating_sub(started),
-        in_msgs.get(),
-        out_msgs.get(),
-        now.saturating_sub(last_in.get()),
-    ));
     console_log!(
         "tunnel: websocket closed, code {}, after {} s, in {} msgs largest {} bytes, out {} msgs, last in {} ms before, queue max {queue_max} wait max {queue_wait_max} ms, pipe wait max {} ms",
         close_code.unwrap_or_else(|| "none".to_string()),
