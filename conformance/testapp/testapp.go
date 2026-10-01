@@ -106,9 +106,15 @@ func Handler(dir string) http.Handler {
 		w.Header().Add("Set-Cookie", "app=1; Path=/")
 		w.WriteHeader(http.StatusOK)
 	})
-	// /t/upload counts the request body and returns the count.
+	// /t/upload counts the request body and returns the count. With
+	// bps=B it reads B bytes per second, like an app that writes the
+	// upload to a slow disk.
 	mux.HandleFunc("POST /t/upload", func(w http.ResponseWriter, r *http.Request) {
-		n, err := io.Copy(io.Discard, r.Body)
+		var body io.Reader = r.Body
+		if bps := intParam(r, "bps", 0); bps > 0 {
+			body = &slowReader{r: r.Body, bps: bps}
+		}
+		n, err := io.Copy(io.Discard, body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -210,4 +216,17 @@ func intParam(r *http.Request, name string, def int) int {
 		return def
 	}
 	return v
+}
+
+// slowReader reads at most bps bytes per second from r.
+type slowReader struct {
+	r   io.Reader
+	bps int
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	p = p[:min(len(p), max(s.bps/10, 1))]
+	n, err := s.r.Read(p)
+	time.Sleep(time.Duration(n) * time.Second / time.Duration(s.bps))
+	return n, err
 }

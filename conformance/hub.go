@@ -70,8 +70,7 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 	if !ok {
 		return nil, fmt.Errorf("unknown hub kind %q, want go or rust", kind)
 	}
-	main := filepath.Join(hubDir, entry)
-	if _, err := os.Stat(main); err != nil {
+	if _, err := os.Stat(filepath.Join(hubDir, entry)); err != nil {
 		return nil, fmt.Errorf("hub not built: %w", err)
 	}
 	if kind == "go" {
@@ -79,6 +78,18 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 			return nil, fmt.Errorf("hub not built: %w", err)
 		}
 	}
+	// wrangler dev reloads when a file it serves changes, and a hub rebuilt
+	// during a run would be loaded half written. The hub runs from a copy.
+	snap := filepath.Join(dir, "hub")
+	if err := copyTree(filepath.Join(hubDir, "build"), filepath.Join(snap, "build")); err != nil {
+		return nil, fmt.Errorf("copy hub build: %w", err)
+	}
+	if kind == "go" {
+		if err := copyFile(filepath.Join(hubDir, entry), filepath.Join(snap, entry)); err != nil {
+			return nil, fmt.Errorf("copy hub entry: %w", err)
+		}
+	}
+	main := filepath.Join(snap, entry)
 
 	port, err := freePort()
 	if err != nil {
@@ -222,6 +233,12 @@ func (h *Hub) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", h.Addr)
 }
 
+// LogHas returns true when the hub log has a line that contains s.
+func (h *Hub) LogHas(s string) bool {
+	b, err := os.ReadFile(h.LogPath)
+	return err == nil && strings.Contains(string(b), s)
+}
+
 // LogTail returns the last n lines of the hub log.
 func (h *Hub) LogTail(n int) string {
 	b, err := os.ReadFile(h.LogPath)
@@ -242,4 +259,35 @@ func freePort() (int, error) {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// copyTree copies the regular files under src to dst.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), 0o700)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		return copyFile(path, filepath.Join(dst, rel))
+	})
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0o600)
 }
