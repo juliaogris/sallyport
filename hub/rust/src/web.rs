@@ -169,6 +169,12 @@ fn owner_domain(env: &Env) -> Result<(String, String)> {
     }
 }
 
+/// Returns true when `OWNER` and `DOMAIN` are set, so that [`classify`]
+/// can name a host.
+pub fn serves_hosts(env: &Env) -> bool {
+    owner_domain(env).is_ok()
+}
+
 /// Returns true when `name` matches `^[a-z][a-z0-9]*$` and is at most 30
 /// bytes.
 pub fn valid_name(name: &str) -> bool {

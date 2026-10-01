@@ -138,10 +138,18 @@ export default {
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
           return textError('upgrade required', 426);
         }
-        // The lazy hub has no reverse tunnel, and an agent that dials it
-        // anyway retries, so it must not wake the Durable Object each time.
-        if (env.HUB_MODE === 'lazy' && url.pathname === '/webapi/connectionupgrade') {
-          return textError('not found', 404);
+        // Agents and auth dial the login host. A hub without OWNER and
+        // DOMAIN names no host, so it takes them on any host.
+        if (!kind && env.OWNER && env.DOMAIN) return textError('not found', 404);
+        // The lazy hub takes only a control socket or a stream on
+        // /tunnel/auth. It has no reverse tunnel and no auth pipe pool, and a
+        // peer that dials one anyway retries, so it must not wake the Durable
+        // Object each time.
+        if (env.HUB_MODE === 'lazy') {
+          const mode = url.searchParams.get('mode');
+          if (url.pathname !== '/tunnel/auth' || (mode !== 'control' && mode !== 'stream')) {
+            return textError('not found', 404);
+          }
         }
         return hub(env).fetch(req);
     }
