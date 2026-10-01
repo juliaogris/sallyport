@@ -83,6 +83,19 @@ func Handler(dir string) http.Handler {
 			w.WriteHeader(code)
 		})
 	}
+	// /t/clte answers with both Content-Length: 5 and Transfer-Encoding:
+	// chunked, and a chunked body of 26 bytes. A client must follow the
+	// chunked encoding (RFC 9112, section 6.3).
+	mux.HandleFunc("/t/clte", func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+		buf.WriteString("d\r\nabcdefghijklm\r\nd\r\nnopqrstuvwxyz\r\n0\r\n\r\n")
+		buf.Flush()
+		conn.Close()
+	})
 	// A 101 to a request without Upgrade, which no hub can forward. The
 	// handler sets the status instead of hijacking, because Hijack waits
 	// for the server's background read to end, and the agent's chanConn

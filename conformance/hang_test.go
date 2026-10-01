@@ -76,28 +76,40 @@ func TestLazyDialFails(t *testing.T) {
 	}
 }
 
-// TestLazyPendingDialCap checks that 40 dials that never get a stream, more
-// than the hub's 32 pending dials, all end and leave the hub working.
+// TestLazyPendingDialCap checks the cap of 128 dials that wait for their
+// stream. With dials that never get a stream, 140 requests over 5 app
+// sessions make 140 dials: up to 128 wait for the 10 s dial deadline and
+// the rest fail at once. All of them end, and the hub works after.
 func TestLazyPendingDialCap(t *testing.T) {
 	s := newLazyStack(t)
-	cookies := s.appCookies(t, "bench")
+	var sessions [][]*http.Cookie
+	for range 5 {
+		sessions = append(sessions, s.appCookies(t, "bench"))
+	}
 	s.auth.SetLazyDial(LazyDialIgnore)
-	statuses := make([]int, 40)
+	statuses := make([]int, 140)
+	took := make([]time.Duration, len(statuses))
 	var wg sync.WaitGroup
 	for i := range statuses {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			statuses[i], _ = s.timedGet(t, "/t/static", cookies, 30*time.Second)
+			statuses[i], took[i] = s.timedGet(t, "/t/static", sessions[i%len(sessions)], 40*time.Second)
 		}()
 	}
 	wg.Wait()
 	s.auth.SetLazyDial(LazyDialServe)
+	fast := 0
 	for i, st := range statuses {
 		require.NotZero(t, st, "request %d did not finish", i)
 		require.GreaterOrEqual(t, st, 500, "request %d", i)
+		if took[i] < 5*time.Second {
+			fast++
+		}
 	}
-	status, _ := s.timedGet(t, "/t/static", cookies, 20*time.Second)
+	t.Logf("%d of %d failed at once, %d dials sent", fast, len(statuses), s.auth.Dials())
+	require.GreaterOrEqual(t, fast, len(statuses)-128, "dials over the cap of 128 waited")
+	status, _ := s.timedGet(t, "/t/static", sessions[0], 20*time.Second)
 	require.Equal(t, http.StatusOK, status, "a request after the failed dials")
 }
 
@@ -174,13 +186,16 @@ func TestUploads(t *testing.T) {
 	cases := []struct {
 		name string
 		size int
-		bps  int
+		// bps is the rate the app reads at: 0 for full speed, or -1 for full
+		// speed with a body of unknown length, sent chunked.
+		bps int
 	}{
 		{"16 MiB", 16 << 20, 0},
 		{"64 MiB", 64 << 20, 0},
 		// More than the callout's 8 MiB unread, so the lazy hub must wait
 		// for upload acks.
 		{"16 MiB read at 1 MiB/s", 16 << 20, 1 << 20},
+		{"16 MiB chunked", 16 << 20, -1},
 	}
 	for _, mode := range []string{"tunnel", "lazy"} {
 		t.Run(mode, func(t *testing.T) {
@@ -197,7 +212,12 @@ func TestUploads(t *testing.T) {
 					if c.bps > 0 {
 						path += "?bps=" + strconv.Itoa(c.bps)
 					}
-					req, _ := http.NewRequest("POST", "https://"+appHost("bench")+path, bytes.NewReader(testapp.Pattern(c.size)))
+					var upload io.Reader = bytes.NewReader(testapp.Pattern(c.size))
+					if c.bps < 0 {
+						// A body of unknown length goes out chunked.
+						upload = io.MultiReader(upload)
+					}
+					req, _ := http.NewRequest("POST", "https://"+appHost("bench")+path, upload)
 					req.Header.Set("Origin", origin(appHost("bench")))
 					for _, ck := range cookies {
 						req.AddCookie(ck)

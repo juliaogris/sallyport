@@ -3,6 +3,7 @@ package conformance
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -102,10 +103,17 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	return b
 }
 
-// login logs Alice in and returns the session cookie.
+// login logs Alice in and returns the session cookie. Each login comes
+// from its own client address, so that the hubs' login limits per address
+// do not refuse tests that log in many times.
 func (s *stack) login(t *testing.T) *http.Cookie {
 	t.Helper()
-	resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"`+AliceCredID+`","type":"public-key"}`)
+	req, _ := http.NewRequest("POST", "https://"+LoginHost+"/webapi/login/finish", strings.NewReader(`{"id":"`+AliceCredID+`","type":"public-key"}`))
+	req.Header.Set("Origin", origin(LoginHost))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cf-Connecting-Ip", randomIP())
+	resp, err := s.hub.Do(req)
+	require.NoError(t, err)
 	readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	c := cookie(resp, "__Host-sp_session")
@@ -153,3 +161,10 @@ func (s *stack) appCookies(t *testing.T, app string) []*http.Cookie {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// randomIP returns a random address in 198.18.0.0/15, the benchmarking
+// range.
+func randomIP() string {
+	b := randomBytes(2)
+	return fmt.Sprintf("198.%d.%d.%d", 18+int(b[0])%2, b[1], 1+int(b[0])%250)
+}

@@ -36,10 +36,19 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("login finish refused", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-mallory"}`)
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-mallory","type":"public-key"}`)
 		readBody(t, resp)
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 		require.Nil(t, cookie(resp, "__Host-sp_session"))
+	})
+
+	t.Run("login finish with an empty assertion", func(t *testing.T) {
+		before := countCalls(s.auth, "/v2/users//web/authenticate")
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{}`)
+		readBody(t, resp)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		require.Nil(t, cookie(resp, "__Host-sp_session"))
+		require.Equal(t, before, countCalls(s.auth, "/v2/users//web/authenticate"), "the hub asked auth about an empty assertion")
 	})
 
 	for _, path := range []string{"/webapi/login/begin", "/webapi/login/finish", "/web/launch/bench", "/web/logout", "/webapi/invite/" + BobInvite + "/begin"} {
@@ -199,4 +208,15 @@ func requireSessionCookie(t *testing.T, c *http.Cookie) {
 	require.Equal(t, "/", c.Path)
 	require.Empty(t, c.Domain)
 	require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+}
+
+// countCalls returns how many calls to path the fake auth has answered.
+func countCalls(a *FakeAuth, path string) int {
+	n := 0
+	for _, c := range a.Calls() {
+		if c.Path == path {
+			n++
+		}
+	}
+	return n
 }
