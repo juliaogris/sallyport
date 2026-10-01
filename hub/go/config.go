@@ -32,6 +32,8 @@ type config struct {
 	apps        []app
 	// lazy is true when HUB_MODE is lazy: auth's callout keeps one control
 	// socket open, and the hub asks it for a stream each time it needs one.
+	// HUB_MODE unset or pool is the pool hub, and any other value is an
+	// error in errs.
 	lazy bool
 
 	// tlsCert is the hub TLS identity: the tunnel's server certificate and
@@ -63,6 +65,11 @@ func parseConfig(env map[string]string) *config {
 		apps:        parseApps(env["APPS"]),
 		lazy:        env["HUB_MODE"] == "lazy",
 		errs:        make(map[string]error),
+	}
+	switch env["HUB_MODE"] {
+	case "", "pool", "lazy":
+	default:
+		c.errs["HUB_MODE"] = fmt.Errorf("HUB_MODE: %q is not pool or lazy, so the hub runs as pool", env["HUB_MODE"])
 	}
 	secret := func(name string) []byte {
 		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env[name]))

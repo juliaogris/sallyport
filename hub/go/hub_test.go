@@ -254,3 +254,26 @@ func TestParseSecrets(t *testing.T) {
 	}
 	t.Logf("proxy name %q", c.proxyName)
 }
+
+func TestParseConfigHubMode(t *testing.T) {
+	tests := []struct {
+		mode     string
+		wantLazy bool
+		wantErr  bool
+	}{
+		{mode: "", wantLazy: false, wantErr: false},
+		{mode: "pool", wantLazy: false, wantErr: false},
+		{mode: "lazy", wantLazy: true, wantErr: false},
+		{mode: "on_demand", wantLazy: false, wantErr: true},
+		{mode: "Lazy", wantLazy: false, wantErr: true},
+	}
+	for _, tt := range tests {
+		c := parseConfig(map[string]string{"HUB_MODE": tt.mode})
+		if c.lazy != tt.wantLazy {
+			t.Errorf("HUB_MODE %q: lazy = %v, want %v", tt.mode, c.lazy, tt.wantLazy)
+		}
+		if gotErr := c.err("HUB_MODE") != nil; gotErr != tt.wantErr {
+			t.Errorf("HUB_MODE %q: error = %v, want error %v", tt.mode, c.err("HUB_MODE"), tt.wantErr)
+		}
+	}
+}

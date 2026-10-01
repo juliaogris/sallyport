@@ -441,6 +441,13 @@ export class Hub extends DurableObject {
     // used once. Storage outlives a deploy, which restarts the Go program.
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS used_tokens (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)');
     this.lazy = env.HUB_MODE === 'lazy';
+    // HUB_MODE unset or pool is the pool hub. Any other value answers every
+    // request with 500, so that a typo does not run the wrong hub quietly.
+    this.badMode = !['', 'pool', 'lazy'].includes(env.HUB_MODE || '');
+    if (this.badMode) {
+      console.log('hub: HUB_MODE ' + JSON.stringify(env.HUB_MODE) + ' is not pool or lazy');
+      return;
+    }
     if (this.lazy) {
       // The runtime answers "ping" without waking the object. The lazy hub
       // starts the Go program on the first request that needs it, so a
@@ -453,6 +460,7 @@ export class Hub extends DurableObject {
   }
 
   async fetch(req) {
+    if (this.badMode) return textError('bad HUB_MODE', 500);
     const url = new URL(req.url);
     if (this.lazy) {
       this.prune();
