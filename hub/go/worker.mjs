@@ -17,16 +17,41 @@ import mod from './build/hub.wasm';
 
 const HUB_INSTANCE = 'hub';
 
-// The most bytes a login host request body may have. A WebAuthn answer or
-// credential is a few KB, and the body is held in JavaScript and in Go.
+// The most bytes a login host request body, or the body of the handoff on
+// an app host, may have. A WebAuthn answer or credential is a few KB, and
+// the body is held in JavaScript and in Go.
 const LOGIN_BODY_LIMIT = 64 * 1024;
+// The most bytes an app request body may have. The body is held in
+// JavaScript and in Go before it goes to the app, and the isolate has 128
+// MB for both and the Go program's linear memory, which never shrinks.
+const APP_BODY_LIMIT = 8 << 20;
+
+// The app host path of the launch handoff, and the hub's app cookies.
+const AUTH_PATH = '/x-teleport-auth';
+const APP_COOKIE = '__Host-sp_app';
+const SUBJECT_COOKIE = '__Host-sp_subject';
+
+// The login host paths the Go program answers, as web.go routes them. Any
+// other path is 404 without waking the Durable Object.
+const LOGIN_PATHS = new Set([
+  '/',
+  '/web/login',
+  '/webapi/login/begin',
+  '/webapi/login/finish',
+  '/web/logout',
+  '/web/passkeys',
+  '/webapi/passkeys',
+  '/web/add-passkey',
+  '/webapi/add-passkey/begin',
+  '/webapi/add-passkey/finish',
+]);
+const LOGIN_PREFIXES = ['/web/invite/', '/webapi/invite/', '/web/launch/', '/webapi/passkeys/'];
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const kind = classify(env, url.hostname);
-    // Every path on an app host is app traffic, so it goes to the hub.
-    if (kind === 'app') return hub(env).fetch(req);
+    if (kind === 'app') return appRequest(req, env, url);
     switch (url.pathname) {
       case '/webapi/find':
       case '/webapi/ping':
@@ -40,10 +65,63 @@ export default {
         }
         return hub(env).fetch(req);
     }
-    if (kind === 'login') return hub(env).fetch(req);
+    if (kind === 'login' && loginPath(url.pathname)) return hub(env).fetch(req);
     return textError('not found', 404);
   },
 };
+
+function loginPath(path) {
+  return LOGIN_PATHS.has(path) || LOGIN_PREFIXES.some((p) => path.startsWith(p));
+}
+
+// Answers the app host requests that need no session as web.go does, and
+// forwards the rest to the Durable Object. A request without both app
+// cookies goes to the login host, so a scanner or a stray browser does not
+// wake the Durable Object or have its body read.
+function appRequest(req, env, url) {
+  const path = url.pathname;
+  if (path === AUTH_PATH) return hub(env).fetch(req);
+  if (path === '/teleport-logout') return toLogin(env);
+  if (path.startsWith('/x-teleport-dbsc')) return textError('not found', 404);
+  switch (req.method) {
+    case 'GET':
+    case 'HEAD':
+    case 'OPTIONS':
+      break;
+    default:
+      if (!sameOriginFetch(req, url.hostname)) return textError('bad origin', 403);
+  }
+  if (!cookie(req, APP_COOKIE) || !cookie(req, SUBJECT_COOKIE)) return toLogin(env);
+  return hub(env).fetch(req);
+}
+
+// Sends the browser to the login host and clears the app cookies.
+function toLogin(env) {
+  const h = new Headers({ location: 'https://' + env.OWNER + '.' + env.DOMAIN + '/' });
+  for (const name of [APP_COOKIE, SUBJECT_COOKIE]) {
+    h.append('set-cookie', name + '=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0');
+  }
+  return new Response(null, { status: 303, headers: h });
+}
+
+// Returns the value of the named cookie, or null.
+function cookie(req, name) {
+  for (const c of (req.headers.get('Cookie') || '').split(';')) {
+    const i = c.indexOf('=');
+    if (i > 0 && c.slice(0, i).trim() === name) return c.slice(i + 1).trim();
+  }
+  return null;
+}
+
+// Returns false when the browser says the request came from another
+// origin. A request with neither Sec-Fetch-Site nor Origin is not from a
+// browser page and passes.
+function sameOriginFetch(req, host) {
+  const site = req.headers.get('Sec-Fetch-Site');
+  if (site !== null) return site === 'same-origin' || site === 'none';
+  const origin = req.headers.get('Origin');
+  return origin === null || origin === 'https://' + host;
+}
 
 // Returns an error with the message as a body of bytes, so that it has no
 // Content-Type, like the Rust hub's errors.
@@ -400,8 +478,8 @@ export class Hub extends DurableObject {
     const p = await programFor(this, this.env);
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-      const limit = classify(this.env, url.hostname) === 'login' ? LOGIN_BODY_LIMIT : Infinity;
-      body = await readBody(req, limit);
+      const app = classify(this.env, url.hostname) === 'app' && url.pathname !== AUTH_PATH;
+      body = await readBody(req, app ? APP_BODY_LIMIT : LOGIN_BODY_LIMIT);
       if (body === null) return textError('request body too large', 413);
     }
     const headers = [];
@@ -426,6 +504,8 @@ export class Hub extends DurableObject {
           resolve(new Response('bad response', { status: 502 }));
         }
       });
+      // Go has copied the body, so this one can be freed.
+      r.body = null;
     });
   }
 
