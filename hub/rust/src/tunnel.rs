@@ -160,7 +160,11 @@ impl DurableObject for Hub {
         hub
     }
 
-    async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+    async fn websocket_message(
+        &self,
+        ws: WebSocket,
+        message: WebSocketIncomingMessage,
+    ) -> Result<()> {
         match &self.lazy {
             Some(lazy) => lazy.on_message(ws, message),
             None => {
@@ -170,7 +174,13 @@ impl DurableObject for Hub {
         }
     }
 
-    async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _was_clean: bool) -> Result<()> {
+    async fn websocket_close(
+        &self,
+        ws: WebSocket,
+        code: usize,
+        reason: String,
+        _was_clean: bool,
+    ) -> Result<()> {
         console_log!("lazy: control socket closed, code {code} {reason:?}");
         // Without the auto-reply flag the runtime needs the close echoed.
         let _ = ws.close(Some(1000), Some("closed"));
@@ -193,7 +203,8 @@ impl DurableObject for Hub {
             if !self.debug_token_ok(&req)? {
                 return Response::error("not found", 404);
             }
-            let lines = CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
+            let lines =
+                CLOSE_LOG.with(|l| l.borrow().iter().cloned().collect::<Vec<_>>().join("\n"));
             return Response::ok(lines);
         }
         // The login host is also the agents' `PUBLIC_ADDR` and auth's
@@ -432,7 +443,12 @@ pub async fn pump(ws: &WebSocket, events: crate::wsevents::Events, pipe: DuplexS
 /// HTTP/1.1 client shuts down its write side while the response arrives.
 /// It closes the WebSocket when no bytes have crossed in either direction
 /// for `idle`.
-pub async fn pump_idle(ws: &WebSocket, mut events: crate::wsevents::Events, pipe: DuplexStream, idle: Option<Duration>) {
+pub async fn pump_idle(
+    ws: &WebSocket,
+    mut events: crate::wsevents::Events,
+    pipe: DuplexStream,
+    idle: Option<Duration>,
+) {
     let half_close = idle.is_some();
     // A lazy stream has no flow control of its own, so the hub tells the
     // sender how many bytes it has passed on, and the sender keeps at most

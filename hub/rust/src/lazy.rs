@@ -54,7 +54,9 @@ thread_local! {
 
 /// Returns true if `env` asks for the lazy hub.
 pub fn enabled(env: &Env) -> bool {
-    env.var("HUB_MODE").map(|v| v.to_string() == "lazy").unwrap_or(false)
+    env.var("HUB_MODE")
+        .map(|v| v.to_string() == "lazy")
+        .unwrap_or(false)
 }
 
 /// Removes the lazy hub of this instance, so that a new Durable Object does
@@ -113,7 +115,9 @@ impl Lazy {
     pub fn install(state: State, env: &Env) -> Result<Rc<Self>> {
         let key = secret_bytes(env, "AUTH_CALLOUT_PUBKEY")?;
         if key.len() != 32 {
-            return Err(Error::RustError("AUTH_CALLOUT_PUBKEY is not 32 bytes".into()));
+            return Err(Error::RustError(
+                "AUTH_CALLOUT_PUBKEY is not 32 bytes".into(),
+            ));
         }
         let host = env.var("CALLOUT_HOST")?.to_string();
         let pair = WebSocketRequestResponsePair::new("ping", "pong")?;
@@ -125,10 +129,7 @@ impl Lazy {
             dials: RefCell::new(HashMap::new()),
         });
         LAZY.with(|l| *l.borrow_mut() = Some(lazy.clone()));
-        console_log!(
-            "lazy: woke, {} sockets",
-            lazy.state.get_websockets().len()
-        );
+        console_log!("lazy: woke, {} sockets", lazy.state.get_websockets().len());
         Ok(lazy)
     }
 
@@ -225,7 +226,10 @@ impl Lazy {
         let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
         let kind = dial.kind;
         if dial.tx.send(hub_side).is_err() {
-            console_log!("lazy: {} stream arrived after its dial gave up", kind.as_str());
+            console_log!(
+                "lazy: {} stream arrived after its dial gave up",
+                kind.as_str()
+            );
             let _ = ws.close(Some(1000), Some("dial gone"));
         } else {
             wasm_bindgen_futures::spawn_local(async move {
@@ -239,7 +243,9 @@ impl Lazy {
     /// for it.
     pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, String> {
         let started = Date::now().as_millis();
-        let control = self.control().ok_or_else(|| "auth is not connected".to_string())?;
+        let control = self
+            .control()
+            .ok_or_else(|| "auth is not connected".to_string())?;
         if self.dials.borrow().len() >= MAX_PENDING_DIALS {
             return Err(format!("{MAX_PENDING_DIALS} dials waiting"));
         }
@@ -247,7 +253,9 @@ impl Lazy {
         getrandom::getrandom(&mut raw).map_err(|e| format!("stream id: {e}"))?;
         let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let (tx, rx) = oneshot::channel();
-        self.dials.borrow_mut().insert(id.clone(), PendingDial { kind, tx });
+        self.dials
+            .borrow_mut()
+            .insert(id.clone(), PendingDial { kind, tx });
         // Removes the id however the dial ends, also when its future is
         // dropped, so that the id does not count toward the cap.
         let _guard = DialGuard {
@@ -260,7 +268,10 @@ impl Lazy {
         let res = match select(rx, pin!(crate::sockets::sleep(DIAL_DEADLINE))).await {
             Either::Left((Ok(stream), _)) => Ok(stream),
             Either::Left((Err(_), _)) => Err("dial cancelled".to_string()),
-            Either::Right(_) => Err(format!("no {} stream within {DIAL_DEADLINE:?}", kind.as_str())),
+            Either::Right(_) => Err(format!(
+                "no {} stream within {DIAL_DEADLINE:?}",
+                kind.as_str()
+            )),
         };
         console_log!(
             "lazy: cold {} dial {} in {} ms",
@@ -279,7 +290,8 @@ impl Lazy {
     /// Returns the open verified control socket that the hub accepted last.
     fn control(&self) -> Option<WebSocket> {
         newest_open(self.controls().into_iter().map(|(a, ws)| {
-            let open = AsRef::<web_sys::WebSocket>::as_ref(&ws).ready_state() == web_sys::WebSocket::OPEN;
+            let open =
+                AsRef::<web_sys::WebSocket>::as_ref(&ws).ready_state() == web_sys::WebSocket::OPEN;
             (a.accepted_ms, a.verified && open, ws)
         }))
     }
@@ -342,7 +354,10 @@ mod tests {
 
     #[test]
     fn newest_open_picks_the_newest_usable() {
-        assert_eq!(newest_open([(1, true, "a"), (3, false, "b"), (2, true, "c")]), Some("c"));
+        assert_eq!(
+            newest_open([(1, true, "a"), (3, false, "b"), (2, true, "c")]),
+            Some("c")
+        );
         assert_eq!(newest_open([(1, false, "a")]), None);
         assert_eq!(newest_open(Vec::<(u64, bool, &str)>::new()), None);
     }
@@ -363,7 +378,13 @@ mod tests {
     fn dial_guard_removes_the_id() {
         let dials = RefCell::new(HashMap::new());
         let (tx, _rx) = oneshot::channel();
-        dials.borrow_mut().insert("x".to_string(), PendingDial { kind: Kind::App, tx });
+        dials.borrow_mut().insert(
+            "x".to_string(),
+            PendingDial {
+                kind: Kind::App,
+                tx,
+            },
+        );
         drop(DialGuard {
             dials: &dials,
             id: "x".to_string(),
