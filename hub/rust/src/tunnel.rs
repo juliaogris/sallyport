@@ -75,10 +75,12 @@ pub struct Hub {
     app_tunnel: TunnelSlot,
     auth_pipe: authpipe::Pool,
     hub_auth: crate::authrpc::HubAuth,
+    /// The privilege tokens that have added a passkey.
+    used_tokens: crate::passkeys::UsedTokens,
 }
 
 impl DurableObject for Hub {
-    fn new(_state: State, env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         // After a trap, the WebSockets and timers of the previous Wasm
         // instance are still live. The peers redial once their WebSockets
         // close.
@@ -96,6 +98,7 @@ impl DurableObject for Hub {
             app_tunnel: Default::default(),
             auth_pipe: Default::default(),
             hub_auth: Default::default(),
+            used_tokens: crate::passkeys::UsedTokens::new(state.storage().sql()),
         };
         wasm_bindgen_futures::spawn_local(heartbeat(
             hub.connections.clone(),
@@ -122,6 +125,7 @@ impl DurableObject for Hub {
                 pool: &self.auth_pipe,
                 auth: &self.hub_auth,
                 tunnel: &self.app_tunnel,
+                used_tokens: &self.used_tokens,
             };
             match kind {
                 web::Host::App(app) => return web::app_host_request(req, &cx, &app).await,

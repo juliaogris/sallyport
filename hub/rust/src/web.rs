@@ -135,6 +135,7 @@ pub struct Ctx<'a> {
     pub pool: &'a Pool,
     pub auth: &'a HubAuth,
     pub tunnel: &'a TunnelSlot,
+    pub used_tokens: &'a crate::passkeys::UsedTokens,
 }
 
 /// The kind of host a request is for.
@@ -236,6 +237,11 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
             let action = &p["/webapi/passkeys".len()..];
             let action = action.strip_prefix('/').unwrap_or(action);
             crate::passkeys::api(&req, cx, action, body).await
+        }
+        (Method::Get, "/web/add-passkey") => Response::from_html(crate::passkeys::ADD_PASSKEY_PAGE),
+        (Method::Post, "/webapi/add-passkey/begin") => crate::passkeys::add_begin(cx, &body).await,
+        (Method::Post, "/webapi/add-passkey/finish") => {
+            crate::passkeys::add_finish(cx, &body).await
         }
         _ => Response::error("not found", 404),
     }

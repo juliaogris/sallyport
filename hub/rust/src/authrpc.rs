@@ -36,6 +36,7 @@ pub const CHANGE_USER_AUTHENTICATION: &str = "/proto.AuthService/ChangeUserAuthe
 pub const GET_MFA_DEVICES: &str = "/proto.AuthService/GetMFADevices";
 pub const ADD_MFA_DEVICE_SYNC: &str = "/proto.AuthService/AddMFADeviceSync";
 pub const DELETE_MFA_DEVICE_SYNC: &str = "/proto.AuthService/DeleteMFADeviceSync";
+pub const CREATE_PRIVILEGE_TOKEN: &str = "/proto.AuthService/CreatePrivilegeToken";
 /// The legacy HTTP route for `AuthenticateWebUser`. A passwordless login has
 /// an empty user, so the path has an empty segment, as the Go proxy sends it.
 pub const AUTHENTICATE_WEB_USER_PASSWORDLESS: &str = "/v2/users//web/authenticate";
@@ -149,6 +150,8 @@ pub struct WebSessionV2 {
 pub struct Metadata {
     #[prost(string, tag = "1")]
     pub name: String,
+    #[prost(message, optional, tag = "6")]
+    pub expires: Option<Timestamp>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -394,6 +397,19 @@ pub struct DeleteMfaDeviceSyncRequest {
     pub device_name: String,
     #[prost(message, optional, tag = "3")]
     pub existing_mfa_response: Option<MfaAuthenticateResponse>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CreatePrivilegeTokenRequest {
+    #[prost(message, optional, tag = "1")]
+    pub existing_mfa_response: Option<MfaAuthenticateResponse>,
+}
+
+/// The parts of a `types.UserTokenV3` the hub reads.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct UserToken {
+    #[prost(message, optional, tag = "4")]
+    pub metadata: Option<Metadata>,
 }
 
 /// Builds a TLS client config toward auth with ALPN `h2`, with the client

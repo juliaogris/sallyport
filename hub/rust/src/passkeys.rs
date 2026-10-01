@@ -16,17 +16,45 @@
 //! - `POST /webapi/passkeys/delete` takes `{"name": ..., "assertion": ...}`,
 //!   a fresh answer to a challenge, and removes the passkey. The last
 //!   passkey is not removed: 409 "cannot remove the last passkey".
+//! - `POST /webapi/passkeys/link` takes a fresh answer to a challenge and
+//!   returns `{"expires": ..., "url": ...}`: a link for another device with
+//!   a privilege token, and when the token expires in RFC 3339.
 //!
 //! The JSON routes answer 401 "not logged in" without a valid session, 503
 //! "auth unavailable" when auth could not be asked for the session, and
 //! `{"ok": true}` when a finish or delete worked. Errors from auth are
 //! mapped by [`auth_error`].
+//!
+//! The other device opens the link, with no session. The token is in the
+//! URL fragment, so it reaches neither a request log nor a `Referer`, and
+//! the page takes it out of the address bar and sends it in the body of
+//! each `POST`:
+//!
+//! - `GET /web/add-passkey` is the page.
+//! - `POST /webapi/add-passkey/begin` takes `{"token": ...}` and returns
+//!   WebAuthn creation options for the token's user.
+//! - `POST /webapi/add-passkey/finish` takes `{"token": ..., "name": ...,
+//!   "credential": ...}` and adds the passkey.
+//!
+//! A token that does not have auth's form is refused before auth is asked:
+//! 403 "invalid token", which is also auth's answer for a token it does not
+//! know or that has expired.
+//!
+//! A token adds one passkey. Auth keeps a privilege token until it expires,
+//! so the hub records the ID of a token whose finish added a passkey, in
+//! Durable Object SQLite, and answers 403 "invalid token" for it on begin
+//! and finish from then on. A finish that auth refused does not use the
+//! token up.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::Engine as _;
+use futures::lock::{Mutex, OwnedMutexGuard};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -35,10 +63,11 @@ use worker::*;
 use crate::authrpc::{
     call_as, AddMfaDeviceSyncRequest, AttestationResponse, AuthenticatorAssertionResponse,
     CallError, ChallengeExtensions, ContextUser, CreateAuthenticateChallengeRequest,
-    CreateRegisterChallengeRequest, CredentialAssertionResponse, CredentialCreationResponse,
-    DeleteMfaDeviceSyncRequest, GetMfaDevicesRequest, GetMfaDevicesResponse, Ignored,
-    MfaAuthenticateChallenge, MfaAuthenticateResponse, MfaRegisterChallenge, MfaRegisterResponse,
-    ADD_MFA_DEVICE_SYNC, CREATE_AUTHENTICATE_CHALLENGE, CREATE_REGISTER_CHALLENGE,
+    CreatePrivilegeTokenRequest, CreateRegisterChallengeRequest, CredentialAssertionResponse,
+    CredentialCreationResponse, DeleteMfaDeviceSyncRequest, GetMfaDevicesRequest,
+    GetMfaDevicesResponse, Ignored, MfaAuthenticateChallenge, MfaAuthenticateResponse,
+    MfaRegisterChallenge, MfaRegisterResponse, UserToken, ADD_MFA_DEVICE_SYNC,
+    CREATE_AUTHENTICATE_CHALLENGE, CREATE_PRIVILEGE_TOKEN, CREATE_REGISTER_CHALLENGE,
     DELETE_MFA_DEVICE_SYNC, DEVICE_TYPE_WEBAUTHN, DEVICE_USAGE_PASSWORDLESS, GET_MFA_DEVICES,
     SCOPE_MANAGE_DEVICES,
 };
@@ -46,6 +75,10 @@ use crate::web::{self, Ctx};
 
 /// gRPC status `NOT_FOUND`.
 const GRPC_NOT_FOUND: &str = "5";
+
+/// How long auth keeps a privilege token, Teleport's
+/// `defaults.PrivilegeTokenTTL`, in ms.
+const PRIVILEGE_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
 
 /// Answers `GET /web/passkeys`: the page, or a redirect to log in.
 pub async fn show(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
@@ -63,6 +96,7 @@ enum Action {
     Begin,
     Finish,
     Delete,
+    Link,
 }
 
 /// Returns the route for `method` and `action`, the path after
@@ -74,6 +108,7 @@ fn route(method: &Method, action: &str) -> Option<Action> {
         (Method::Post, "begin") => Some(Action::Begin),
         (Method::Post, "finish") => Some(Action::Finish),
         (Method::Post, "delete") => Some(Action::Delete),
+        (Method::Post, "link") => Some(Action::Link),
         _ => None,
     }
 }
@@ -103,6 +138,7 @@ pub async fn api(req: &Request, cx: &Ctx<'_>, action: &str, body: Vec<u8>) -> Re
         Action::Begin => user.begin(&body).await,
         Action::Finish => user.finish(&body).await,
         Action::Delete => user.delete(&body).await,
+        Action::Link => user.link(&body).await,
     }
 }
 
@@ -211,6 +247,240 @@ impl User<'_> {
         match self.call::<_, Ignored>(DELETE_MFA_DEVICE_SYNC, &req).await {
             Ok(_) => ok(),
             Err(err) => auth_error(&err),
+        }
+    }
+
+    /// Makes a link for another device after a fresh challenge answer. The
+    /// privilege token in the link adds one passkey. It expires after
+    /// [`PRIVILEGE_TOKEN_TTL_MS`], and a new link replaces it.
+    async fn link(&self, body: &[u8]) -> Result<Response> {
+        let Some(existing) = decode::<AssertionJson>(body).and_then(|a| a.proto()) else {
+            return passkey_error("bad request", 400);
+        };
+        let req = CreatePrivilegeTokenRequest {
+            existing_mfa_response: Some(existing),
+        };
+        let token = match self
+            .call::<_, UserToken>(CREATE_PRIVILEGE_TOKEN, &req)
+            .await
+        {
+            Ok(UserToken {
+                metadata: Some(meta),
+            }) if !meta.name.is_empty() => meta,
+            Ok(_) => return auth_error(&"no privilege token".into()),
+            Err(err) => return auth_error(&err),
+        };
+        let expires = token.expires.as_ref().map_or(0, |t| t.seconds);
+        Response::from_json(&Link {
+            expires: rfc3339(expires),
+            url: format!(
+                "https://{}/web/add-passkey#{}",
+                web::login_host(self.cx.env)?,
+                token.name
+            ),
+        })
+    }
+}
+
+/// The answer of the link route. The keys are in the Go hub's order,
+/// which sorts them.
+#[derive(Serialize)]
+struct Link {
+    expires: String,
+    url: String,
+}
+
+/// The body of the add-passkey routes. A begin has only the token.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct AddPasskeyJson {
+    #[serde(deserialize_with = "nullable")]
+    token: String,
+    #[serde(deserialize_with = "nullable")]
+    name: String,
+    #[serde(deserialize_with = "object")]
+    credential: CredentialJson,
+}
+
+/// Returns the add-passkey request in `body`, or the answer that refuses
+/// it: 400 for a body that is not JSON of the right form, and 403 for a
+/// token that does not have auth's form.
+fn parse_add(body: &[u8]) -> std::result::Result<AddPasskeyJson, (&'static str, u16)> {
+    let add = decode::<AddPasskeyJson>(body).ok_or(("bad request", 400))?;
+    if !valid_token_id(&add.token) {
+        return Err(("invalid token", 403));
+    }
+    Ok(add)
+}
+
+/// Returns true when `id` has the form of a user token ID from auth: 32
+/// lower case hex characters.
+fn valid_token_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Answers `POST /webapi/add-passkey/begin`: WebAuthn creation options for
+/// the user of the token in `body`.
+pub async fn add_begin(cx: &Ctx<'_>, body: &[u8]) -> Result<Response> {
+    let add = match parse_add(body) {
+        Ok(add) => add,
+        Err((msg, status)) => return passkey_error(msg, status),
+    };
+    if cx.used_tokens.used(&add.token)? {
+        return passkey_error("invalid token", 403);
+    }
+    let res = cx
+        .auth
+        .call::<_, MfaRegisterChallenge>(
+            cx.env,
+            cx.pool,
+            CREATE_REGISTER_CHALLENGE,
+            &CreateRegisterChallengeRequest {
+                token_id: add.token,
+                device_type: DEVICE_TYPE_WEBAUTHN,
+                device_usage: DEVICE_USAGE_PASSWORDLESS,
+                existing_mfa_response: None,
+            },
+        )
+        .await
+        .and_then(web::creation_options);
+    json_or_auth_error(res)
+}
+
+/// Answers `POST /webapi/add-passkey/finish`: adds the credential in
+/// `body` as a passkey of the user of the token in `body`, and uses the
+/// token up. It sets no session cookie.
+pub async fn add_finish(cx: &Ctx<'_>, body: &[u8]) -> Result<Response> {
+    let add = match parse_add(body) {
+        Ok(add) => add,
+        Err((msg, status)) => return passkey_error(msg, status),
+    };
+    let Some(cred) = add.credential.proto() else {
+        return passkey_error("bad request", 400);
+    };
+    // Two finishes with one token must not both add a passkey, so the
+    // check, the call and the record run under the token's lock.
+    let _lock = cx.used_tokens.locks.lock(&add.token).await;
+    if cx.used_tokens.used(&add.token)? {
+        return passkey_error("invalid token", 403);
+    }
+    let req = AddMfaDeviceSyncRequest {
+        token_id: add.token.clone(),
+        new_device_name: add.name,
+        new_mfa_response: Some(MfaRegisterResponse {
+            webauthn: Some(cred),
+        }),
+        device_usage: DEVICE_USAGE_PASSWORDLESS,
+        context_user: None,
+    };
+    let res: std::result::Result<Ignored, _> = cx
+        .auth
+        .call(cx.env, cx.pool, ADD_MFA_DEVICE_SYNC, &req)
+        .await;
+    if let Err(err) = res {
+        return auth_error(&err);
+    }
+    cx.used_tokens
+        .record(&add.token, Date::now().as_millis() as i64)?;
+    ok()
+}
+
+/// The privilege tokens that have added a passkey, in the Durable Object's
+/// SQLite table `used_tokens`. Storage outlives a deploy, which restarts
+/// the hub.
+pub struct UsedTokens {
+    sql: SqlStorage,
+    locks: TokenLocks,
+}
+
+impl UsedTokens {
+    pub fn new(sql: SqlStorage) -> Self {
+        let created = sql.exec(
+            "CREATE TABLE IF NOT EXISTS used_tokens (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)",
+            None::<Vec<SqlStorageValue>>,
+        );
+        if let Err(err) = created {
+            console_error!("passkeys: create used_tokens: {err}");
+        }
+        Self {
+            sql,
+            locks: TokenLocks::default(),
+        }
+    }
+
+    /// Returns true when the privilege token `id` has added a passkey.
+    fn used(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .sql
+            .exec("SELECT 1 FROM used_tokens WHERE id = ?", vec![id.into()])?;
+        Ok(rows.raw().next().transpose()?.is_some())
+    }
+
+    /// Records that the privilege token `id` added a passkey at `now_ms`,
+    /// and forgets the tokens whose record expired by then.
+    fn record(&self, id: &str, now_ms: i64) -> Result<()> {
+        self.sql.exec(
+            "DELETE FROM used_tokens WHERE expires <= ?",
+            vec![now_ms.into()],
+        )?;
+        self.sql.exec(
+            "INSERT OR REPLACE INTO used_tokens (id, expires) VALUES (?, ?)",
+            vec![id.into(), used_until(now_ms).into()],
+        )?;
+        Ok(())
+    }
+}
+
+/// Returns until when, in Unix ms, the record of a token used at `now_ms`
+/// is kept. Auth made the token before it was used, so auth has expired
+/// it by then.
+fn used_until(now_ms: i64) -> i64 {
+    now_ms + PRIVILEGE_TOKEN_TTL_MS
+}
+
+/// One lock per privilege token ID. Two finishes with one token run one
+/// after the other, and a finish with another token does not wait.
+#[derive(Default)]
+struct TokenLocks {
+    held: Rc<RefCell<HashMap<String, Arc<Mutex<()>>>>>,
+}
+
+/// The lock of one token ID, released on drop.
+struct TokenGuard {
+    held: Rc<RefCell<HashMap<String, Arc<Mutex<()>>>>>,
+    id: String,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl TokenLocks {
+    async fn lock(&self, id: &str) -> TokenGuard {
+        let mutex = {
+            let mut held = self.held.borrow_mut();
+            // An entry that only the map holds is left by a finish that
+            // was dropped while it waited.
+            held.retain(|_, m| Arc::strong_count(m) > 1);
+            held.entry(id.to_string()).or_default().clone()
+        };
+        let guard = mutex.lock_owned().await;
+        TokenGuard {
+            held: self.held.clone(),
+            id: id.to_string(),
+            guard: Some(guard),
+        }
+    }
+}
+
+impl Drop for TokenGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut held = self.held.borrow_mut();
+        // The map holds one reference, and a finish that waits for this
+        // lock holds another and still needs the entry.
+        if held
+            .get(&self.id)
+            .is_some_and(|m| Arc::strong_count(m) == 1)
+        {
+            held.remove(&self.id);
         }
     }
 }
@@ -638,6 +908,41 @@ nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 load().catch(e => { out.textContent = 'error: ' + e; });
 </script>"##;
 
+/// The page for the other device. It is the Go hub's page, byte for byte.
+pub const ADD_PASSKEY_PAGE: &str = r##"<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport add passkey</title>
+<p>Add a passkey for this device, then log in with it.</p>
+<p><input id="name" maxlength="30" size="24"> <button id="go">Add a passkey</button></p><pre id="out"></pre><script>
+const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const out = document.getElementById('out'), nameInput = document.getElementById('name');
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  return r.json();
+}
+const token = location.hash.slice(1);
+history.replaceState(null, '', location.pathname);
+document.getElementById('go').onclick = async () => {
+  try {
+    out.textContent = '';
+    const c = await post('/webapi/add-passkey/begin', { token });
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: dec(c.challenge), rp: c.rp,
+      user: { id: dec(c.user.id), name: c.user.name, displayName: c.user.displayName },
+      pubKeyCredParams: c.pubKeyCredParams, timeout: c.timeout || undefined,
+      excludeCredentials: c.excludeCredentials.map(a => ({ type: a.type, id: dec(a.id) })),
+      attestation: c.attestation || 'none', authenticatorSelection: c.authenticatorSelection,
+    } });
+    await post('/webapi/add-passkey/finish', { token, name: nameInput.value, credential: {
+      type: cred.type, rawId: enc(cred.rawId),
+      response: { clientDataJSON: enc(cred.response.clientDataJSON), attestationObject: enc(cred.response.attestationObject) },
+    } });
+    location.href = '/web/login';
+  } catch (e) { out.textContent = 'error: ' + e; }
+};
+nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
+</script>"##;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +987,8 @@ mod tests {
             (Method::Post, "begin", Some(Action::Begin)),
             (Method::Post, "finish", Some(Action::Finish)),
             (Method::Post, "delete", Some(Action::Delete)),
+            (Method::Post, "link", Some(Action::Link)),
+            (Method::Get, "link", None),
             (Method::Post, "", None),
             (Method::Get, "challenge", None),
             (Method::Head, "", None),
@@ -708,7 +1015,10 @@ mod tests {
     #[test]
     fn passkeys_of_keeps_webauthn_devices() {
         let device = |name: &str, secs: i64, webauthn: bool| MfaDevice {
-            metadata: Some(Metadata { name: name.into() }),
+            metadata: Some(Metadata {
+                name: name.into(),
+                expires: None,
+            }),
             added_at: Some(Timestamp {
                 seconds: secs,
                 nanos: 0,
@@ -804,5 +1114,87 @@ mod tests {
         assert!(decode::<FinishJson>(br#"{"credential":{"rawId":"!"}}"#)
             .and_then(|f| f.credential.proto())
             .is_none());
+    }
+
+    #[test]
+    fn valid_token_id_cases() {
+        let ok = "0123456789abcdef0123456789abcdef";
+        assert!(valid_token_id(ok));
+        for id in [
+            "",
+            "tok-bob",
+            &"a".repeat(31),
+            &"a".repeat(33),
+            &"A".repeat(32),
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcd\u{e9}",
+        ] {
+            assert!(!valid_token_id(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn parse_add_cases() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let add = parse_add(format!(r#"{{"token":"{token}"}}"#).as_bytes()).unwrap();
+        assert_eq!((add.token.as_str(), add.name.as_str()), (token, ""));
+        assert!(add.credential.proto().is_some());
+        for (body, want) in [
+            ("not json", ("bad request", 400)),
+            ("[]", ("bad request", 400)),
+            (r#"{"token":1}"#, ("bad request", 400)),
+            ("{}", ("invalid token", 403)),
+            ("null", ("invalid token", 403)),
+            (r#"{"token":"tok-bob"}"#, ("invalid token", 403)),
+        ] {
+            assert_eq!(parse_add(body.as_bytes()).err(), Some(want), "{body}");
+        }
+    }
+
+    #[test]
+    fn used_until_is_five_minutes_on() {
+        assert_eq!(used_until(1_000), 301_000);
+    }
+
+    #[test]
+    fn link_keys_are_in_go_order() {
+        let link = Link {
+            expires: "2026-09-01T12:05:00Z".into(),
+            url: "https://julia.example.com/web/add-passkey#t".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&link).unwrap(),
+            r#"{"expires":"2026-09-01T12:05:00Z","url":"https://julia.example.com/web/add-passkey#t"}"#
+        );
+    }
+
+    #[test]
+    fn token_locks_serialise_one_token() {
+        use futures::executor::block_on;
+        use futures::FutureExt as _;
+        let locks = TokenLocks::default();
+        let first = block_on(locks.lock("a"));
+        let mut second = Box::pin(locks.lock("a"));
+        assert!((&mut second).now_or_never().is_none());
+        let other = block_on(locks.lock("b"));
+        drop(other);
+        drop(first);
+        let second = second.now_or_never().expect("the second lock waits");
+        assert_eq!(locks.held.borrow().len(), 1);
+        drop(second);
+        assert!(locks.held.borrow().is_empty());
+    }
+
+    #[test]
+    fn token_locks_forget_a_dropped_waiter() {
+        use futures::executor::block_on;
+        use futures::FutureExt as _;
+        let locks = TokenLocks::default();
+        let first = block_on(locks.lock("a"));
+        let mut waiter = Box::pin(locks.lock("a"));
+        assert!((&mut waiter).now_or_never().is_none());
+        drop(waiter);
+        drop(first);
+        assert!(locks.held.borrow().is_empty());
     }
 }
