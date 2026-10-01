@@ -33,19 +33,28 @@ pub const CREATE_AUTHENTICATE_CHALLENGE: &str = "/proto.AuthService/CreateAuthen
 pub const GET_WEB_SESSION: &str = "/proto.AuthService/GetWebSession";
 pub const CREATE_REGISTER_CHALLENGE: &str = "/proto.AuthService/CreateRegisterChallenge";
 pub const CHANGE_USER_AUTHENTICATION: &str = "/proto.AuthService/ChangeUserAuthentication";
+pub const GET_MFA_DEVICES: &str = "/proto.AuthService/GetMFADevices";
+pub const ADD_MFA_DEVICE_SYNC: &str = "/proto.AuthService/AddMFADeviceSync";
+pub const DELETE_MFA_DEVICE_SYNC: &str = "/proto.AuthService/DeleteMFADeviceSync";
 /// The legacy HTTP route for `AuthenticateWebUser`. A passwordless login has
 /// an empty user, so the path has an empty segment, as the Go proxy sends it.
 pub const AUTHENTICATE_WEB_USER_PASSWORDLESS: &str = "/v2/users//web/authenticate";
 
 /// `teleport.mfa.v1.ChallengeScope` value for a passwordless login.
 pub const SCOPE_PASSWORDLESS_LOGIN: i32 = 2;
+/// `teleport.mfa.v1.ChallengeScope` value for adding and removing devices.
+pub const SCOPE_MANAGE_DEVICES: i32 = 4;
 /// `proto.DeviceType` value for WebAuthn.
 pub const DEVICE_TYPE_WEBAUTHN: i32 = 3;
 /// `proto.DeviceUsage` value for a passkey.
 pub const DEVICE_USAGE_PASSWORDLESS: i32 = 2;
 
+/// `proto.CreateAuthenticateChallengeRequest`. It sets either
+/// `context_user` or `passwordless`.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CreateAuthenticateChallengeRequest {
+    #[prost(message, optional, tag = "3")]
+    pub context_user: Option<ContextUser>,
     #[prost(message, optional, tag = "4")]
     pub passwordless: Option<Passwordless>,
     #[prost(message, optional, tag = "6")]
@@ -175,6 +184,8 @@ impl WebSessionSpecV2 {
     }
 }
 
+/// `proto.CreateRegisterChallengeRequest`. It sets either `token_id` or
+/// `existing_mfa_response`.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CreateRegisterChallengeRequest {
     #[prost(string, tag = "1")]
@@ -183,6 +194,8 @@ pub struct CreateRegisterChallengeRequest {
     pub device_type: i32,
     #[prost(int32, tag = "3")]
     pub device_usage: i32,
+    #[prost(message, optional, tag = "4")]
+    pub existing_mfa_response: Option<MfaAuthenticateResponse>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -291,6 +304,96 @@ pub struct AttestationResponse {
 pub struct ChangeUserAuthenticationResponse {
     #[prost(message, optional, tag = "1")]
     pub web_session: Option<WebSessionV2>,
+}
+
+/// `proto.ContextUser`, set to make a call for the user of the client
+/// certificate.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ContextUser {}
+
+/// `proto.MFAAuthenticateResponse` with a WebAuthn answer.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct MfaAuthenticateResponse {
+    #[prost(message, optional, tag = "3")]
+    pub webauthn: Option<CredentialAssertionResponse>,
+}
+
+/// `webauthn.CredentialAssertionResponse`, the browser's answer to an
+/// authenticate challenge.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CredentialAssertionResponse {
+    #[prost(string, tag = "1")]
+    pub r#type: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub raw_id: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub response: Option<AuthenticatorAssertionResponse>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AuthenticatorAssertionResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_data_json: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub authenticator_data: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signature: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub user_handle: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct GetMfaDevicesRequest {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct GetMfaDevicesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub devices: Vec<MfaDevice>,
+}
+
+/// The parts of a `types.MFADevice` the hub reads.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct MfaDevice {
+    #[prost(message, optional, tag = "4")]
+    pub metadata: Option<Metadata>,
+    #[prost(message, optional, tag = "6")]
+    pub added_at: Option<Timestamp>,
+    /// Set only for a WebAuthn device. The hub reads only whether it is
+    /// there.
+    #[prost(message, optional, tag = "10")]
+    pub webauthn: Option<WebauthnDevice>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct WebauthnDevice {}
+
+/// `proto.AddMFADeviceSyncRequest`. A call with a privilege token sets
+/// `token_id` and no `context_user`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct AddMfaDeviceSyncRequest {
+    #[prost(string, tag = "1")]
+    pub token_id: String,
+    #[prost(string, tag = "2")]
+    pub new_device_name: String,
+    #[prost(message, optional, tag = "3")]
+    pub new_mfa_response: Option<MfaRegisterResponse>,
+    #[prost(int32, tag = "4")]
+    pub device_usage: i32,
+    #[prost(message, optional, tag = "5")]
+    pub context_user: Option<ContextUser>,
+}
+
+/// The response of `AddMFADeviceSync` and `DeleteMFADeviceSync`, which the
+/// hub does not read.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Ignored {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct DeleteMfaDeviceSyncRequest {
+    #[prost(string, tag = "2")]
+    pub device_name: String,
+    #[prost(message, optional, tag = "3")]
+    pub existing_mfa_response: Option<MfaAuthenticateResponse>,
 }
 
 /// Builds a TLS client config toward auth with ALPN `h2`, with the client
@@ -423,7 +526,16 @@ const GRPC_RESOURCE_EXHAUSTED: &str = "8";
 impl CallError {
     /// Returns true when auth refused the call because of its rate limit.
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, CallError::Status { code, .. } if code == GRPC_RESOURCE_EXHAUSTED)
+        self.grpc_code() == Some(GRPC_RESOURCE_EXHAUSTED)
+    }
+
+    /// Returns the gRPC status code auth answered with, or None when the
+    /// call failed in another way.
+    pub fn grpc_code(&self) -> Option<&str> {
+        match self {
+            CallError::Status { code, .. } => Some(code),
+            CallError::Other(_) => None,
+        }
     }
 }
 
@@ -633,6 +745,18 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Makes one unary call on a new connection with a user's TLS identity in
+/// `tls`, from [`tls_config_from_pem`]. The call is not retried.
+pub async fn call_as<Req: prost::Message, Resp: prost::Message + Default>(
+    pool: &crate::authpipe::Pool,
+    tls: Arc<rustls::ClientConfig>,
+    path: &str,
+    req: &Req,
+) -> std::result::Result<Resp, CallError> {
+    let send = connect(pool.take_wait().await?, tls).await?;
+    unary(&send, path, req).await
+}
+
 /// One HTTP/2 connection to auth with the hub TLS identity, reused across
 /// calls. A call that fails at the transport opens a new connection from
 /// the pool and is retried once. A gRPC error status is not retried. When
@@ -721,6 +845,8 @@ mod tests {
         assert!(status("8").is_rate_limited());
         assert!(!status("14").is_rate_limited());
         assert!(!CallError::Other("grpc-status \"8\"".into()).is_rate_limited());
+        assert_eq!(status("5").grpc_code(), Some("5"));
+        assert_eq!(CallError::Other("x".into()).grpc_code(), None);
         assert_eq!(
             status("8").to_string(),
             "/p: http 200, grpc-status \"8\": m"

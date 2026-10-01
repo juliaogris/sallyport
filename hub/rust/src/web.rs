@@ -179,7 +179,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-fn login_host(env: &Env) -> Result<String> {
+pub(crate) fn login_host(env: &Env) -> Result<String> {
     let (owner, domain) = owner_domain(env)?;
     Ok(format!("{owner}.{domain}"))
 }
@@ -230,6 +230,12 @@ pub async fn login_host_request(mut req: Request, cx: &Ctx<'_>) -> Result<Respon
             res.headers_mut()
                 .append("Set-Cookie", &expire_cookie(SESSION_COOKIE))?;
             Ok(res)
+        }
+        (Method::Get, "/web/passkeys") => crate::passkeys::show(&req, cx).await,
+        (_, p) if p == "/webapi/passkeys" || p.starts_with("/webapi/passkeys/") => {
+            let action = &p["/webapi/passkeys".len()..];
+            let action = action.strip_prefix('/').unwrap_or(action);
+            crate::passkeys::api(&req, cx, action, body).await
         }
         _ => Response::error("not found", 404),
     }
@@ -445,11 +451,21 @@ fn name_public_addr(name: &Name) -> Option<&str> {
 /// Returns the logged-in user and the web session, if the session cookie
 /// is for a web session that auth has and that has not expired.
 async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, WebSessionSpecV2)>> {
+    Ok(find_web_session(req, cx).await?.unwrap_or_default())
+}
+
+/// Returns what [`web_session`] does, or the error of the call to auth when
+/// there is no session because of one. A session that auth does not have
+/// is also an error, auth's NotFound.
+pub(crate) async fn find_web_session(
+    req: &Request,
+    cx: &Ctx<'_>,
+) -> Result<std::result::Result<Option<(String, WebSessionSpecV2)>, CallError>> {
     let Some(value) = cookie(req, SESSION_COOKIE)? else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let Some((user, sid)) = value.split_once(':') else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let got: std::result::Result<SessionResponse, CallError> = cx
         .auth
@@ -464,13 +480,29 @@ async fn web_session(req: &Request, cx: &Ctx<'_>) -> Result<Option<(String, WebS
         )
         .await;
     match got.map(|r| r.session.and_then(|s| s.spec)) {
-        Ok(Some(spec)) if spec.unexpired() => Ok(Some((user.to_string(), spec))),
-        Ok(_) => Ok(None),
+        Ok(Some(spec)) if spec.unexpired() => Ok(Ok(Some((user.to_string(), spec)))),
+        Ok(_) => Ok(Ok(None)),
         Err(err) => {
             console_log!("web: GetWebSession: {err}");
-            Ok(None)
+            Ok(Err(err))
         }
     }
+}
+
+/// Returns the TLS config for calls to auth as the user of the web session
+/// `spec`. Auth sets `tls_priv` only when it issues separate SSH and TLS
+/// keys. Otherwise `priv_key` is both.
+pub(crate) fn session_tls(env: &Env, spec: &WebSessionSpecV2) -> Result<Arc<rustls::ClientConfig>> {
+    let key = if spec.tls_priv.is_empty() {
+        &spec.priv_key
+    } else {
+        &spec.tls_priv
+    };
+    Ok(Arc::new(authrpc::tls_config_from_pem(
+        env,
+        &spec.tls_cert,
+        key,
+    )?))
 }
 
 async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
@@ -486,7 +518,7 @@ async fn dashboard(req: &Request, cx: &Ctx<'_>) -> Result<Response> {
     let user = html_escape(&user);
     Response::from_html(format!(
         r#"{HEAD}<title>sallyport</title>
-<p>Logged in as {user}.</p>{buttons}<form method="post" action="/web/logout"><button>Log out</button></form>"#
+<p>Logged in as {user}.</p>{buttons}<p><a href="/web/passkeys">Passkeys</a></p><form method="post" action="/web/logout"><button>Log out</button></form>"#
     ))
 }
 
@@ -572,14 +604,7 @@ async fn create_app_session(
     app: &str,
     public_addr: &str,
 ) -> std::result::Result<(String, String), String> {
-    let key = if spec.tls_priv.is_empty() {
-        &spec.priv_key
-    } else {
-        &spec.tls_priv
-    };
-    let tls = Arc::new(
-        authrpc::tls_config_from_pem(cx.env, &spec.tls_cert, key).map_err(|e| e.to_string())?,
-    );
+    let tls = session_tls(cx.env, spec).map_err(|e| e.to_string())?;
     let as_user = authrpc::connect(cx.pool.take_wait().await?, tls).await?;
     let created: SessionResponse = unary(
         &as_user,
@@ -631,6 +656,7 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
             cx.pool,
             CREATE_AUTHENTICATE_CHALLENGE,
             &CreateAuthenticateChallengeRequest {
+                context_user: None,
                 passwordless: Some(Passwordless {}),
                 challenge_extensions: Some(ChallengeExtensions {
                     scope: SCOPE_PASSWORDLESS_LOGIN,
@@ -638,6 +664,14 @@ async fn login_begin(cx: &Ctx<'_>) -> std::result::Result<Value, CallError> {
             },
         )
         .await?;
+    request_options(chal)
+}
+
+/// Returns the WebAuthn request options in `chal` as the pages read them,
+/// or an error when it has none.
+pub(crate) fn request_options(
+    chal: MfaAuthenticateChallenge,
+) -> std::result::Result<Value, CallError> {
     let o = chal
         .webauthn
         .and_then(|w| w.public_key)
@@ -699,9 +733,18 @@ async fn invite_begin(cx: &Ctx<'_>, token: &str) -> std::result::Result<Value, C
                 token_id: token.to_string(),
                 device_type: DEVICE_TYPE_WEBAUTHN,
                 device_usage: DEVICE_USAGE_PASSWORDLESS,
+                existing_mfa_response: None,
             },
         )
         .await?;
+    creation_options(chal)
+}
+
+/// Returns the WebAuthn creation options in `chal` as the pages read them,
+/// or an error when it has none.
+pub(crate) fn creation_options(
+    chal: MfaRegisterChallenge,
+) -> std::result::Result<Value, CallError> {
     let o = chal
         .webauthn
         .and_then(|w| w.public_key)
@@ -931,7 +974,7 @@ fn expire_cookie(name: &str) -> String {
 
 /// Returns a 303 to `location`. `Response::redirect` has immutable headers,
 /// so it cannot also set cookies.
-fn redirect(location: &str) -> Result<Response> {
+pub(crate) fn redirect(location: &str) -> Result<Response> {
     let mut res = Response::empty()?.with_status(303);
     res.headers_mut().set("Location", location)?;
     Ok(res)
@@ -964,7 +1007,7 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-fn b64(b: &[u8]) -> String {
+pub(crate) fn b64(b: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(b)
 }
 
