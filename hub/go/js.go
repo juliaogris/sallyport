@@ -57,6 +57,12 @@ func main() {
 		}
 		return nil
 	}))
+	api.Set("text", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if c := conns.get(args[0].Int()); c != nil {
+			c.peerAck(args[1].String())
+		}
+		return nil
+	}))
 	api.Set("closed", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if c := conns.get(args[0].Int()); c != nil {
 			c.remoteClosed(args[1].Int())
@@ -72,6 +78,12 @@ func main() {
 	api.Set("cancel", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if s := streams.get(args[0].Int()); s != nil {
 			s.cancel()
+		}
+		return nil
+	}))
+	api.Set("refuse", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if h.lazy != nil {
+			h.lazy.refuse(args[0].String())
 		}
 		return nil
 	}))

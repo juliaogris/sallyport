@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -21,10 +22,12 @@ import (
 // Forwards one browser HTTP request to a Teleport app service.
 //
 // The hub opens teleport-transport into the agent with an @local-node dial
-// request, then runs TLS with the user's app session certificate. The app
-// service picks the app and the session from that certificate. HTTP/1.1
-// runs over the TLS stream, and the response streams back to the browser
-// as it arrives.
+// request, or asks auth's callout for an app stream in the lazy hub, then
+// runs TLS with the user's app session certificate. The app service picks
+// the app and the session from that certificate. HTTP/1.1 runs over the
+// TLS stream, and the response streams back to the browser as it arrives.
+// The requests of one app session share up to appConnsPerSession
+// connections, which close after appConnIdle without a request.
 
 // apiDomain is the SNI suffix the app service expects after the hex
 // cluster name (api/utils/cluster.go, EncodeClusterName).
@@ -34,40 +37,60 @@ const apiDomain = "teleport.cluster.local"
 // The app service never sees them, and the app cannot set them.
 const spCookiePrefix = "__Host-sp_"
 
+const (
+	// appConnsPerSession is the most connections that the requests of one
+	// app session use at once. A request above that waits for one.
+	appConnsPerSession = 8
+	// appConnIdle closes a connection that has had no request for this
+	// long. A lazy stream keeps the Durable Object awake while it is open.
+	appConnIdle = 5 * time.Second
+	// appConnDeadline is how long a request may wait for a connection,
+	// including the dial and the TLS handshake.
+	appConnDeadline = 20 * time.Second
+	// appHandshakeDeadline is how long the TLS handshake with the app
+	// service may take. A lazy stream and a tunnel channel have no
+	// deadlines, so a peer that went away would block the handshake
+	// otherwise.
+	appHandshakeDeadline = 10 * time.Second
+)
+
 // errSwitchingProtocols is the error for a 101 from the app, which has its
 // own 502 body. Every other failure gets the same fixed body.
 var errSwitchingProtocols = errors.New("app answered 101 Switching Protocols")
 
-// appDialer opens a connection to the app service: a channel of the agent
+// dialApp opens a connection to the app service: a channel of the agent
 // tunnel, or a stream from auth's callout in the lazy hub.
-type appDialer func(ctx context.Context) (net.Conn, error)
-
-// tunnelDialer returns the appDialer that dials into the agent over t.
-func tunnelDialer(t *appTunnel) appDialer {
-	return func(context.Context) (net.Conn, error) {
-		ch, err := t.dial()
-		if err != nil {
-			return nil, err
-		}
-		return chanConn{ch}, nil
+func (h *hub) dialApp(ctx context.Context) (net.Conn, error) {
+	if h.lazy != nil {
+		return h.lazy.dial(ctx, "app")
 	}
+	h.appMu.Lock()
+	t := h.appTunnel
+	h.appMu.Unlock()
+	if t == nil {
+		return nil, errors.New("no app tunnel")
+	}
+	ch, err := t.dial()
+	if err != nil {
+		return nil, err
+	}
+	return chanConn{ch}, nil
 }
 
-// appDialer returns the appDialer that asks auth's callout for an app
-// stream.
-func (l *lazyHub) appDialer() appDialer {
-	return func(ctx context.Context) (net.Conn, error) { return l.dial(ctx, "app") }
-}
-
-// forward sends req to the app service at host over a connection from
-// dial, as the user with the given certificate. A dial, TLS or HTTP failure logs the
-// error and returns a 502 "app unavailable". A 101 from the app returns a
-// 502 that says so.
-func (h *hub) forward(dial appDialer, cert tls.Certificate, host string, req *request) *response {
-	res, err := h.forwardInner(dial, cert, host, req)
+// forward sends req to the app service at host, as the user of the app
+// session sid with the given certificate. A dial, TLS or HTTP failure logs
+// the error and returns a 502 "app unavailable". A dial that auth's
+// callout refused returns a 503 "app service busy". A 101 from the app
+// returns a 502 that says so.
+func (h *hub) forward(sid string, cert tls.Certificate, host string, req *request) *response {
+	res, err := h.forwardInner(sid, cert, host, req)
 	if errors.Is(err, errSwitchingProtocols) {
 		logf("appproxy: %v", err)
 		return textError(err.Error(), 502)
+	}
+	if errors.Is(err, errDialRefused) {
+		logf("appproxy: %v", err)
+		return textError("app service busy", 503)
 	}
 	if err != nil {
 		logf("appproxy: %v", err)
@@ -76,28 +99,55 @@ func (h *hub) forward(dial appDialer, cert tls.Certificate, host string, req *re
 	return res
 }
 
-func (h *hub) forwardInner(dial appDialer, cert tls.Certificate, host string, req *request) (*response, error) {
+func (h *hub) forwardInner(sid string, cert tls.Certificate, host string, req *request) (*response, error) {
 	if err := h.cfg.err("HOST_CA_TLS"); err != nil {
 		return nil, err
 	}
+	tr := h.appTransports.get(sid, time.Now(), func() *http.Transport { return h.appTransport(cert) })
+	up, err := buildRequest(req, host)
+	if err != nil {
+		return nil, err
+	}
+	// The context ends when the response body closes. Until the request
+	// has a connection, it ends after appConnDeadline.
+	ctx, cancel := context.WithCancel(context.Background())
+	connTimer := time.AfterFunc(appConnDeadline, cancel)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connTimer.Stop() },
+	})
+	resp, err := tr.RoundTrip(up.WithContext(ctx))
+	connTimer.Stop()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("app request: %w", err)
+	}
+	// A 101 cannot be forwarded. The hub sends no Upgrade header upstream.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		closeBoth{resp.Body, cancel}.Close()
+		return nil, errSwitchingProtocols
+	}
+	return buildResponse(resp, cancel), nil
+}
+
+// appTransport returns a transport that connects to the app service with
+// cert, for the requests of one app session.
+func (h *hub) appTransport(cert tls.Certificate) *http.Transport {
 	sni := hex.EncodeToString([]byte(h.cfg.cluster)) + "." + apiDomain
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true)
-	tr := &http.Transport{
-		Protocols:          protos,
-		DisableCompression: true,
+	return &http.Transport{
+		Protocols:           protos,
+		DisableCompression:  true,
+		MaxConnsPerHost:     appConnsPerSession,
+		MaxIdleConnsPerHost: appConnsPerSession,
+		IdleConnTimeout:     appConnIdle,
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			conn, err := dial(ctx)
+			conn, err := h.dialApp(ctx)
 			if err != nil {
 				return nil, err
 			}
-			// The handshake on a lazy stream must finish within
-			// lazyDialDeadline. A tunnel channel has no such deadline.
-			if h.lazy != nil {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, lazyDialDeadline)
-				defer cancel()
-			}
+			ctx, cancel := context.WithTimeout(ctx, appHandshakeDeadline)
+			defer cancel()
 			tc := tls.Client(conn, &tls.Config{
 				ServerName:   sni,
 				RootCAs:      h.cfg.hostCATLS,
@@ -110,26 +160,6 @@ func (h *hub) forwardInner(dial appDialer, cert tls.Certificate, host string, re
 			return tc, nil
 		},
 	}
-	cc, err := tr.NewClientConn(context.Background(), "https", host+":443")
-	if err != nil {
-		return nil, err
-	}
-	up, err := buildRequest(req, host)
-	if err != nil {
-		cc.Close()
-		return nil, err
-	}
-	resp, err := cc.RoundTrip(up)
-	if err != nil {
-		cc.Close()
-		return nil, fmt.Errorf("app request: %w", err)
-	}
-	// A 101 cannot be forwarded. The hub sends no Upgrade header upstream.
-	if resp.StatusCode == http.StatusSwitchingProtocols {
-		closeBoth{resp.Body, cc}.Close()
-		return nil, errSwitchingProtocols
-	}
-	return buildResponse(resp, cc), nil
 }
 
 // hopByHop are the header names that describe one hop of the connection,
@@ -188,8 +218,8 @@ func stripSPCookies(value string) string {
 
 // buildResponse turns the app service's response into the hub's, with the
 // hop-by-hop headers dropped and the body streamed as it arrives. The
-// stream closes cc when it ends.
-func buildResponse(resp *http.Response, cc *http.ClientConn) *response {
+// stream calls done when it ends.
+func buildResponse(resp *http.Response, done context.CancelFunc) *response {
 	if resp.StatusCode >= 500 {
 		logf("appproxy: upstream %s %q", resp.Status, resp.Header.Get("Server"))
 	}
@@ -208,7 +238,7 @@ func buildResponse(resp *http.Response, cc *http.ClientConn) *response {
 			res.add(lower, v)
 		}
 	}
-	var body io.ReadCloser = closeBoth{resp.Body, cc}
+	var body io.ReadCloser = closeBoth{resp.Body, done}
 	if resp.ContentLength >= 0 {
 		body = &exactBody{body, resp.ContentLength}
 	}
@@ -249,15 +279,17 @@ func (b *exactBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// closeBoth is a response body that also closes its connection.
+// closeBoth is a response body that also ends its request's context when
+// it closes.
 type closeBoth struct {
 	io.ReadCloser
-	cc *http.ClientConn
+	done context.CancelFunc
 }
 
 func (c closeBoth) Close() error {
-	c.ReadCloser.Close()
-	return c.cc.Close()
+	err := c.ReadCloser.Close()
+	c.done()
+	return err
 }
 
 // chanConn is a net.Conn over an SSH channel, for TLS.

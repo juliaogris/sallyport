@@ -22,7 +22,8 @@ import (
 //     and its bearer token in the URL fragment. The page there posts them
 //     back and the hub sets __Host-sp_app and __Host-sp_subject. Every other
 //     request is checked with GetAppSession and forwarded to the app service
-//     over the tunnel.
+//     over the tunnel. An app session is valid only on the app host of its
+//     certificate's app public address.
 //
 // Every POST must have an Origin equal to its own host.
 const (
@@ -112,7 +113,7 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 			if !req.sameOrigin(host) {
 				return textError("bad origin", 403)
 			}
-			return h.handoff(req.body)
+			return h.handoff(host, req.body)
 		default:
 			return textError("method not allowed", 405)
 		}
@@ -143,16 +144,14 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 		return textError("auth unavailable", 503)
 	}
 	s := sessionOf(resp)
-	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, subject) {
+	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, subject) || !certForHost(s.tlsCert, host) {
 		return h.toLogin()
 	}
-	var dial appDialer
 	if h.lazy != nil {
 		if !h.lazy.connected() {
 			logf("web: %s: app service offline, auth is not connected", app)
 			return textError("app service offline", 503)
 		}
-		dial = h.lazy.appDialer()
 	} else {
 		h.appMu.Lock()
 		t := h.appTunnel
@@ -161,17 +160,17 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 			logf("web: %s: app service offline, no tunnel", app)
 			return textError("app service offline", 503)
 		}
-		dial = tunnelDialer(t)
 	}
 	cert, err := h.userCert(s.tlsCert, s.tlsPriv)
 	if err != nil {
 		return textError(err.Error(), 500)
 	}
-	return h.forward(dial, cert, host, req)
+	return h.forward(sid, cert, host, req)
 }
 
-// handoff checks the handoff from the launcher and sets the app cookies.
-func (h *hub) handoff(body []byte) *response {
+// handoff checks the handoff from the launcher for an app session of host,
+// and sets the app cookies.
+func (h *hub) handoff(host string, body []byte) *response {
 	var in struct {
 		Sid     string `json:"sid"`
 		Subject string `json:"subject"`
@@ -188,7 +187,7 @@ func (h *hub) handoff(body []byte) *response {
 		return textError("auth unavailable", 503)
 	}
 	s := sessionOf(resp)
-	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, in.Subject) {
+	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, in.Subject) || !certForHost(s.tlsCert, host) {
 		return textError("bad handoff", 403)
 	}
 	return (&response{status: 204}).
@@ -298,6 +297,11 @@ func (h *hub) loginFinish(assertion []byte) *response {
 		var a json.RawMessage
 		if err := json.Unmarshal(assertion, &a); err != nil {
 			return "", "", fmt.Errorf("assertion: %w", err)
+		}
+		// Each call to auth takes a stream, so a body that is not an
+		// assertion is refused before one is taken.
+		if err := checkAssertion(a); err != nil {
+			return "", "", err
 		}
 		if err := h.cfg.err("HUB_TLS_CERT", "HUB_TLS_KEY"); err != nil {
 			return "", "", err

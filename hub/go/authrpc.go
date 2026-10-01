@@ -216,12 +216,57 @@ func (h *hub) postJSON(cert tls.Certificate, path string, body []byte) (int, []b
 //
 // The lock is held while a connection opens, so callers that arrive
 // together share one connection instead of each taking a pool stream.
+//
+// In the lazy hub the connection closes after authConnIdle without a call,
+// because its stream keeps the Durable Object awake while it is open.
 type hubAuth struct {
 	h  *hub
 	mu sync.Mutex
 	// gen counts connections opened.
 	gen uint64
 	cc  *http.ClientConn
+	// calls counts the calls in progress, and used is when the last one
+	// ended. idle closes cc in the lazy hub.
+	calls int
+	used  time.Time
+	idle  *time.Timer
+}
+
+// authConnIdle closes the lazy hub's connection to auth after this long
+// without a call.
+const authConnIdle = 5 * time.Second
+
+// begin counts a call in progress, and done counts its end.
+func (a *hubAuth) begin() {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+}
+
+func (a *hubAuth) done() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls--
+	a.used = time.Now()
+	if a.h.lazy == nil {
+		return
+	}
+	if a.idle == nil {
+		a.idle = time.AfterFunc(authConnIdle, a.closeIdle)
+	} else {
+		a.idle.Reset(authConnIdle)
+	}
+}
+
+// closeIdle closes the connection if no call has used it for
+// authConnIdle.
+func (a *hubAuth) closeIdle() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.calls == 0 && a.cc != nil && time.Since(a.used) >= authConnIdle {
+		a.cc.Close()
+		a.cc = nil
+	}
 }
 
 // conn returns the cached connection and its generation if it still
@@ -254,6 +299,8 @@ func (a *hubAuth) conn(broken uint64) (uint64, *http.ClientConn, error) {
 
 // call makes one unary call with the hub identity.
 func (a *hubAuth) call(path string, msg []byte) (fields, error) {
+	a.begin()
+	defer a.done()
 	gen, cc, err := a.conn(0)
 	if err != nil {
 		return nil, err

@@ -84,6 +84,12 @@ type FakeAuth struct {
 	RegisterChallenge []byte
 	// rateLimited makes the challenge calls fail with ResourceExhausted.
 	rateLimited bool
+	// lazyDial is how lazy dials are answered, and dials counts them.
+	lazyDial LazyDial
+	dials    int
+	// duplicates is the upgrade status of each second stream that
+	// LazyDialTwice opened, or 101 when the hub accepted it.
+	duplicates []int
 }
 
 // Devices returns user's MFA devices.

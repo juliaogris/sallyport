@@ -1,6 +1,16 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+)
+
+// errDialRefused is the error of a lazy dial that auth's callout answered
+// with "refuse <id>", for example because it has too many streams open.
+var errDialRefused = errors.New("auth's callout refused the stream")
 
 // dialTable holds the dials of the lazy hub that wait for their stream, by
 // stream id. Each id is used once.
@@ -37,11 +47,35 @@ func (t *dialTable[T]) take(id string) (chan T, bool) {
 }
 
 // cancel removes the dial for id. It returns false when take already
-// removed it, and then the stream arrives on the dial's channel.
+// removed it, and then take's caller sends a value on the dial's channel.
 func (t *dialTable[T]) cancel(id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_, ok := t.m[id]
 	delete(t.m, id)
 	return ok
+}
+
+// wait waits for the stream of the dial for id, which add returned ch for,
+// for up to d or until ctx ends. The error names kind. A stream that
+// arrives as the wait gives up is returned with no error.
+func (t *dialTable[T]) wait(ctx context.Context, id string, ch chan T, d time.Duration, kind string) (T, error) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-timer.C:
+		if !t.cancel(id) {
+			return <-ch, nil
+		}
+		var zero T
+		return zero, fmt.Errorf("no %s stream within %v", kind, d)
+	case <-ctx.Done():
+		if !t.cancel(id) {
+			return <-ch, nil
+		}
+		var zero T
+		return zero, fmt.Errorf("%s dial: %w", kind, ctx.Err())
+	}
 }

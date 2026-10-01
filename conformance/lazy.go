@@ -133,10 +133,93 @@ func (a *FakeAuth) serveControl(ctx context.Context, h *Hub, app *AppServer) err
 	}
 }
 
+// LazyDial is how the fake auth answers a dial on its control socket.
+type LazyDial int
+
+const (
+	// LazyDialServe opens the stream and serves it.
+	LazyDialServe LazyDial = iota
+	// LazyDialIgnore never opens a stream.
+	LazyDialIgnore
+	// LazyDialClose opens the stream and closes it at once.
+	LazyDialClose
+	// LazyDialSilent opens the stream and never sends or reads a byte.
+	LazyDialSilent
+	// LazyDialGarbage opens the stream and sends bytes that are not TLS.
+	LazyDialGarbage
+	// LazyDialTwice opens a second stream with the same id, then serves
+	// the first.
+	LazyDialTwice
+)
+
+// SetLazyDial sets how the fake auth answers the dials that follow.
+func (a *FakeAuth) SetLazyDial(d LazyDial) {
+	a.mu.Lock()
+	a.lazyDial = d
+	a.mu.Unlock()
+}
+
+// Duplicates returns the upgrade status of each second stream with a used
+// id, or 101 where the hub accepted one.
+func (a *FakeAuth) Duplicates() []int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]int(nil), a.duplicates...)
+}
+
+// Dials returns the number of dials the hub has sent on control sockets.
+func (a *FakeAuth) Dials() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dials
+}
+
 func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, kind, id string) {
+	a.mu.Lock()
+	a.dials++
+	mode := a.lazyDial
+	a.mu.Unlock()
+	// The hub's own calls to auth are always served.
+	if kind != "app" {
+		mode = LazyDialServe
+	}
+	if mode == LazyDialIgnore {
+		return
+	}
 	ws, _, err := h.DialLazy(ctx, "stream", http.Header{StreamIDHeader: {id}})
 	if err != nil {
 		return
+	}
+	switch mode {
+	case LazyDialClose:
+		ws.Close()
+		return
+	case LazyDialSilent:
+		// Hold the stream open until the hub closes it.
+		go func() {
+			for {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					ws.Close()
+					return
+				}
+			}
+		}()
+		return
+	case LazyDialGarbage:
+		ws.WriteMessage(websocket.BinaryMessage, []byte("this is not a TLS record\r\n\r\n"))
+		WaitClosed(ws, 30*time.Second)
+		ws.Close()
+		return
+	case LazyDialTwice:
+		ws2, resp, err := h.DialLazy(ctx, "stream", http.Header{StreamIDHeader: {id}})
+		a.mu.Lock()
+		if err == nil {
+			a.duplicates = append(a.duplicates, 101)
+			ws2.Close()
+		} else if resp != nil {
+			a.duplicates = append(a.duplicates, resp.StatusCode)
+		}
+		a.mu.Unlock()
 	}
 	switch kind {
 	case "auth":
@@ -155,6 +238,11 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 		ws.Close()
 	}
 }
+
+// maxUnread is the most bytes from the hub that auth's callout holds on a
+// lazy stream before it closes the stream. Bytes towards the callout have
+// no window.
+const maxUnread = 8 << 20
 
 // lazyWindow is the most bytes a lazy stream sender keeps unacknowledged,
 // as auth's callout does. The hub acks every 256 KiB.

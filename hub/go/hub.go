@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -39,6 +40,8 @@ type hub struct {
 
 	appMu     sync.Mutex
 	appTunnel *appTunnel
+	// appTransports are the connections to the app service, by app session.
+	appTransports appTransports
 
 	// tokenMu serialises the finish of the add-passkey route, so that two
 	// requests with the same privilege token cannot both add a passkey.
@@ -88,6 +91,12 @@ func (h *hub) serve(req *request) (res *response) {
 		return h.lazy.serve(req)
 	}
 	if req.path == authPipePath {
+		// A control socket or a stream is for the lazy hub, from a callout
+		// in on-demand mode.
+		switch q, _ := url.ParseQuery(strings.TrimPrefix(req.query, "?")); q.Get("mode") {
+		case "control", "stream":
+			return textError("not found", 404)
+		}
 		return h.acceptAuthPipe(req)
 	}
 	return h.acceptTunnel(req)

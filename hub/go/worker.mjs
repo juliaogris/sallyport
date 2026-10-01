@@ -1,9 +1,10 @@
 // The Worker entry and the Durable Object glue of the Go hub.
 //
 // The Worker entry is plain JavaScript: it classifies the host, answers
-// /webapi/find and /webapi/ping, and forwards everything else to the one
-// Durable Object. Only the Durable Object runs the Go program, so a
-// stateless Worker isolate never pays for the Go runtime.
+// /webapi/find and /webapi/ping, answers the requests that need no session
+// and the paths that the Go program does not route, and forwards the rest
+// to the one Durable Object. Only the Durable Object runs the Go program,
+// so a stateless Worker isolate never pays for the Go runtime.
 //
 // Go and JavaScript share bytes through Uint8Arrays that live as long as
 // their connection or stream. JavaScript copies each WebSocket message into
@@ -17,16 +18,41 @@ import mod from './build/hub.wasm';
 
 const HUB_INSTANCE = 'hub';
 
-// The most bytes a login host request body may have. A WebAuthn answer or
-// credential is a few KB, and the body is held in JavaScript and in Go.
+// The most bytes a login host request body, or the body of the handoff on
+// an app host, may have. A WebAuthn answer or credential is a few KB, and
+// the body is held in JavaScript and in Go.
 const LOGIN_BODY_LIMIT = 64 * 1024;
+// The most bytes an app request body may have. The body is held in
+// JavaScript and in Go before it goes to the app, and the isolate has 128
+// MB for both and the Go program's linear memory, which never shrinks.
+const APP_BODY_LIMIT = 8 << 20;
+
+// The app host path of the launch handoff, and the hub's app cookies.
+const AUTH_PATH = '/x-teleport-auth';
+const APP_COOKIE = '__Host-sp_app';
+const SUBJECT_COOKIE = '__Host-sp_subject';
+
+// The login host paths the Go program answers, as web.go routes them. Any
+// other path is 404 without waking the Durable Object.
+const LOGIN_PATHS = new Set([
+  '/',
+  '/web/login',
+  '/webapi/login/begin',
+  '/webapi/login/finish',
+  '/web/logout',
+  '/web/passkeys',
+  '/webapi/passkeys',
+  '/web/add-passkey',
+  '/webapi/add-passkey/begin',
+  '/webapi/add-passkey/finish',
+]);
+const LOGIN_PREFIXES = ['/web/invite/', '/webapi/invite/', '/web/launch/', '/webapi/passkeys/'];
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const kind = classify(env, url.hostname);
-    // Every path on an app host is app traffic, so it goes to the hub.
-    if (kind === 'app') return hub(env).fetch(req);
+    if (kind === 'app') return appRequest(req, env, url);
     switch (url.pathname) {
       case '/webapi/find':
       case '/webapi/ping':
@@ -38,12 +64,72 @@ export default {
         if ((req.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
           return textError('upgrade required', 426);
         }
+        // The lazy hub takes only a control socket or a stream on
+        // /tunnel/auth. An auth pipe from a callout in pool mode would wake
+        // the Durable Object for nothing.
+        if (env.HUB_MODE === 'lazy' && url.pathname === '/tunnel/auth') {
+          const mode = url.searchParams.get('mode');
+          if (mode !== 'control' && mode !== 'stream') return textError('not found', 404);
+        }
         return hub(env).fetch(req);
     }
-    if (kind === 'login') return hub(env).fetch(req);
+    if (kind === 'login' && loginPath(url.pathname)) return hub(env).fetch(req);
     return textError('not found', 404);
   },
 };
+
+function loginPath(path) {
+  return LOGIN_PATHS.has(path) || LOGIN_PREFIXES.some((p) => path.startsWith(p));
+}
+
+// Answers the app host requests that need no session as web.go does, and
+// forwards the rest to the Durable Object. A request without both app
+// cookies goes to the login host, so a scanner or a stray browser does not
+// wake the Durable Object or have its body read.
+function appRequest(req, env, url) {
+  const path = url.pathname;
+  if (path === AUTH_PATH) return hub(env).fetch(req);
+  if (path === '/teleport-logout') return toLogin(env);
+  if (path.startsWith('/x-teleport-dbsc')) return textError('not found', 404);
+  switch (req.method) {
+    case 'GET':
+    case 'HEAD':
+    case 'OPTIONS':
+      break;
+    default:
+      if (!sameOriginFetch(req, url.hostname)) return textError('bad origin', 403);
+  }
+  if (!cookie(req, APP_COOKIE) || !cookie(req, SUBJECT_COOKIE)) return toLogin(env);
+  return hub(env).fetch(req);
+}
+
+// Sends the browser to the login host and clears the app cookies.
+function toLogin(env) {
+  const h = new Headers({ location: 'https://' + env.OWNER + '.' + env.DOMAIN + '/' });
+  for (const name of [APP_COOKIE, SUBJECT_COOKIE]) {
+    h.append('set-cookie', name + '=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0');
+  }
+  return new Response(null, { status: 303, headers: h });
+}
+
+// Returns the value of the named cookie, or null.
+function cookie(req, name) {
+  for (const c of (req.headers.get('Cookie') || '').split(';')) {
+    const i = c.indexOf('=');
+    if (i > 0 && c.slice(0, i).trim() === name) return c.slice(i + 1).trim();
+  }
+  return null;
+}
+
+// Returns false when the browser says the request came from another
+// origin. A request with neither Sec-Fetch-Site nor Origin is not from a
+// browser page and passes.
+function sameOriginFetch(req, host) {
+  const site = req.headers.get('Sec-Fetch-Site');
+  if (site !== null) return site === 'same-origin' || site === 'none';
+  const origin = req.headers.get('Origin');
+  return origin === null || origin === 'https://' + host;
+}
 
 // Returns an error with the message as a body of bytes, so that it has no
 // Content-Type, like the Rust hub's errors.
@@ -175,7 +261,9 @@ class program {
         ws.accept();
         p.sockets.set(id, ws);
         ws.addEventListener('message', (e) => {
-          if (typeof e.data === 'string' || p.exited) return;
+          if (p.exited) return;
+          // A text message is a lazy stream's ack, which Go checks.
+          if (typeof e.data === 'string') return p.api.text(id, e.data);
           const d = new Uint8Array(e.data);
           for (let off = 0; off < d.length; off += inBuf.length) {
             const k = Math.min(d.length - off, inBuf.length);
@@ -341,8 +429,15 @@ const NONCE_BYTES = 32;
 const SIGNATURE_BYTES = 64;
 // A control socket that has not passed the challenge by then is closed.
 const CHALLENGE_DEADLINE_MS = 10_000;
-// Control sockets in the challenge. Above this the oldest is closed.
+// Control sockets in the challenge. At this many, a new one closes the
+// oldest of the client address with the most, counting the new one, with
+// 1013, so that one address that opens many evicts its own, and auth's
+// callout tries again soon.
 const MAX_PENDING_CONTROL = 4;
+// A verified control socket with no ping for this long is closed as dead.
+// Auth's callout pings every 30 s, and the runtime answers each ping and
+// notes when.
+const CONTROL_STALE_MS = 90_000;
 // The readyState of an open WebSocket.
 const OPEN = 1;
 
@@ -354,6 +449,13 @@ export class Hub extends DurableObject {
     // used once. Storage outlives a deploy, which restarts the Go program.
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS used_tokens (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)');
     this.lazy = env.HUB_MODE === 'lazy';
+    // HUB_MODE unset or pool is the pool hub. Any other value answers every
+    // request with 500, so that a typo does not run the wrong hub quietly.
+    this.badMode = !['', 'pool', 'lazy'].includes(env.HUB_MODE || '');
+    if (this.badMode) {
+      console.log('hub: HUB_MODE ' + JSON.stringify(env.HUB_MODE) + ' is not pool or lazy');
+      return;
+    }
     if (this.lazy) {
       // The runtime answers "ping" without waking the object. The lazy hub
       // starts the Go program on the first request that needs it, so a
@@ -366,6 +468,7 @@ export class Hub extends DurableObject {
   }
 
   async fetch(req) {
+    if (this.badMode) return textError('bad HUB_MODE', 500);
     const url = new URL(req.url);
     if (this.lazy) {
       this.prune();
@@ -376,10 +479,11 @@ export class Hub extends DurableObject {
       ) {
         return this.acceptControl(req);
       }
-      // The lazy hub has no reverse tunnel and no auth pipe pool, so only a
-      // stream reaches Go. A stream answers a dial, and a dial waits only
-      // while this instance's program runs, so a stream for no running
-      // program is 404 without starting one.
+      // The lazy hub has no reverse tunnel and no auth pipe pool, so on the
+      // login host and the bare domain only a stream on /tunnel/auth goes
+      // to Go. A stream answers a dial, and a dial waits only while this
+      // instance's program runs, so a stream for no running program is 404
+      // without starting one.
       if (classify(this.env, url.hostname) !== 'app') {
         if (url.pathname === '/webapi/connectionupgrade') return textError('not found', 404);
         if (url.pathname === '/tunnel/auth') {
@@ -391,8 +495,8 @@ export class Hub extends DurableObject {
     const p = await programFor(this, this.env);
     let body = null;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-      const limit = classify(this.env, url.hostname) === 'login' ? LOGIN_BODY_LIMIT : Infinity;
-      body = await readBody(req, limit);
+      const app = classify(this.env, url.hostname) === 'app' && url.pathname !== AUTH_PATH;
+      body = await readBody(req, app ? APP_BODY_LIMIT : LOGIN_BODY_LIMIT);
       if (body === null) return textError('request body too large', 413);
     }
     const headers = [];
@@ -417,6 +521,8 @@ export class Hub extends DurableObject {
           resolve(new Response('bad response', { status: 502 }));
         }
       });
+      // Go has copied the body, so this one can be freed.
+      r.body = null;
     });
   }
 
@@ -426,26 +532,30 @@ export class Hub extends DurableObject {
     if (req.headers.has('Origin')) return textError('origin not allowed', 403);
     const key = await this.calloutKey();
     if (typeof key === 'string') {
+      // The error is logged, and not sent to a caller who has not
+      // authenticated.
       console.log('lazy: ' + key);
-      return textError(key, 500);
+      return textError('bad AUTH_CALLOUT_PUBKEY', 500);
     }
+    const client = clientKey(req.headers.get('CF-Connecting-IP'));
     const pending = this.controls().filter((c) => !c.a.verified);
     if (pending.length >= MAX_PENDING_CONTROL) {
-      const oldest = pending.reduce((x, y) => (y.a.acceptedMs < x.a.acceptedMs ? y : x));
-      closeWS(oldest.ws, 1008, 'too many sockets in the challenge');
+      closeWS(busiestOldest(pending, client).ws, 1013, 'try again later');
     }
     const pair = new WebSocketPair();
     const ws = pair[1];
     this.ctx.acceptWebSocket(ws, [CONTROL]);
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
-    ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false });
+    ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false, client });
     ws.send(nonce);
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    // The header tells the callout that it may answer a dial with
+    // "refuse <id>".
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sallyport-Control': 'refuse' } });
   }
 
   // Handles a message on a control socket: the challenge reply while it is
-  // pending. A verified socket that sends anything is closed. "ping" never
-  // arrives here.
+  // pending, and "refuse <id>" once it is verified. A verified socket that
+  // sends anything else is closed. "ping" never arrives here.
   async webSocketMessage(ws, msg) {
     if (!this.lazy) return closeWS(ws, 1011, 'no handler');
     this.prune();
@@ -453,8 +563,21 @@ export class Hub extends DurableObject {
     const a = ws.deserializeAttachment();
     if (!a) return closeWS(ws, 1008, 'unknown socket');
     if (a.verified) {
-      console.log('lazy: unexpected message on the control socket, closing it');
-      return closeWS(ws, 1008, 'unexpected message');
+      const m = typeof msg === 'string' ? /^refuse ([A-Za-z0-9_-]{43})$/.exec(msg) : null;
+      if (!m) {
+        console.log('lazy: unexpected message on the control socket, closing it');
+        return closeWS(ws, 1008, 'unexpected message');
+      }
+      // A dial waits only while this instance's program runs, so a refuse
+      // for no running program has no dial to end.
+      if (current && current.owner === this && !current.exited && current.api) {
+        try {
+          current.api.refuse(m[1]);
+        } catch (e) {
+          console.log('lazy: refuse: ' + e);
+        }
+      }
+      return;
     }
     const reply = typeof msg === 'string' ? new Uint8Array(0) : new Uint8Array(msg);
     const err = await this.verifyReply(a.nonce, reply);
@@ -463,9 +586,12 @@ export class Hub extends DurableObject {
       return closeWS(ws, 1008, 'challenge');
     }
     if (ws.readyState !== OPEN) return;
-    // A newly verified control socket replaces the older ones.
+    // The verified control socket that the hub accepted last replaces the
+    // others, also when an older one passes the challenge after it.
     for (const c of this.controls()) {
-      if (c.a.verified && c.ws !== ws) closeWS(c.ws, 1000, 'replaced');
+      if (!c.a.verified || c.ws === ws) continue;
+      if (c.a.acceptedMs > a.acceptedMs) return closeWS(ws, 1000, 'replaced');
+      closeWS(c.ws, 1000, 'replaced');
     }
     a.verified = true;
     a.nonce = [];
@@ -473,7 +599,8 @@ export class Hub extends DurableObject {
     console.log('lazy: control socket verified');
   }
 
-  // Without the auto-reply flag the runtime needs the close echoed.
+  // A hibernatable WebSocket does not answer a close by itself, so the
+  // handler closes it.
   async webSocketClose(ws, code, reason) {
     console.log('lazy: control socket closed, code ' + code + ' ' + JSON.stringify(reason));
     closeWS(ws, 1000, 'closed');
@@ -498,11 +625,20 @@ export class Hub extends DurableObject {
   }
 
   // Returns the open verified control socket that the hub accepted last, or
-  // null.
+  // null. It first closes the verified ones with no ping for
+  // CONTROL_STALE_MS, so that a dial on a dead socket fails at once.
   verifiedControl() {
+    const now = Date.now();
     let best = null;
     for (const c of this.controls()) {
-      if (c.a.verified && (!best || c.a.acceptedMs > best.a.acceptedMs)) best = c;
+      if (!c.a.verified) continue;
+      const ping = this.ctx.getWebSocketAutoResponseTimestamp(c.ws);
+      if (now - Math.max(c.a.acceptedMs, ping ? ping.getTime() : 0) > CONTROL_STALE_MS) {
+        console.log('lazy: no ping on the control socket for ' + CONTROL_STALE_MS / 1000 + ' s, closing it');
+        closeWS(c.ws, 1001, 'no ping');
+        continue;
+      }
+      if (!best || c.a.acceptedMs > best.a.acceptedMs) best = c;
     }
     return best;
   }
@@ -560,6 +696,35 @@ export class Hub extends DurableObject {
     const ok = await crypto.subtle.verify({ name: 'Ed25519' }, key, reply.subarray(NONCE_BYTES), msg);
     return ok ? null : 'bad signature';
   }
+}
+
+// Returns the client address ip, from CF-Connecting-IP, with an IPv6
+// address cut to its /64, because one host usually holds a whole /64. It
+// is empty when the header is missing, as under wrangler dev.
+function clientKey(ip) {
+  ip = (ip || '').split('%')[0];
+  if (!ip.includes(':') || ip.includes('.')) return ip;
+  const [head, tail] = ip.split('::');
+  let groups = head ? head.split(':') : [];
+  if (tail !== undefined) {
+    const t = tail ? tail.split(':') : [];
+    groups = [...groups, ...Array(Math.max(8 - groups.length - t.length, 0)).fill('0'), ...t];
+  }
+  return groups.slice(0, 4).map((g) => parseInt(g || '0', 16).toString(16)).join(':') + '::/64';
+}
+
+// Returns the oldest of the pending control sockets whose client address
+// has the most pending, counting a new one from client.
+function busiestOldest(pending, client) {
+  const counts = new Map([[client, 1]]);
+  for (const c of pending) counts.set(c.a.client || '', (counts.get(c.a.client || '') || 0) + 1);
+  const most = Math.max(...counts.values());
+  let best = null;
+  for (const c of pending) {
+    if (counts.get(c.a.client || '') !== most) continue;
+    if (!best || c.a.acceptedMs < best.a.acceptedMs) best = c;
+  }
+  return best;
 }
 
 function closeWS(ws, code, reason) {
