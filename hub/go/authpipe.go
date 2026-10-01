@@ -27,27 +27,33 @@ const (
 
 // acceptAuthPipe accepts one WebSocket from auth and runs the challenge on
 // it.
-func (h *hub) acceptAuthPipe() *response {
+func (h *hub) acceptAuthPipe(req *request) *response {
 	if err := h.cfg.err("AUTH_CALLOUT_PUBKEY"); err != nil {
 		logf("tunnel/auth: %v", err)
 		return textError(err.Error(), 500)
 	}
-	if !h.pool.accept() {
+	if h.pool.full() {
 		logf("tunnel/auth: stream limit reached")
 		return textError("too many streams", 503)
 	}
 	c := acceptWS()
 	logf("tunnel/auth: connection accepted")
-	go func() {
-		h.challenge(c)
-		h.pool.release()
-	}()
+	t, evicted := h.pool.unverified.admit(maxUnverified, clientKey(req), func() {
+		logf("tunnel/auth: closed a socket in the challenge for a newer one")
+		c.CloseWith(1008, "too many sockets in the challenge")
+	})
+	if evicted {
+		logf("tunnel/auth: %d sockets in the challenge, closed the busiest client's oldest", maxUnverified)
+	}
+	go h.challenge(c, t)
 	return &response{status: 101, ws: c}
 }
 
 // challenge verifies auth's signature on c, then puts c in the pool and
-// waits until it closes.
-func (h *hub) challenge(c *wsConn) {
+// waits until it closes. It drops t, the socket's place among the sockets
+// in the challenge, once c is verified or closed.
+func (h *hub) challenge(c *wsConn, t *ticket) {
+	defer t.drop()
 	var nonce [nonceBytes]byte
 	rand.Read(nonce[:])
 	if _, err := c.Write(nonce[:]); err != nil {
@@ -80,9 +86,11 @@ func (h *hub) challenge(c *wsConn) {
 		return
 	}
 	logf("tunnel/auth: stream ready")
+	t.drop()
 	if h.pool.push(c) {
 		logf("tunnel/auth: %d streams open, closed the oldest waiting one", maxAuthStreams)
 	}
 	c.waitClosed()
+	h.pool.release()
 	logf("tunnel/auth: stream closed")
 }

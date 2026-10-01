@@ -6,49 +6,54 @@ import (
 )
 
 const (
-	// maxAuthStreams is the number of open WebSockets from auth, waiting or
-	// in use, that the hub keeps. Auth opens 8 by default.
+	// maxAuthStreams is the number of verified WebSockets from auth, waiting
+	// or in use, that the hub keeps. Auth opens 8 by default. Above this, a
+	// newly verified stream closes the oldest waiting one.
 	maxAuthStreams = 8
-	// maxAccepted is the number of WebSockets the hub accepts, verified or
-	// not. Above maxAuthStreams, a newly verified stream closes the oldest
-	// waiting one. A waiting stream whose auth went away without closing it
-	// looks open, and without this it would hold its place forever.
+	// maxAccepted is the number of verified WebSockets, waiting or in use,
+	// above which acceptAuthPipe answers 503. Only streams in use can take
+	// the count above maxAuthStreams, because push closes waiting ones.
 	maxAccepted = 2 * maxAuthStreams
+	// maxUnverified is the number of WebSockets in the challenge. Auth opens
+	// all its streams at once, so this is twice maxAuthStreams, which leaves
+	// room for a few other sockets during auth's burst. Above it, a new
+	// socket closes the oldest socket of the client with the most in the
+	// challenge, so sockets that never answer cannot keep auth out.
+	maxUnverified = 2 * maxAuthStreams
 )
 
 // authPool holds the verified streams waiting for the hub, oldest first.
 type authPool struct {
 	mu    sync.Mutex
 	ready []*wsConn
-	// open counts the accepted WebSockets, verified or not, that have not
+	// open counts the verified WebSockets, waiting or in use, that have not
 	// closed.
 	open int
+	// unverified holds the WebSockets in the challenge.
+	unverified pendingSet
 }
 
-// accept counts one more accepted WebSocket. It returns false, and counts
-// nothing, when maxAccepted WebSockets are open.
-func (p *authPool) accept() bool {
+// full reports whether maxAccepted verified WebSockets are open.
+func (p *authPool) full() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.open >= maxAccepted {
-		return false
-	}
-	p.open++
-	return true
+	return p.open >= maxAccepted
 }
 
-// release counts one accepted WebSocket as closed.
+// release counts one verified WebSocket as closed.
 func (p *authPool) release() {
 	p.mu.Lock()
 	p.open--
 	p.mu.Unlock()
 }
 
-// push adds a verified stream. When more than maxAuthStreams WebSockets are
-// open, it closes the oldest waiting stream, unless c is the only one
-// waiting. It returns true if it closed one.
+// push adds a verified stream and counts it as open. When more than
+// maxAuthStreams WebSockets are then open, it closes the oldest waiting
+// stream, unless c is the only one waiting. It returns true if it closed
+// one.
 func (p *authPool) push(c *wsConn) bool {
 	p.mu.Lock()
+	p.open++
 	p.ready = slices.DeleteFunc(p.ready, (*wsConn).isClosed)
 	p.ready = append(p.ready, c)
 	var evicted *wsConn
@@ -80,7 +85,7 @@ func (p *authPool) take() *wsConn {
 	return nil
 }
 
-// counts returns the number of open WebSockets from auth, waiting or in
+// counts returns the number of verified WebSockets from auth, waiting or in
 // use, and the number of verified streams waiting.
 func (p *authPool) counts() (open, ready int) {
 	p.mu.Lock()

@@ -2,13 +2,10 @@ package main
 
 import "testing"
 
-// add adds a verified stream to p as acceptAuthPipe and challenge would. It
-// returns the stream and whether the pool closed another one.
+// add adds a verified stream to p as challenge would. It returns the stream
+// and whether the pool closed another one.
 func add(t *testing.T, p *authPool) (*wsConn, bool) {
 	t.Helper()
-	if !p.accept() {
-		t.Fatal("accept refused")
-	}
 	c := &wsConn{}
 	return c, p.push(c)
 }
@@ -77,18 +74,22 @@ func TestAuthPoolKeepsTheOnlyWaitingStream(t *testing.T) {
 	}
 }
 
-func TestAuthPoolAcceptsTwiceTheStreamLimit(t *testing.T) {
+func TestAuthPoolIsFullAtTwiceTheStreamLimit(t *testing.T) {
 	p := &authPool{}
 	for i := range maxAccepted {
-		if !p.accept() {
-			t.Fatalf("accept %d refused", i+1)
+		if p.full() {
+			t.Fatalf("full with %d streams in use", i)
+		}
+		add(t, p)
+		if p.take() == nil {
+			t.Fatal("take = nil")
 		}
 	}
-	if p.accept() {
-		t.Errorf("accept %d allowed", maxAccepted+1)
+	if !p.full() {
+		t.Errorf("not full with %d streams in use", maxAccepted)
 	}
 	p.release()
-	if !p.accept() {
-		t.Error("accept refused after a release")
+	if p.full() {
+		t.Error("full after a release")
 	}
 }

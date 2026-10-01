@@ -27,9 +27,12 @@ const (
 type hub struct {
 	cfg *config
 
-	// tunnels counts open agent connections, for maxConnections.
-	tunnels      atomic.Int64
-	passthroughs atomic.Int64
+	// tunnels counts open agent connections, authenticated or not.
+	tunnels atomic.Int64
+	// unauthenticated holds the tunnels that have not authenticated. They
+	// do not count toward maxConnections.
+	unauthenticated pendingSet
+	passthroughs    atomic.Int64
 	// lastDiscovery is the time of the last discovery request the agent
 	// took, in Unix milliseconds, or 0 before the first one.
 	lastDiscovery atomic.Int64
@@ -77,7 +80,7 @@ func (h *hub) serve(req *request) (res *response) {
 		return h.loginHostRequest(req)
 	}
 	if req.path == authPipePath {
-		return h.acceptAuthPipe()
+		return h.acceptAuthPipe(req)
 	}
 	return h.acceptTunnel(req)
 }

@@ -32,10 +32,16 @@ const (
 	// authDeadline closes a connection that has not authenticated by then.
 	// Without it an unauthenticated client can hold a tunnel open forever.
 	authDeadline = 30 * time.Second
-	// maxConnections is the number of open tunnels the hub accepts. One app
-	// service uses about three: its auth client, its tunnel, and a
-	// short-lived probe.
+	// maxConnections is the number of authenticated tunnels the hub
+	// accepts. One app service uses about three: its auth client, its
+	// tunnel, and a short-lived probe.
 	maxConnections = 16
+	// maxUnauthenticated is the number of tunnels that have not
+	// authenticated, which do not count toward maxConnections. A new one
+	// above this closes the oldest tunnel of the client address with the
+	// most waiting, so clients that never authenticate cannot keep a
+	// redialing agent out.
+	maxUnauthenticated = 8
 
 	chanHeartbeat   = "teleport-heartbeat"
 	chanTransport   = "teleport-transport"
@@ -100,16 +106,24 @@ func (h *hub) acceptTunnel(req *request) *response {
 		logf("tunnel: %v", err)
 		return textError(err.Error(), 500)
 	}
-	if h.tunnels.Load() >= maxConnections {
+	if h.tunnels.Load()-int64(h.unauthenticated.waiting()) >= maxConnections {
 		logf("tunnel: connection limit reached")
 		return textError("too many connections", 503)
 	}
 	h.tunnels.Add(1)
 	c := acceptWS()
+	t, evicted := h.unauthenticated.admit(maxUnauthenticated, clientKey(req), func() {
+		logf("tunnel: closed for a newer connection that is not authenticated")
+		c.CloseWith(1008, "auth timeout")
+	})
+	if evicted {
+		logf("tunnel: %d connections not authenticated, closed the busiest client's oldest", maxUnauthenticated)
+	}
 	go func() {
 		defer h.tunnels.Add(-1)
 		defer c.Close()
-		if err := h.serveTunnel(c); err != nil {
+		defer t.drop()
+		if err := h.serveTunnel(c, t); err != nil {
 			logf("tunnel: %v", err)
 		}
 	}()
@@ -117,8 +131,10 @@ func (h *hub) acceptTunnel(req *request) *response {
 	return res.add("sec-websocket-protocol", subprotocol)
 }
 
-// serveTunnel runs TLS and then the reverse tunnel SSH server on c.
-func (h *hub) serveTunnel(c *wsConn) error {
+// serveTunnel runs TLS and then the reverse tunnel SSH server on c. It
+// drops t, the connection's place among the tunnels that have not
+// authenticated, once the agent has.
+func (h *hub) serveTunnel(c *wsConn, t *ticket) error {
 	var authed atomic.Bool
 	deadline := time.AfterFunc(authDeadline, func() {
 		if !authed.Load() {
@@ -149,6 +165,7 @@ func (h *hub) serveTunnel(c *wsConn) error {
 	}
 	authed.Store(true)
 	deadline.Stop()
+	t.drop()
 	a.conn = sc
 	a.hostID = sc.Permissions.Extensions["host"]
 	a.role = sc.Permissions.Extensions["role"]
