@@ -50,7 +50,9 @@ const STREAM_HEADER: &str = "Sallyport-Stream";
 const CONTROL_HEADER: &str = "Sallyport-Control";
 /// A control socket that has not passed the challenge by then is closed.
 const CHALLENGE_DEADLINE_MS: u64 = 10_000;
-/// Control sockets in the challenge. Above this the oldest is closed.
+/// Control sockets in the challenge. At this many, a new socket closes the
+/// oldest socket of the client address with the most in the challenge, with
+/// 1013, so that one address cannot close the callout's socket.
 const MAX_PENDING_CONTROL: usize = 4;
 /// Dials waiting for their stream. Above this a dial fails at once.
 const MAX_PENDING_DIALS: usize = 32;
@@ -125,6 +127,10 @@ struct Attachment {
     /// The hub's nonce, while the challenge runs.
     nonce: Vec<u8>,
     verified: bool,
+    /// The client address, from [`crate::tunnel::client_key`]. It is empty
+    /// on a socket that an older hub accepted.
+    #[serde(default)]
+    client: String,
 }
 
 /// Why a dial got no stream.
@@ -222,16 +228,16 @@ impl Lazy {
             return Response::error("origin not allowed", 403);
         }
         self.prune();
-        let pending: Vec<(u64, WebSocket)> = self
+        let client = crate::tunnel::client_key(req)?;
+        let (pending, sockets): (Vec<_>, Vec<_>) = self
             .controls()
             .into_iter()
             .filter(|(a, _)| !a.verified)
-            .map(|(a, ws)| (a.accepted_ms, ws))
-            .collect();
-        if pending.len() >= MAX_PENDING_CONTROL {
-            if let Some((_, oldest)) = pending.into_iter().min_by_key(|(t, _)| *t) {
-                let _ = oldest.close(Some(1008), Some("too many sockets in the challenge"));
-            }
+            .map(|(a, ws)| ((a.accepted_ms, a.client), ws))
+            .unzip();
+        if let Some(at) = evict(&pending, &client, MAX_PENDING_CONTROL) {
+            console_log!("lazy: {MAX_PENDING_CONTROL} control sockets in the challenge, closed the busiest client's oldest");
+            let _ = sockets[at].close(Some(1013), Some("try again later"));
         }
 
         let pair = WebSocketPair::new()?;
@@ -243,6 +249,7 @@ impl Lazy {
             accepted_ms: Date::now().as_millis(),
             nonce: nonce.clone(),
             verified: false,
+            client,
         })?;
         ws.send_with_bytes(&nonce)?;
         let headers = Headers::new();
@@ -279,7 +286,10 @@ impl Lazy {
             WebSocketIncomingMessage::Binary(b) => b,
             WebSocketIncomingMessage::String(_) => Vec::new(),
         };
-        let nonce: [u8; 32] = a.nonce.as_slice().try_into().unwrap_or([0; 32]);
+        let Ok(nonce) = <[u8; 32]>::try_from(a.nonce.as_slice()) else {
+            let _ = ws.close(Some(1008), Some("unknown socket"));
+            return Ok(());
+        };
         if let Err(err) = crate::authpipe::verify_reply(&self.key, &self.host, &nonce, &reply) {
             console_log!("lazy: control challenge failed, {err}");
             let _ = ws.close(Some(1008), Some("challenge"));
@@ -412,18 +422,22 @@ impl Lazy {
 
     /// Returns the open verified control socket that the hub accepted last.
     fn control(&self) -> Option<WebSocket> {
-        newest_open(self.controls().into_iter().map(|(a, ws)| {
-            let open =
-                AsRef::<web_sys::WebSocket>::as_ref(&ws).ready_state() == web_sys::WebSocket::OPEN;
-            (a.accepted_ms, a.verified && open, ws)
-        }))
+        self.controls()
+            .into_iter()
+            .filter(|(a, _)| a.verified)
+            .max_by_key(|(a, _)| a.accepted_ms)
+            .map(|(_, ws)| ws)
     }
 
-    /// Returns the control sockets with their attachments.
+    /// Returns the open control sockets with their attachments. A socket
+    /// that is closing is left out.
     fn controls(&self) -> Vec<(Attachment, WebSocket)> {
         self.state
             .get_websockets_with_tag(CONTROL)
             .into_iter()
+            .filter(|ws| {
+                AsRef::<web_sys::WebSocket>::as_ref(ws).ready_state() == web_sys::WebSocket::OPEN
+            })
             .filter_map(|ws| match ws.deserialize_attachment::<Attachment>() {
                 Ok(Some(a)) => Some((a, ws)),
                 _ => None,
@@ -478,14 +492,26 @@ fn expired(a: &Attachment, now: u64) -> bool {
     !a.verified && now.saturating_sub(a.accepted_ms) > CHALLENGE_DEADLINE_MS
 }
 
-/// Returns the item with the largest accept time among those marked usable.
-/// Each item is its accept time, whether it is usable, and the item.
-fn newest_open<T>(items: impl IntoIterator<Item = (u64, bool, T)>) -> Option<T> {
-    items
-        .into_iter()
-        .filter(|(_, usable, _)| *usable)
-        .max_by_key(|(t, _, _)| *t)
-        .map(|(_, _, item)| item)
+/// Returns the index in `pending` of the socket to close before a socket
+/// from `client` joins, or None when fewer than `cap` are pending. Each
+/// pending socket is its accept time and its client. The socket is the
+/// oldest of the client with the most pending, counting the new one.
+fn evict(pending: &[(u64, String)], client: &str, cap: usize) -> Option<usize> {
+    if pending.len() < cap.max(1) {
+        return None;
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    *counts.entry(client).or_default() += 1;
+    for (_, c) in pending {
+        *counts.entry(c.as_str()).or_default() += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    pending
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, c))| counts[c.as_str()] == most)
+        .min_by_key(|(_, (t, _))| *t)
+        .map(|(i, _)| i)
 }
 
 #[cfg(test)]
@@ -493,13 +519,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn newest_open_picks_the_newest_usable() {
+    fn evict_picks_the_busiest_clients_oldest() {
+        let p = |items: &[(u64, &str)]| -> Vec<(u64, String)> {
+            items.iter().map(|(t, c)| (*t, c.to_string())).collect()
+        };
+        assert_eq!(evict(&p(&[(1, "x"), (2, "x")]), "x", 3), None);
         assert_eq!(
-            newest_open([(1, true, "a"), (3, false, "b"), (2, true, "c")]),
-            Some("c")
+            evict(&p(&[(1, "auth"), (3, "x"), (2, "x")]), "y", 3),
+            Some(2)
         );
-        assert_eq!(newest_open([(1, false, "a")]), None);
-        assert_eq!(newest_open(Vec::<(u64, bool, &str)>::new()), None);
+        assert_eq!(
+            evict(&p(&[(1, "auth"), (2, "x"), (3, "y")]), "x", 3),
+            Some(1)
+        );
+        assert_eq!(evict(&p(&[(2, "a"), (1, "b"), (3, "c")]), "d", 3), Some(1));
+        assert_eq!(evict(&[], "x", 0), None);
     }
 
     #[test]
@@ -508,6 +542,7 @@ mod tests {
             accepted_ms: 1_000,
             nonce: Vec::new(),
             verified,
+            client: String::new(),
         };
         assert!(!expired(&a(false), 1_000 + CHALLENGE_DEADLINE_MS));
         assert!(expired(&a(false), 1_001 + CHALLENGE_DEADLINE_MS));
