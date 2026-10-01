@@ -69,6 +69,11 @@ func newHub(env map[string]string) *hub {
 // serve answers one request to the Durable Object.
 func (h *hub) serve(req *request) (res *response) {
 	defer func() {
+		if req.bodyStream != nil && !req.bodyTaken {
+			req.bodyStream.Close()
+		}
+	}()
+	defer func() {
 		if p := recover(); p != nil {
 			buf := make([]byte, 4096)
 			buf = buf[:runtime.Stack(buf, false)]

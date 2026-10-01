@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -14,6 +15,12 @@ type request struct {
 	method, host, path, query string
 	header                    map[string]string
 	body                      []byte
+	// bodyStream is the body of an app request, which Go reads as it
+	// arrives, or nil. Only one of body and bodyStream is set. serve closes
+	// it once the request is answered, unless bodyTaken is true, and then
+	// the reader that took it closes it.
+	bodyStream io.ReadCloser
+	bodyTaken  bool
 }
 
 // response is what the Durable Object answers. At most one of body,

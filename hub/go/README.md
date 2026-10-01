@@ -16,9 +16,9 @@ and `go.example.com` (Go hub) can be compared on two identical clusters.
   to the login host, `/x-teleport-dbsc` paths get 404, and a request that
   can change state from another origin gets 403. Only the Durable Object
   starts the Go program, so a stateless Worker isolate never pays the Go
-  runtime's startup CPU and 38 MiB of memory. The Durable Object reads
-  each request body before Go runs, and answers 413 for an app request
-  body over 8 MiB and for any other body over 64 KiB. It also owns the SQLite table of used
+  runtime's startup CPU and 38 MiB of memory. The Durable Object passes
+  an app request body to Go as Go reads it. It reads any other request
+  body before Go runs, and answers 413 for one over 64 KiB. It also owns the SQLite table of used
   privilege tokens, which Go reads and writes through the glue.
 - `js.go` and `wsconn.go` are the Go side of the glue. `wsconn.go` is a
   `net.Conn` over a Workers WebSocket and a response body stream.
