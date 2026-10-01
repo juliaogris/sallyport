@@ -167,6 +167,9 @@ impl DurableObject for Hub {
         // The runtime completes the close handshake only when the object
         // closes its end too.
         let _ = ws.close(Some(1000), Some("closed"));
+        if let HubMode::Lazy(lazy) = &self.mode {
+            lazy.on_close();
+        }
         Ok(())
     }
 

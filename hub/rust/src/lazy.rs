@@ -508,7 +508,9 @@ impl Lazy {
                 "auth refused the {} dial",
                 kind.as_str()
             ))),
-            Either::Left((Err(_), _)) => Err(DialError::Failed("dial cancelled".to_string())),
+            Either::Left((Err(_), _)) => Err(DialError::Failed(
+                "auth's control socket closed".to_string(),
+            )),
             Either::Right(_) => Err(DialError::Failed(format!(
                 "no {} stream within {STREAM_WAIT:?}",
                 kind.as_str()
@@ -531,6 +533,21 @@ impl Lazy {
         };
         console_log!("lazy: auth refused a {} dial", dial.kind.as_str());
         let _ = dial.tx.send(None);
+    }
+
+    /// Fails the pending dials when no verified control socket is left
+    /// open, because no callout will answer them.
+    pub fn on_close(&self) {
+        if self.connected() {
+            return;
+        }
+        let gone: Vec<_> = self.dials.borrow_mut().drain().collect();
+        if !gone.is_empty() {
+            console_log!(
+                "lazy: auth's control socket closed, failing {} dials",
+                gone.len()
+            );
+        }
     }
 
     /// Returns true if a verified control socket is open.
