@@ -13,7 +13,7 @@
 //! Streams are accepted without hibernation, so the object stays awake while
 //! one is open. A stream closes after [`STREAM_IDLE`] without bytes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::pin::pin;
 use std::rc::Rc;
@@ -38,6 +38,13 @@ const CHALLENGE_DEADLINE_MS: u64 = 10_000;
 const MAX_PENDING_CONTROL: usize = 4;
 /// Dials waiting for their stream. Above this a dial fails at once.
 const MAX_PENDING_DIALS: usize = 32;
+/// App streams open at once, waiting for their stream or paired. Above
+/// this an app dial fails at once. Each stream can hold about 2.3 MiB: 1 MiB
+/// queued by [`crate::wsevents`], up to 1 MiB sent and not yet acked, two
+/// 64 KiB pipe halves, and TLS and HTTP buffers. 32 streams hold at most
+/// about 74 MiB, which leaves room under the Durable Object's 128 MB for the
+/// rest of the hub.
+const MAX_APP_STREAMS: usize = 32;
 /// How long a dial waits for its stream.
 pub(crate) const STREAM_WAIT: Duration = Duration::from_secs(10);
 /// A stream closes after this long without bytes in either direction. This
@@ -101,10 +108,52 @@ struct Attachment {
     verified: bool,
 }
 
+/// Why a dial got no stream.
+#[derive(Debug)]
+pub enum DialError {
+    /// The hub has no room for the dial.
+    Busy(String),
+    /// Auth is not connected, or no stream arrived in time.
+    Failed(String),
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialError::Busy(msg) | DialError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// A dial waiting for its stream.
 struct PendingDial {
     kind: Kind,
     tx: oneshot::Sender<DuplexStream>,
+    /// An app dial's place in [`MAX_APP_STREAMS`]. The stream's pump keeps
+    /// it until the WebSocket closes, because the queue of the WebSocket's
+    /// events lives as long as the WebSocket.
+    slot: Option<Slot>,
+}
+
+/// One app stream's place in [`MAX_APP_STREAMS`]. Dropping it frees the
+/// place.
+struct Slot(Rc<Cell<usize>>);
+
+impl Slot {
+    /// Takes a place in `open`, or returns None when `cap` are taken.
+    fn take(open: &Rc<Cell<usize>>, cap: usize) -> Option<Self> {
+        if open.get() >= cap {
+            return None;
+        }
+        open.set(open.get() + 1);
+        Some(Self(open.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 /// The lazy hub's state: the Durable Object's socket list and the dials
@@ -117,6 +166,8 @@ pub struct Lazy {
     host: String,
     /// Dials waiting for their stream, by id, for [`MAX_PENDING_DIALS`].
     dials: RefCell<HashMap<String, PendingDial>>,
+    /// App streams waiting or open, for [`MAX_APP_STREAMS`].
+    app_streams: Rc<Cell<usize>>,
 }
 
 impl Lazy {
@@ -137,6 +188,7 @@ impl Lazy {
             key,
             host,
             dials: RefCell::new(HashMap::new()),
+            app_streams: Rc::new(Cell::new(0)),
         });
         LAZY.with(|l| *l.borrow_mut() = Some(lazy.clone()));
         console_log!("lazy: woke, {} sockets", lazy.state.get_websockets().len());
@@ -235,8 +287,8 @@ impl Lazy {
         ws.accept()?;
         let events = crate::wsevents::events(&ws)?;
         let (hub_side, pipe_side) = tokio::io::duplex(PIPE_BYTES);
-        let kind = dial.kind;
-        if dial.tx.send(hub_side).is_err() {
+        let PendingDial { kind, tx, slot } = dial;
+        if tx.send(hub_side).is_err() {
             console_log!(
                 "lazy: {} stream arrived after its dial gave up",
                 kind.as_str()
@@ -246,28 +298,40 @@ impl Lazy {
             wasm_bindgen_futures::spawn_local(async move {
                 let mode = crate::tunnel::PumpMode::Stream { idle: STREAM_IDLE };
                 crate::tunnel::pump(&ws, events, pipe_side, mode).await;
+                drop(slot);
             });
         }
         Response::from_websocket(pair.client)
     }
 
     /// Asks auth's callout for a stream and waits up to [`STREAM_WAIT`]
-    /// for it.
-    pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, String> {
+    /// for it. It returns [`DialError::Busy`] at once when
+    /// [`MAX_PENDING_DIALS`] dials wait, or for an app stream when
+    /// [`MAX_APP_STREAMS`] are open.
+    pub async fn dial(&self, kind: Kind) -> std::result::Result<DuplexStream, DialError> {
         let started = Date::now().as_millis();
         let control = self
             .control()
-            .ok_or_else(|| "auth is not connected".to_string())?;
+            .ok_or_else(|| DialError::Failed("auth is not connected".to_string()))?;
         if self.dials.borrow().len() >= MAX_PENDING_DIALS {
-            return Err(format!("{MAX_PENDING_DIALS} dials waiting"));
+            return Err(DialError::Busy(format!(
+                "{MAX_PENDING_DIALS} dials waiting"
+            )));
         }
+        let slot =
+            match kind {
+                Kind::App => Some(Slot::take(&self.app_streams, MAX_APP_STREAMS).ok_or_else(
+                    || DialError::Busy(format!("{MAX_APP_STREAMS} app streams open")),
+                )?),
+                Kind::Auth => None,
+            };
         let mut raw = [0u8; 32];
-        getrandom::getrandom(&mut raw).map_err(|e| format!("stream id: {e}"))?;
+        getrandom::getrandom(&mut raw).map_err(|e| DialError::Failed(format!("stream id: {e}")))?;
         let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let (tx, rx) = oneshot::channel();
         self.dials
             .borrow_mut()
-            .insert(id.clone(), PendingDial { kind, tx });
+            .insert(id.clone(), PendingDial { kind, tx, slot });
         // Removes the id however the dial ends, also when its future is
         // dropped, so that the id does not count toward the cap.
         let _guard = DialGuard {
@@ -275,15 +339,15 @@ impl Lazy {
             id: id.clone(),
         };
         if let Err(err) = control.send_with_str(format!("dial {} {id}", kind.as_str())) {
-            return Err(format!("sending dial: {err}"));
+            return Err(DialError::Failed(format!("sending dial: {err}")));
         }
         let res = match select(rx, pin!(crate::sockets::sleep(STREAM_WAIT))).await {
             Either::Left((Ok(stream), _)) => Ok(stream),
-            Either::Left((Err(_), _)) => Err("dial cancelled".to_string()),
-            Either::Right(_) => Err(format!(
+            Either::Left((Err(_), _)) => Err(DialError::Failed("dial cancelled".to_string())),
+            Either::Right(_) => Err(DialError::Failed(format!(
                 "no {} stream within {STREAM_WAIT:?}",
                 kind.as_str()
-            )),
+            ))),
         };
         console_log!(
             "lazy: cold {} dial {} in {} ms",
@@ -387,7 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn dial_guard_removes_the_id() {
+    fn dial_guard_removes_the_id_and_frees_its_slot() {
+        let open = Rc::new(Cell::new(0));
         let dials = RefCell::new(HashMap::new());
         let (tx, _rx) = oneshot::channel();
         dials.borrow_mut().insert(
@@ -395,12 +460,27 @@ mod tests {
             PendingDial {
                 kind: Kind::App,
                 tx,
+                slot: Slot::take(&open, 1),
             },
         );
+        assert_eq!(open.get(), 1);
         drop(DialGuard {
             dials: &dials,
             id: "x".to_string(),
         });
         assert!(dials.borrow().is_empty());
+        assert_eq!(open.get(), 0);
+    }
+
+    #[test]
+    fn slot_take_stops_at_the_cap() {
+        let open = Rc::new(Cell::new(0));
+        let a = Slot::take(&open, 2).unwrap();
+        let _b = Slot::take(&open, 2).unwrap();
+        assert!(Slot::take(&open, 2).is_none());
+        assert_eq!(open.get(), 2);
+        drop(a);
+        assert_eq!(open.get(), 1);
+        assert!(Slot::take(&open, 2).is_some());
     }
 }

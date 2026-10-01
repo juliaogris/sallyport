@@ -67,7 +67,8 @@ pub enum AppDialer<'a> {
 ///
 /// On a dial, TLS or HTTP/1.1 handshake failure, or an error from the app
 /// service's connection, this logs the error and returns a 502 "app
-/// unavailable" response.
+/// unavailable" response. When the lazy hub has no room for the dial, it
+/// returns a 503 "app service busy" response.
 pub async fn forward(
     tunnel: AppDialer<'_>,
     tls: Arc<rustls::ClientConfig>,
@@ -75,7 +76,21 @@ pub async fn forward(
     host: &str,
     mut req: Request,
 ) -> Result<Response> {
-    match forward_inner(tunnel, tls, cluster, host, &mut req).await {
+    let stream = match tunnel {
+        AppDialer::Tunnel(t) => dial_app(t, tls, cluster).await,
+        AppDialer::Lazy(l) => match crate::app::dial_app_lazy(&l, tls, cluster).await {
+            Err(crate::lazy::DialError::Busy(err)) => {
+                console_error!("appproxy: {err}");
+                return Response::error("app service busy", 503);
+            }
+            res => res.map_err(|e| e.to_string()),
+        },
+    };
+    let res = match stream {
+        Ok(stream) => forward_inner(stream, host, &mut req).await,
+        Err(err) => Err(err),
+    };
+    match res {
         Ok(resp) => Ok(resp),
         Err(err) => {
             console_error!("appproxy: {err}");
@@ -85,16 +100,10 @@ pub async fn forward(
 }
 
 async fn forward_inner(
-    tunnel: AppDialer<'_>,
-    tls: Arc<rustls::ClientConfig>,
-    cluster: &str,
+    stream: crate::app::AppStream,
     host: &str,
     req: &mut Request,
 ) -> std::result::Result<Response, String> {
-    let stream = match tunnel {
-        AppDialer::Tunnel(t) => dial_app(t, tls, cluster).await?,
-        AppDialer::Lazy(l) => crate::app::dial_app_lazy(&l, tls, cluster).await?,
-    };
     let (mut send, conn) = hyper::client::conn::http1::handshake(HyperIo::new(stream))
         .await
         .map_err(|e| format!("http1 handshake: {e}"))?;

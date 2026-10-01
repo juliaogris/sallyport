@@ -105,7 +105,10 @@ impl Pool {
     pub async fn take_wait(&self) -> std::result::Result<DuplexStream, String> {
         // The lazy hub asks auth's callout for a stream instead.
         if let Some(lazy) = crate::lazy::get() {
-            return lazy.dial(crate::lazy::Kind::Auth).await;
+            return lazy
+                .dial(crate::lazy::Kind::Auth)
+                .await
+                .map_err(|e| e.to_string());
         }
         self.take_until(crate::sockets::sleep(TAKE_WAIT))
             .await

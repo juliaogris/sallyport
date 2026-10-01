@@ -122,12 +122,14 @@ async fn dial_inner(
 /// Asks auth's on-demand callout for an app stream and runs TLS toward the
 /// app service over it. The wait for the stream has
 /// [`crate::lazy::STREAM_WAIT`], and TLS then has [`DIAL_DEADLINE`], so the
-/// dial takes at most their sum, 20 s.
+/// dial takes at most their sum, 20 s. The error is
+/// [`crate::lazy::DialError::Busy`] when the hub had no room for the dial.
 pub(crate) async fn dial_app_lazy(
     lazy: &crate::lazy::Lazy,
     tls: Arc<rustls::ClientConfig>,
     cluster: &str,
-) -> std::result::Result<AppStream, String> {
+) -> std::result::Result<AppStream, crate::lazy::DialError> {
+    use crate::lazy::DialError;
     let stream = lazy.dial(crate::lazy::Kind::App).await?;
     let tls = match select(
         pin!(connect_tls(tls, cluster, stream)),
@@ -135,8 +137,12 @@ pub(crate) async fn dial_app_lazy(
     )
     .await
     {
-        Either::Left((res, _)) => res?,
-        Either::Right(_) => return Err(format!("tls connect: no answer within {DIAL_DEADLINE:?}")),
+        Either::Left((res, _)) => res.map_err(DialError::Failed)?,
+        Either::Right(_) => {
+            return Err(DialError::Failed(format!(
+                "tls connect: no answer within {DIAL_DEADLINE:?}"
+            )))
+        }
     };
     Ok(AppStream {
         tls: AppTls::Lazy(tls),
