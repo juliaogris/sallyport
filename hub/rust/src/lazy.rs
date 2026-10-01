@@ -253,7 +253,7 @@ impl Lazy {
             .map(|(a, ws)| ((a.accepted_ms, a.client), ws))
             .unzip();
         if let Some(at) = evict(&pending, &client, MAX_PENDING_CONTROL) {
-            console_log!("lazy: {MAX_PENDING_CONTROL} control sockets in the challenge, closed the busiest client's oldest");
+            console_log!("lazy: too many control sockets in the challenge, closing the oldest of the busiest client");
             let _ = sockets[at].close(Some(1013), Some("try again later"));
         }
 
@@ -323,6 +323,7 @@ impl Lazy {
             if !other.verified {
                 continue;
             }
+            console_log!("lazy: control socket replaced by a newer one");
             if other.accepted_ms > a.accepted_ms {
                 let _ = ws.close(Some(1000), Some("replaced"));
                 return Ok(());

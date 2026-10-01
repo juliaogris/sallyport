@@ -545,6 +545,13 @@ pub async fn pump(
             // Polls, so a stream ends up to 5 s after `idle`.
             crate::sockets::sleep(Duration::from_secs(5)).await;
             if Date::now().as_millis().saturating_sub(last_any.get()) >= idle.as_millis() as u64 {
+                console_log!(
+                    "lazy: stream idle for {idle:?}, closing, {} bytes in ({} acked), {} bytes out ({} acked by the callout)",
+                    delivered.get(),
+                    acked.get(),
+                    sent.get(),
+                    peer_acked.get(),
+                );
                 let _ = ws.close(Some(1000), Some("idle"));
                 return;
             }
