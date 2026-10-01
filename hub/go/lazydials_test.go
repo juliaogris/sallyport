@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
 func TestDialTableUsesEachIDOnce(t *testing.T) {
 	var d dialTable[int]
@@ -60,4 +65,53 @@ func TestDialTableCancelAfterTake(t *testing.T) {
 		t.Error("a cancelled dial got a stream")
 	default:
 	}
+}
+
+func TestDialTableWait(t *testing.T) {
+	t.Run("stream arrives", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("a", 2)
+		got, _ := d.take("a")
+		got <- 7
+		v, err := d.wait(context.Background(), "a", ch, time.Hour, "app")
+		if err != nil || v != 7 {
+			t.Errorf("wait = %d, %v, want 7, nil", v, err)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("a", 2)
+		_, err := d.wait(context.Background(), "a", ch, time.Millisecond, "app")
+		if err == nil {
+			t.Fatal("wait returned no error after its deadline")
+		}
+		if _, ok := d.take("a"); ok {
+			t.Error("the dial is still waiting after its deadline")
+		}
+	})
+	t.Run("context ends", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("a", 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := d.wait(ctx, "a", ch, time.Hour, "auth")
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("wait error = %v, want context.Canceled", err)
+		}
+		if _, ok := d.take("a"); ok {
+			t.Error("the dial is still waiting after its context ended")
+		}
+	})
+	t.Run("stream taken as the context ends", func(t *testing.T) {
+		var d dialTable[int]
+		ch, _ := d.add("a", 2)
+		got, _ := d.take("a")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		go func() { got <- 7 }()
+		v, err := d.wait(ctx, "a", ch, time.Hour, "app")
+		if err != nil || v != 7 {
+			t.Errorf("wait = %d, %v, want 7, nil", v, err)
+		}
+	})
 }

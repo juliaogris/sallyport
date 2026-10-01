@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall/js"
@@ -46,14 +47,23 @@ type wsConn struct {
 	code  int
 	flush chan struct{}
 
+	// The fields below are for a lazy hub's stream and are guarded by mu,
+	// except lastBytes.
+	//
 	// lazy is true for a lazy hub's stream, which acks the bytes Read has
 	// passed on and closes after lazyStreamIdle without bytes.
 	lazy bool
 	// delivered and acked count the bytes Read has passed on, and those
-	// up to the last ack.
+	// up to the last ack the hub sent.
 	delivered, acked int64
+	// window is true when the callout acks what the hub sends. Write then
+	// keeps at most lazyWindow bytes sent and not acked. sent counts the
+	// bytes Write has taken, and peerAcked those up to the callout's last
+	// ack.
+	window          bool
+	sent, peerAcked int64
 	// lastBytes is when bytes last crossed in either direction, in Unix
-	// milliseconds.
+	// milliseconds. It is atomic, so that checkIdle can read it without mu.
 	lastBytes atomic.Int64
 	idle      *time.Timer
 }
@@ -144,6 +154,7 @@ func (c *wsConn) Read(b []byte) (int, error) {
 	n := copy(b, c.rbuf[c.roff:])
 	c.roff += n
 	if c.lazy {
+		c.lastBytes.Store(time.Now().UnixMilli())
 		c.delivered += int64(n)
 		if c.delivered-c.acked >= ackEvery {
 			c.acked = c.delivered
@@ -159,31 +170,72 @@ func (c *wsConn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
+// Write queues b to send. On a stream with a window, it waits for the
+// callout's acks while lazyWindow bytes are not acked, and it returns
+// net.ErrClosed with the bytes taken so far if the stream closes first.
 func (c *wsConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
-		return 0, net.ErrClosed
+	written := 0
+	for written < len(b) {
+		if c.closed {
+			return written, net.ErrClosed
+		}
+		n := len(b) - written
+		if c.window {
+			room := lazyWindow - (c.sent - c.peerAcked)
+			if room <= 0 {
+				// The callout acks only what it has received, so send
+				// what is queued before waiting.
+				c.flushLocked()
+				c.cond.Wait()
+				continue
+			}
+			n = int(min(int64(n), room))
+			c.sent += int64(n)
+		}
+		c.pend = append(c.pend, b[written:written+n]...)
+		written += n
+		if c.lazy {
+			c.lastBytes.Store(time.Now().UnixMilli())
+		}
+		if len(c.pend) >= outBytes {
+			c.flushLocked()
+		}
 	}
-	c.pend = append(c.pend, b...)
-	if c.lazy {
-		// Bytes from the hub to auth's callout have no window: nothing
-		// here waits for an ack. The callout closes a stream with more
-		// than 8 MiB unread, so a large upload to a slow app fails.
-		c.lastBytes.Store(time.Now().UnixMilli())
-	}
-	if len(c.pend) >= outBytes {
-		c.flushLocked()
-		return len(b), nil
-	}
-	if !c.queued {
+	if len(c.pend) > 0 && !c.queued {
 		c.queued = true
 		select {
 		case c.flush <- struct{}{}:
 		default:
 		}
 	}
-	return len(b), nil
+	return written, nil
+}
+
+// peerAck takes the callout's ack text message s, "ack <total>", on a
+// stream with a window, and wakes the writers. An ack that does not parse,
+// goes backwards or is above the bytes sent closes the stream with 1008.
+// Text on a stream without a window is ignored. It runs inside the
+// JavaScript message event, so it must not block.
+func (c *wsConn) peerAck(s string) {
+	c.lastBytes.Store(time.Now().UnixMilli())
+	c.mu.Lock()
+	if !c.window || c.closed {
+		c.mu.Unlock()
+		return
+	}
+	digits, ok := strings.CutPrefix(s, "ack ")
+	total, err := strconv.ParseInt(digits, 10, 64)
+	if !ok || err != nil || total < c.peerAcked || total > c.sent {
+		c.mu.Unlock()
+		logf("lazy: bad ack %q, closing the stream", s)
+		c.CloseWith(1008, "bad ack")
+		return
+	}
+	c.peerAcked = total
+	c.cond.Broadcast()
+	c.mu.Unlock()
 }
 
 // flushLocked sends everything queued, in messages of at most outBytes.
@@ -245,12 +297,14 @@ func (c *wsConn) CloseWith(code int, reason string) error {
 }
 
 // startLazy makes c a lazy hub's stream: Read acks what it passes on, and
-// c closes after lazyStreamIdle without bytes. The timer runs only while c
-// is open, so an idle hub has none.
-func (c *wsConn) startLazy() {
+// c closes after lazyStreamIdle without bytes. If window is true, Write
+// also waits for the callout's acks. The timer runs only while c is open,
+// so an idle hub has none.
+func (c *wsConn) startLazy(window bool) {
 	c.lastBytes.Store(time.Now().UnixMilli())
 	c.mu.Lock()
 	c.lazy = true
+	c.window = window
 	c.idle = time.AfterFunc(lazyStreamIdle, c.checkIdle)
 	c.mu.Unlock()
 }

@@ -383,11 +383,16 @@ func useToken(id string) {
 // auth's message as the body. These are the errors for a used name, a too
 // long name, an unknown device and a bad or stale passkey answer, and auth
 // writes their messages for the user. ResourceExhausted becomes 429, as on
-// the login routes. Every other error, including a transport error, is
-// logged and answered with 502 "request failed".
+// the login routes. A stream that auth's callout refused becomes 503 "auth
+// unavailable". Every other error, including a transport error, is logged
+// and answered with 502 "request failed".
 func authError(err error) *response {
 	if rateLimited(err) {
 		return passkeyError(rateLimitedMsg, 429)
+	}
+	if errors.Is(err, errDialRefused) {
+		logf("web: passkeys: %v", err)
+		return passkeyError("auth unavailable", 503)
 	}
 	var ge *grpcError
 	if errors.As(err, &ge) {

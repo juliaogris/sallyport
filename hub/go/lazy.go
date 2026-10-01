@@ -27,7 +27,15 @@ import (
 // Streams are accepted without hibernation, so the object stays awake while
 // one is open. A stream closes after lazyStreamIdle without bytes. The hub
 // sends "ack <bytes>" on a stream after each ackEvery bytes it has passed
-// on, and the sender keeps at most a window of bytes unacknowledged.
+// on, and the callout keeps at most a window of bytes unacknowledged. When
+// the callout opens a stream with the header "Sallyport-Stream: ack", it
+// acks the hub's bytes the same way, and the hub keeps at most lazyWindow
+// bytes unacknowledged.
+//
+// The callout may answer a dial with "refuse <id>" on the control socket,
+// when worker.mjs has set "Sallyport-Control: refuse" on the control
+// socket's upgrade. The dial then fails at once with errDialRefused, and
+// the id is used up.
 const (
 	// streamIDHeader is the request header that carries a stream's id, in
 	// lower case as the runtime gives it.
@@ -46,11 +54,26 @@ const (
 	// sender's window is larger, so it can keep sending while an ack is on
 	// its way.
 	ackEvery = 256 << 10
+	// lazyWindow is the most bytes the hub keeps sent and not acked on a
+	// stream whose callout acks them.
+	lazyWindow = 1 << 20
+	// streamAckHeader is the request header with which auth's callout says
+	// that it acks the bytes the hub sends on the stream, with the value
+	// "ack".
+	streamAckHeader = "sallyport-stream"
 )
 
 // lazyHub holds the dials that wait for their stream.
 type lazyHub struct {
-	dials dialTable[*wsConn]
+	dials dialTable[lazyDial]
+}
+
+// lazyDial is what a waiting dial gets: its stream, or refused when auth's
+// callout answered "refuse <id>". A lazyDial with neither means the hub
+// failed to accept the stream.
+type lazyDial struct {
+	c       *wsConn
+	refused bool
 }
 
 // serve answers the requests the lazy hub takes: a stream on
@@ -78,20 +101,21 @@ func (l *lazyHub) serve(req *request) *response {
 		if sent {
 			return
 		}
-		ch <- nil
+		ch <- lazyDial{}
 		if c != nil {
 			c.CloseWith(1011, "accept failed")
 		}
 	}()
 	c = acceptWS()
-	c.startLazy()
-	ch <- c
+	c.startLazy(req.header[streamAckHeader] == "ack")
+	ch <- lazyDial{c: c}
 	sent = true
 	return &response{status: 101, ws: c}
 }
 
 // dial asks auth's callout for a stream of kind auth or app, and waits up
-// to lazyDialDeadline or until ctx ends for it.
+// to lazyDialDeadline or until ctx ends for it. The error is
+// errDialRefused when the callout refused the stream.
 func (l *lazyHub) dial(ctx context.Context, kind string) (net.Conn, error) {
 	started := time.Now()
 	var raw [32]byte
@@ -105,23 +129,12 @@ func (l *lazyHub) dial(ctx context.Context, kind string) (net.Conn, error) {
 		l.dials.cancel(id)
 		return nil, fmt.Errorf("auth is not connected")
 	}
-	timer := time.NewTimer(lazyDialDeadline)
-	defer timer.Stop()
-	var c *wsConn
-	var err error
-	select {
-	case c = <-ch:
-	case <-timer.C:
-		err = fmt.Errorf("no %s stream within %v", kind, lazyDialDeadline)
-	case <-ctx.Done():
-		err = fmt.Errorf("%s dial: %w", kind, ctx.Err())
-	}
-	// A stream that arrived as the dial gave up is used.
-	if err != nil && !l.dials.cancel(id) {
-		c, err = <-ch, nil
-	}
-	// A nil stream means the hub failed to accept it.
-	if err == nil && c == nil {
+	d, err := l.dials.wait(ctx, id, ch, lazyDialDeadline, kind)
+	switch {
+	case err != nil:
+	case d.refused:
+		err = errDialRefused
+	case d.c == nil:
 		err = fmt.Errorf("%s stream not accepted", kind)
 	}
 	result := "paired"
@@ -130,9 +143,18 @@ func (l *lazyHub) dial(ctx context.Context, kind string) (net.Conn, error) {
 	}
 	logf("lazy: cold %s dial %s in %d ms", kind, result, time.Since(started).Milliseconds())
 	if err != nil {
+		// A nil *wsConn in the net.Conn would not compare equal to nil.
 		return nil, err
 	}
-	return c, nil
+	return d.c, nil
+}
+
+// refuse ends the dial for id as refused, if it still waits for its stream.
+// The id is then used up.
+func (l *lazyHub) refuse(id string) {
+	if ch, ok := l.dials.take(id); ok {
+		ch <- lazyDial{refused: true}
+	}
 }
 
 // connected reports whether a verified control socket is open.

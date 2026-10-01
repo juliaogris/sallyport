@@ -60,14 +60,19 @@ func (l *lazyHub) appDialer() appDialer {
 }
 
 // forward sends req to the app service at host over a connection from
-// dial, as the user with the given certificate. A dial, TLS or HTTP failure logs the
-// error and returns a 502 "app unavailable". A 101 from the app returns a
-// 502 that says so.
+// dial, as the user with the given certificate. A dial, TLS or HTTP
+// failure logs the error and returns a 502 "app unavailable". A dial that
+// auth's callout refused returns a 503 "app service busy". A 101 from the
+// app returns a 502 that says so.
 func (h *hub) forward(dial appDialer, cert tls.Certificate, host string, req *request) *response {
 	res, err := h.forwardInner(dial, cert, host, req)
 	if errors.Is(err, errSwitchingProtocols) {
 		logf("appproxy: %v", err)
 		return textError(err.Error(), 502)
+	}
+	if errors.Is(err, errDialRefused) {
+		logf("appproxy: %v", err)
+		return textError("app service busy", 503)
 	}
 	if err != nil {
 		logf("appproxy: %v", err)

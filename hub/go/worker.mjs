@@ -175,7 +175,9 @@ class program {
         ws.accept();
         p.sockets.set(id, ws);
         ws.addEventListener('message', (e) => {
-          if (typeof e.data === 'string' || p.exited) return;
+          if (p.exited) return;
+          // A text message is a lazy stream's ack, which Go checks.
+          if (typeof e.data === 'string') return p.api.text(id, e.data);
           const d = new Uint8Array(e.data);
           for (let off = 0; off < d.length; off += inBuf.length) {
             const k = Math.min(d.length - off, inBuf.length);
@@ -440,12 +442,14 @@ export class Hub extends DurableObject {
     const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
     ws.serializeAttachment({ acceptedMs: Date.now(), nonce: Array.from(nonce), verified: false });
     ws.send(nonce);
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    // The header tells the callout that it may answer a dial with
+    // "refuse <id>".
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sallyport-Control': 'refuse' } });
   }
 
   // Handles a message on a control socket: the challenge reply while it is
-  // pending. A verified socket that sends anything is closed. "ping" never
-  // arrives here.
+  // pending, and "refuse <id>" once it is verified. A verified socket that
+  // sends anything else is closed. "ping" never arrives here.
   async webSocketMessage(ws, msg) {
     if (!this.lazy) return closeWS(ws, 1011, 'no handler');
     this.prune();
@@ -453,8 +457,21 @@ export class Hub extends DurableObject {
     const a = ws.deserializeAttachment();
     if (!a) return closeWS(ws, 1008, 'unknown socket');
     if (a.verified) {
-      console.log('lazy: unexpected message on the control socket, closing it');
-      return closeWS(ws, 1008, 'unexpected message');
+      const m = typeof msg === 'string' ? /^refuse ([A-Za-z0-9_-]{43})$/.exec(msg) : null;
+      if (!m) {
+        console.log('lazy: unexpected message on the control socket, closing it');
+        return closeWS(ws, 1008, 'unexpected message');
+      }
+      // A dial waits only while this instance's program runs, so a refuse
+      // for no running program has no dial to end.
+      if (current && current.owner === this && !current.exited && current.api) {
+        try {
+          current.api.refuse(m[1]);
+        } catch (e) {
+          console.log('lazy: refuse: ' + e);
+        }
+      }
+      return;
     }
     const reply = typeof msg === 'string' ? new Uint8Array(0) : new Uint8Array(msg);
     const err = await this.verifyReply(a.nonce, reply);
