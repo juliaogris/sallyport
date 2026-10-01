@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,15 +21,36 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// The test users. Alice has a passkey. Bob has an invite.
+// The test users. Alice has a passkey called AliceDevice. Bob has an
+// invite.
 const (
 	Alice       = "alice"
 	AliceCredID = "cred-alice"
+	AliceDevice = "passkey"
 	Bob         = "bob"
 	BobInvite   = "tok-bob"
 	BobCredID   = "cred-bob"
 	RPID        = LoginHost
 )
+
+// AliceDeviceAdded is when Alice's passkey was added.
+var AliceDeviceAdded = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// PrivilegeTokenTTL is how long a privilege token lives, as in auth.
+const PrivilegeTokenTTL = 5 * time.Minute
+
+// Device is one MFA device of a user. Every device is a passkey.
+type Device struct {
+	Name    string
+	CredID  string
+	AddedAt time.Time
+}
+
+// userToken is a privilege token: who it is for and when it expires.
+type userToken struct {
+	user    string
+	expires time.Time
+}
 
 // FakeAuth stands in for Teleport's auth service behind the callout. It
 // keeps callout streams open to a hub and answers the calls the hub makes
@@ -43,12 +66,29 @@ type FakeAuth struct {
 	app     map[string]*session
 	calls   []Call
 	sockets map[*websocket.Conn]bool
+	// devices are each user's MFA devices.
+	devices map[string][]Device
+	// manageChallenges are the manage-devices challenges issued and not
+	// yet answered, each with its user. An answer uses one up.
+	manageChallenges map[string]string
+	// registering are the users with a register challenge issued and not
+	// yet finished. A finish needs one and uses it up.
+	registering map[string]struct{}
+	// tokens are the privilege tokens by ID. A user has at most one.
+	tokens map[string]*userToken
 	// LoginChallenge is the challenge in every login challenge.
 	LoginChallenge []byte
 	// RegisterChallenge is the challenge in every register challenge.
 	RegisterChallenge []byte
 	// rateLimited makes the challenge calls fail with ResourceExhausted.
 	rateLimited bool
+}
+
+// Devices returns user's MFA devices.
+func (a *FakeAuth) Devices(user string) []Device {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]Device(nil), a.devices[user]...)
 }
 
 // SetRateLimited makes CreateAuthenticateChallenge and
@@ -96,6 +136,10 @@ func NewFakeAuth(p *PKI) (*FakeAuth, error) {
 		web:               make(map[string]*session),
 		app:               make(map[string]*session),
 		sockets:           make(map[*websocket.Conn]bool),
+		devices:           map[string][]Device{Alice: {{Name: AliceDevice, CredID: AliceCredID, AddedAt: AliceDeviceAdded}}},
+		manageChallenges:  map[string]string{},
+		registering:       map[string]struct{}{},
+		tokens:            map[string]*userToken{},
 		LoginChallenge:    randomBytes(32),
 		RegisterChallenge: randomBytes(32),
 	}
@@ -197,6 +241,15 @@ func (a *FakeAuth) ExpireWebSessions() {
 	}
 }
 
+// ExpireUserTokens makes every privilege token expired.
+func (a *FakeAuth) ExpireUserTokens() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, t := range a.tokens {
+		t.expires = time.Now().Add(-time.Minute)
+	}
+}
+
 // ExpireAppSessions makes every app session expired.
 func (a *FakeAuth) ExpireAppSessions() {
 	a.mu.Lock()
@@ -248,9 +301,16 @@ func (a *FakeAuth) newWebSession(user string) (*session, error) {
 const (
 	codeInvalidArgument   = 3
 	codeNotFound          = 5
+	codeAlreadyExists     = 6
 	codePermissionDenied  = 7
 	codeResourceExhausted = 8
 	codeUnimplemented     = 12
+)
+
+// The teleport.mfa.v1.ChallengeScope values the hubs use.
+const (
+	scopePasswordlessLogin = 2
+	scopeManageDevices     = 4
 )
 
 func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
@@ -308,23 +368,17 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 		}
 		resp = pbMsg(nil).msg(1, s.encode())
 	case "CreateAuthenticateChallenge":
-		cred := pbMsg(nil).str(1, "public-key").bytes(2, []byte(AliceCredID))
-		opts := pbMsg(nil).bytes(1, a.LoginChallenge).int(2, 60000).str(3, RPID).msg(4, cred).str(6, "required")
-		resp = pbMsg(nil).msg(3, pbMsg(nil).msg(1, opts))
+		resp, code, message = a.createAuthenticateChallenge(client, req)
 	case "CreateRegisterChallenge":
-		if req.str(1) != BobInvite {
-			code, message = codeNotFound, "invite not found"
-			break
-		}
-		opts := pbMsg(nil).
-			bytes(1, a.RegisterChallenge).
-			msg(2, pbMsg(nil).str(1, RPID).str(2, "sallyport")).
-			msg(3, pbMsg(nil).bytes(1, []byte("user-bob")).str(2, Bob).str(3, Bob)).
-			msg(4, pbMsg(nil).str(1, "public-key").int(2, -7)).
-			int(5, 60000).
-			str(7, "none").
-			msg(9, pbMsg(nil).int(2, 1).str(3, "required"))
-		resp = pbMsg(nil).msg(3, pbMsg(nil).msg(1, opts))
+		resp, code, message = a.createRegisterChallenge(client, req)
+	case "GetMFADevices":
+		resp, code, message = a.getMFADevices(client)
+	case "AddMFADeviceSync":
+		resp, code, message = a.addMFADeviceSync(client, req)
+	case "DeleteMFADeviceSync":
+		code, message = a.deleteMFADeviceSync(client, req)
+	case "CreatePrivilegeToken":
+		resp, code, message = a.createPrivilegeToken(client, req)
 	case "ChangeUserAuthentication":
 		cred := req.msg(3).msg(3)
 		if req.str(1) != BobInvite || string(cred.bytes(2)) != BobCredID {
@@ -353,6 +407,258 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 	w.Header().Set("Grpc-Message", "")
 }
 
+// createAuthenticateChallenge answers a passwordless login challenge with
+// LoginChallenge, or a manage-devices challenge for the user in the client
+// certificate with a challenge of its own that one answer uses up.
+func (a *FakeAuth) createAuthenticateChallenge(client string, req pbFields) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	scope := req.msg(6).int(1)
+	var challenge []byte
+	var credIDs []string
+	switch {
+	case req.has(4) && scope == scopePasswordlessLogin:
+		challenge = a.LoginChallenge
+		credIDs = []string{AliceCredID}
+	case req.has(3) && scope == scopeManageDevices:
+		if a.devices[client] == nil {
+			return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+		}
+		challenge = randomBytes(32)
+		a.manageChallenges[string(challenge)] = client
+		credIDs = a.credIDs(client)
+	default:
+		return nil, codeInvalidArgument, "unsupported challenge request"
+	}
+	opts := pbMsg(nil).bytes(1, challenge).int(2, 60000).str(3, RPID)
+	for _, id := range credIDs {
+		opts = opts.msg(4, credential(id))
+	}
+	opts = opts.str(6, "required")
+	return pbMsg(nil).msg(3, pbMsg(nil).msg(1, opts)), 0, ""
+}
+
+// credIDs returns the credential IDs of user's devices. The caller holds
+// a.mu.
+func (a *FakeAuth) credIDs(user string) []string {
+	var ids []string
+	for _, d := range a.devices[user] {
+		ids = append(ids, d.CredID)
+	}
+	return ids
+}
+
+// credential returns a webauthn.CredentialDescriptor for credID.
+func credential(credID string) pbMsg {
+	return pbMsg(nil).str(1, "public-key").bytes(2, []byte(credID))
+}
+
+// verifyAssertion checks an MFAAuthenticateResponse as an answer to a
+// manage-devices challenge issued to user, and uses the challenge up. The
+// challenge is read from the clientDataJSON, which the tests fill in as a
+// browser would. Only the challenge and the credential ID are checked.
+// The caller holds a.mu.
+//
+// Auth keeps a login challenge apart from the user's own challenges, so an
+// answer to one fails as a missing session, not as a wrong scope.
+func (a *FakeAuth) verifyAssertion(user string, resp pbFields) (int, string) {
+	webauthn := resp.msg(3)
+	var clientData struct {
+		Challenge string `json:"challenge"`
+	}
+	json.Unmarshal(webauthn.msg(3).bytes(1), &clientData)
+	challenge, _ := base64.RawURLEncoding.DecodeString(clientData.Challenge)
+	if a.manageChallenges[string(challenge)] != user {
+		return codePermissionDenied, fmt.Sprintf("MFA response validation failed: session data for user %q not found", user)
+	}
+	delete(a.manageChallenges, string(challenge))
+	credID := string(webauthn.bytes(2))
+	for _, d := range a.devices[user] {
+		if d.CredID == credID {
+			return 0, ""
+		}
+	}
+	return codePermissionDenied, fmt.Sprintf("MFA response validation failed: unknown credential %q", credID)
+}
+
+// createPrivilegeToken answers with a new privilege token for the user in
+// the client certificate after a manage-devices answer. It replaces the
+// user's earlier token, as auth does.
+func (a *FakeAuth) createPrivilegeToken(client string, req pbFields) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.devices[client] == nil {
+		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+	}
+	if !req.has(1) {
+		return nil, codeInvalidArgument, "second factor authentication required"
+	}
+	if code, message := a.verifyAssertion(client, req.msg(1)); code != 0 {
+		return nil, code, message
+	}
+	for id, t := range a.tokens {
+		if t.user == client {
+			delete(a.tokens, id)
+		}
+	}
+	id := hex.EncodeToString(randomBytes(16))
+	t := &userToken{user: client, expires: time.Now().Add(PrivilegeTokenTTL).Truncate(time.Second)}
+	a.tokens[id] = t
+	meta := pbMsg(nil).str(1, id).msg(6, pbMsg(nil).int(1, t.expires.Unix()))
+	return pbMsg(nil).str(1, "user_token").str(2, "privilege").str(3, "v3").msg(4, meta).msg(5, pbMsg(nil).str(1, client)), 0, ""
+}
+
+// privilegeTokenUser returns the user of a privilege token that has not
+// expired, or "". The caller holds a.mu.
+func (a *FakeAuth) privilegeTokenUser(id string) string {
+	t := a.tokens[id]
+	if t == nil || t.expires.Before(time.Now()) {
+		return ""
+	}
+	return t.user
+}
+
+// createRegisterChallenge answers a register challenge for the user of an
+// invite or privilege token, or for the user in the client certificate
+// after a manage-devices answer. An unknown or expired token gets auth's
+// "invalid token".
+func (a *FakeAuth) createRegisterChallenge(client string, req pbFields) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	user := Bob
+	switch {
+	case req.str(1) == BobInvite:
+	case req.str(1) != "":
+		user = a.privilegeTokenUser(req.str(1))
+		if user == "" {
+			return nil, codePermissionDenied, "invalid token"
+		}
+	case req.has(4):
+		if a.devices[client] == nil {
+			return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+		}
+		if code, message := a.verifyAssertion(client, req.msg(4)); code != 0 {
+			return nil, code, message
+		}
+		user = client
+	default:
+		return nil, codeInvalidArgument, "token or existing MFA response required"
+	}
+	a.registering[user] = struct{}{}
+	opts := pbMsg(nil).
+		bytes(1, a.RegisterChallenge).
+		msg(2, pbMsg(nil).str(1, RPID).str(2, "sallyport")).
+		msg(3, pbMsg(nil).bytes(1, []byte("user-"+user)).str(2, user).str(3, user)).
+		msg(4, pbMsg(nil).str(1, "public-key").int(2, -7)).
+		int(5, 60000)
+	for _, id := range a.credIDs(user) {
+		opts = opts.msg(6, credential(id))
+	}
+	opts = opts.str(7, "none").msg(9, pbMsg(nil).int(2, 1).str(3, "required"))
+	return pbMsg(nil).msg(3, pbMsg(nil).msg(1, opts)), 0, ""
+}
+
+// getMFADevices lists the devices of the user in the client certificate.
+func (a *FakeAuth) getMFADevices(client string) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.devices[client] == nil {
+		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+	}
+	var resp pbMsg
+	for _, d := range a.devices[client] {
+		resp = resp.msg(1, d.encode())
+	}
+	return resp, 0, ""
+}
+
+// addMFADeviceSync adds a passkey for the user of a privilege token, or for
+// the user in the client certificate, with the checks auth makes on the
+// name and the credential ID, in auth's order. A register challenge must
+// have been issued and not finished. The token stays valid until it
+// expires, as in auth.
+func (a *FakeAuth) addMFADeviceSync(client string, req pbFields) (pbMsg, int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var user string
+	switch {
+	case req.str(1) != "":
+		user = a.privilegeTokenUser(req.str(1))
+		if user == "" {
+			return nil, codePermissionDenied, "invalid token"
+		}
+	case req.has(5) && a.devices[client] != nil:
+		user = client
+	default:
+		return nil, codePermissionDenied, fmt.Sprintf("no user %q", client)
+	}
+	name := req.str(2)
+	if len(name) > 30 {
+		return nil, codeInvalidArgument, "device name must be 30 characters or less"
+	}
+	if _, ok := a.registering[user]; !ok {
+		return nil, codeNotFound, fmt.Sprintf("session data for user %q not found", user)
+	}
+	if name == "" {
+		return nil, codeInvalidArgument, "device name required"
+	}
+	credID := string(req.msg(3).msg(3).bytes(2))
+	if credID == "" {
+		return nil, codeInvalidArgument, "credential required"
+	}
+	for _, d := range a.devices[user] {
+		if d.Name == name {
+			return nil, codeAlreadyExists, fmt.Sprintf("MFA device with name %q already exists", name)
+		}
+		if d.CredID == credID {
+			return nil, codeAlreadyExists, fmt.Sprintf("credential ID already in use by device %q", d.Name)
+		}
+	}
+	d := Device{Name: name, CredID: credID, AddedAt: time.Now().Truncate(time.Second)}
+	a.devices[user] = append(a.devices[user], d)
+	delete(a.registering, user)
+	return pbMsg(nil).msg(1, d.encode()), 0, ""
+}
+
+// deleteMFADeviceSync deletes a named device of the user in the client
+// certificate after a manage-devices answer, except the last one.
+func (a *FakeAuth) deleteMFADeviceSync(client string, req pbFields) (int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !req.has(3) {
+		return codeInvalidArgument, "deleting an MFA device requires either a privilege token or a solved authentication challenge"
+	}
+	if a.devices[client] == nil {
+		return codePermissionDenied, fmt.Sprintf("no user %q", client)
+	}
+	if code, message := a.verifyAssertion(client, req.msg(3)); code != 0 {
+		return code, message
+	}
+	name := req.str(2)
+	devices := a.devices[client]
+	i := slices.IndexFunc(devices, func(d Device) bool { return d.Name == name })
+	if i < 0 {
+		return codeNotFound, fmt.Sprintf("MFA device %q does not exist", name)
+	}
+	if len(devices) == 1 {
+		return codeInvalidArgument, "cannot delete last passwordless credential for user"
+	}
+	a.devices[client] = slices.Delete(devices, i, i+1)
+	return 0, ""
+}
+
+// encode returns the device as a types.MFADevice with the fields the hubs
+// read.
+func (d Device) encode() pbMsg {
+	return pbMsg(nil).
+		str(1, "mfa_device").
+		str(3, "v1").
+		msg(4, pbMsg(nil).str(1, d.Name)).
+		str(5, "id-"+d.CredID).
+		msg(6, pbMsg(nil).int(1, d.AddedAt.Unix())).
+		msg(10, pbMsg(nil).bytes(1, []byte(d.CredID)))
+}
+
 // grpcStatus writes a trailers-only gRPC error.
 func grpcStatus(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/grpc")
@@ -373,11 +679,12 @@ func (a *FakeAuth) authenticateWebUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
 		return
 	}
-	if in.Username != "" || in.WebAuthn.ID != AliceCredID {
+	user := a.userOfCredential(in.WebAuthn.ID)
+	if in.Username != "" || user == "" {
 		http.Error(w, `{"error":{"message":"access denied"}}`, http.StatusForbidden)
 		return
 	}
-	s, err := a.newWebSession(Alice)
+	s, err := a.newWebSession(user)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -389,6 +696,20 @@ func (a *FakeAuth) authenticateWebUser(w http.ResponseWriter, r *http.Request) {
 		"metadata": map[string]string{"name": s.name},
 		"spec":     map[string]any{"user": s.user, "bearer_token": s.bearer},
 	})
+}
+
+// userOfCredential returns the user whose passkey has credID, or "".
+func (a *FakeAuth) userOfCredential(credID string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for user, devices := range a.devices {
+		for _, d := range devices {
+			if d.CredID == credID {
+				return user
+			}
+		}
+	}
+	return ""
 }
 
 // encode returns the session as a types.WebSessionV2 with the fields the
@@ -440,7 +761,7 @@ func (m pbMsg) int(n protowire.Number, v int64) pbMsg {
 }
 
 // pbFields is a decoded message. Only varint and length-delimited fields
-// are kept, the last value of each.
+// are kept, the last value of each. A varint is kept as its encoding.
 type pbFields map[protowire.Number][]byte
 
 func decodeFields(b []byte) pbFields {
@@ -459,6 +780,13 @@ func decodeFields(b []byte) pbFields {
 			}
 			f[num] = v
 			b = b[n:]
+		case protowire.VarintType:
+			_, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return f
+			}
+			f[num] = b[:n]
+			b = b[n:]
 		default:
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
@@ -473,3 +801,18 @@ func decodeFields(b []byte) pbFields {
 func (f pbFields) str(n protowire.Number) string   { return string(f[n]) }
 func (f pbFields) bytes(n protowire.Number) []byte { return f[n] }
 func (f pbFields) msg(n protowire.Number) pbFields { return decodeFields(f[n]) }
+
+// has reports whether field n is set, even to an empty message.
+func (f pbFields) has(n protowire.Number) bool {
+	_, ok := f[n]
+	return ok
+}
+
+// int returns a varint field, or 0.
+func (f pbFields) int(n protowire.Number) int64 {
+	v, m := protowire.ConsumeVarint(f[n])
+	if m < 0 {
+		return 0
+	}
+	return int64(v)
+}

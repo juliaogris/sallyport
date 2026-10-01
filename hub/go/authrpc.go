@@ -36,6 +36,10 @@ const (
 	getWebSession               = "/proto.AuthService/GetWebSession"
 	createRegisterChallenge     = "/proto.AuthService/CreateRegisterChallenge"
 	changeUserAuthentication    = "/proto.AuthService/ChangeUserAuthentication"
+	getMFADevices               = "/proto.AuthService/GetMFADevices"
+	addMFADeviceSync            = "/proto.AuthService/AddMFADeviceSync"
+	deleteMFADeviceSync         = "/proto.AuthService/DeleteMFADeviceSync"
+	createPrivilegeToken        = "/proto.AuthService/CreatePrivilegeToken"
 	// authenticateWebUserPasswordless is the legacy HTTP route for
 	// AuthenticateWebUser. A passwordless login has an empty user, so the
 	// path has an empty segment, as the Go proxy sends it.

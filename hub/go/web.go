@@ -4,7 +4,6 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,7 +62,7 @@ func (h *hub) loginHostRequest(req *request) *response {
 		case !ok:
 			return textError("not found", 404)
 		case step == "begin":
-			v, err = h.inviteBegin(token)
+			v, err = h.registerChallengeFor(token)
 		case step == "finish":
 			return h.inviteFinish(token, req.body)
 		default:
@@ -71,6 +70,16 @@ func (h *hub) loginHostRequest(req *request) *response {
 		}
 	case req.method == "POST" && strings.HasPrefix(p, "/web/launch/"):
 		return h.launch(req, strings.TrimPrefix(p, "/web/launch/"))
+	case req.method == "GET" && p == "/web/passkeys":
+		return h.showPasskeys(req)
+	case p == "/webapi/passkeys" || strings.HasPrefix(p, "/webapi/passkeys/"):
+		return h.passkeyAPI(req, strings.TrimPrefix(strings.TrimPrefix(p, "/webapi/passkeys"), "/"))
+	case req.method == "GET" && p == "/web/add-passkey":
+		return html(addPasskeyPage)
+	case req.method == "POST" && p == "/webapi/add-passkey/begin":
+		return h.addPasskeyBegin(req.body)
+	case req.method == "POST" && p == "/webapi/add-passkey/finish":
+		return h.addPasskeyFinish(req.body)
 	default:
 		return textError("not found", 404)
 	}
@@ -176,30 +185,31 @@ func (h *hub) handoff(body []byte) *response {
 
 // webSession returns the logged-in user and the web session, if the
 // session cookie names a web session that auth has and that has not
-// expired.
-func (h *hub) webSession(req *request) (string, *webSession) {
+// expired. The error is the failed call to auth, when the session is nil
+// because of one.
+func (h *hub) webSession(req *request) (string, *webSession, error) {
 	value, ok := req.cookie(sessionCookie)
 	if !ok {
-		return "", nil
+		return "", nil, nil
 	}
 	user, sid, ok := strings.Cut(value, ":")
 	if !ok {
-		return "", nil
+		return "", nil, nil
 	}
 	resp, err := h.auth.call(getWebSession, getWebSessionRequest(user, sid))
 	if err != nil {
 		logf("web: GetWebSession: %v", err)
-		return "", nil
+		return "", nil, err
 	}
 	s := sessionOf(resp)
 	if s == nil || !s.unexpired() {
-		return "", nil
+		return "", nil, nil
 	}
-	return user, s
+	return user, s, nil
 }
 
 func (h *hub) dashboard(req *request) *response {
-	user, s := h.webSession(req)
+	user, s, _ := h.webSession(req)
 	if s == nil {
 		return redirect("/web/login")
 	}
@@ -208,7 +218,7 @@ func (h *hub) dashboard(req *request) *response {
 		fmt.Fprintf(&b, `<form method="post" action="/web/launch/%s"><button>%s</button></form>`, a.name, a.name)
 	}
 	return html(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">` + style + `<title>sallyport</title>
-<p>Logged in as ` + user + `.</p>` + b.String() + `<form method="post" action="/web/logout"><button>Log out</button></form>`)
+<p>Logged in as ` + user + `.</p>` + b.String() + `<p><a href="/web/passkeys">Passkeys</a></p><form method="post" action="/web/logout"><button>Log out</button></form>`)
 }
 
 func (h *hub) launch(req *request, name string) *response {
@@ -221,17 +231,13 @@ func (h *hub) launch(req *request, name string) *response {
 	if start == "" {
 		return textError("not found", 404)
 	}
-	user, s := h.webSession(req)
+	user, s, _ := h.webSession(req)
 	if s == nil {
 		return redirect("/web/login")
 	}
 	publicAddr := name + "-" + h.cfg.owner + "." + h.cfg.domain
 	sid, bearer, err := func() (string, string, error) {
-		key := s.tlsPriv
-		if len(key) == 0 {
-			key = s.privKey
-		}
-		cert, err := h.userCert(s.tlsCert, key)
+		cert, err := h.sessionCert(s)
 		if err != nil {
 			return "", "", err
 		}
@@ -313,7 +319,9 @@ func (h *hub) loginFinish(assertion []byte) *response {
 	return sessionResponse(user, sid, err)
 }
 
-func (h *hub) inviteBegin(token string) (map[string]any, error) {
+// registerChallengeFor asks auth for WebAuthn creation options for the user
+// of token, an invite or a privilege token, as the pages read them.
+func (h *hub) registerChallengeFor(token string) (map[string]any, error) {
 	resp, err := h.auth.call(createRegisterChallenge, createRegisterChallengeRequest(token))
 	if err != nil {
 		return nil, err
@@ -327,35 +335,15 @@ func (h *hub) inviteBegin(token string) (map[string]any, error) {
 
 func (h *hub) inviteFinish(token string, body []byte) *response {
 	user, sid, err := func() (string, string, error) {
-		var cred struct {
-			Type     *string `json:"type"`
-			RawID    string  `json:"rawId"`
-			Response struct {
-				ClientDataJSON    string `json:"clientDataJSON"`
-				AttestationObject string `json:"attestationObject"`
-			} `json:"response"`
-		}
-		if err := json.Unmarshal(body, &cred); err != nil {
+		var c credential
+		if err := json.Unmarshal(body, &c); err != nil {
 			return "", "", fmt.Errorf("credential: %w", err)
 		}
-		dec := base64.RawURLEncoding.DecodeString
-		rawID, err := dec(cred.RawID)
+		cred, err := c.proto()
 		if err != nil {
-			return "", "", err
+			return "", "", fmt.Errorf("credential: %w", err)
 		}
-		cd, err := dec(cred.Response.ClientDataJSON)
-		if err != nil {
-			return "", "", err
-		}
-		att, err := dec(cred.Response.AttestationObject)
-		if err != nil {
-			return "", "", err
-		}
-		typ := "public-key"
-		if cred.Type != nil {
-			typ = *cred.Type
-		}
-		resp, err := h.auth.call(changeUserAuthentication, changeUserAuthenticationRequest(token, typ, rawID, cd, att))
+		resp, err := h.auth.call(changeUserAuthentication, changeUserAuthenticationRequest(token, cred))
 		if err != nil {
 			return "", "", err
 		}
@@ -383,6 +371,17 @@ func sessionResponse(user, sid string, err error) *response {
 	}
 	logf("web: web session for %q", user)
 	return jsonResponse(map[string]bool{"ok": true}).add("set-cookie", setCookie(sessionCookie, user+":"+sid))
+}
+
+// sessionCert returns the web session's user certificate, for calls to
+// auth as the user. Auth sets tlsPriv only when it issues separate SSH and
+// TLS keys. Otherwise privKey is both.
+func (h *hub) sessionCert(s *webSession) (tls.Certificate, error) {
+	key := s.tlsPriv
+	if len(key) == 0 {
+		key = s.privKey
+	}
+	return h.userCert(s.tlsCert, key)
 }
 
 // userCert parses a user's PEM certificate and key from auth.

@@ -37,6 +37,10 @@ type hub struct {
 	appMu     sync.Mutex
 	appTunnel *appTunnel
 
+	// tokenMu serialises the finish of the add-passkey route, so that two
+	// requests with the same privilege token cannot both add a passkey.
+	tokenMu sync.Mutex
+
 	pool *authPool
 	auth *hubAuth
 }

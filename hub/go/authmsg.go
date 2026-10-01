@@ -12,16 +12,131 @@ const (
 	// scopePasswordlessLogin is teleport.mfa.v1.ChallengeScope for a
 	// passwordless login.
 	scopePasswordlessLogin = 2
+	// scopeManageDevices is teleport.mfa.v1.ChallengeScope for adding and
+	// removing devices.
+	scopeManageDevices = 4
 	// deviceTypeWebAuthn is proto.DeviceType for WebAuthn.
 	deviceTypeWebAuthn = 3
 	// deviceUsagePasswordless is proto.DeviceUsage for a passkey.
 	deviceUsagePasswordless = 2
+	// mfaDeviceWebAuthn is the webauthn field of a types.MFADevice.
+	mfaDeviceWebAuthn = 10
 )
 
 // CreateAuthenticateChallengeRequest with passwordless set and the
 // passwordless login scope.
 func passwordlessChallengeRequest() []byte {
 	return pb(nil).msg(4, nil).msg(6, pb(nil).int(1, scopePasswordlessLogin))
+}
+
+// manageDevicesChallengeRequest is a CreateAuthenticateChallengeRequest for
+// the calling user with the manage devices scope.
+func manageDevicesChallengeRequest() []byte {
+	return pb(nil).msg(3, nil).msg(6, pb(nil).int(1, scopeManageDevices))
+}
+
+// getMFADevicesRequest lists the calling user's devices.
+func getMFADevicesRequest() []byte { return pb(nil) }
+
+// credentialAssertion is a webauthn.CredentialAssertionResponse, the
+// browser's answer to an authenticate challenge.
+func credentialAssertion(credType string, rawID, clientData, authData, signature, userHandle []byte) pb {
+	resp := pb(nil).bytes(1, clientData).bytes(2, authData).bytes(3, signature).bytes(4, userHandle)
+	return pb(nil).str(1, credType).bytes(2, rawID).msg(3, resp)
+}
+
+// mfaAuthenticateResponse wraps a CredentialAssertionResponse as an
+// MFAAuthenticateResponse.
+func mfaAuthenticateResponse(assertion pb) pb { return pb(nil).msg(3, assertion) }
+
+// credentialCreation is a webauthn.CredentialCreationResponse, the
+// browser's new credential.
+func credentialCreation(credType string, rawID, clientData, attestation []byte) pb {
+	att := pb(nil).bytes(1, clientData).bytes(2, attestation)
+	return pb(nil).str(1, credType).bytes(2, rawID).msg(3, att)
+}
+
+// passkeyRegisterChallengeRequest is a CreateRegisterChallengeRequest for a
+// new passkey of the calling user, confirmed with existing, an
+// MFAAuthenticateResponse.
+func passkeyRegisterChallengeRequest(existing pb) []byte {
+	return pb(nil).int(2, deviceTypeWebAuthn).int(3, deviceUsagePasswordless).msg(4, existing)
+}
+
+// addMFADeviceSyncRequest adds cred, a CredentialCreationResponse, as a
+// passkey called name for the calling user.
+func addMFADeviceSyncRequest(name string, cred pb) []byte {
+	return pb(nil).str(2, name).msg(3, pb(nil).msg(3, cred)).int(4, deviceUsagePasswordless).msg(5, nil)
+}
+
+// deleteMFADeviceSyncRequest removes the calling user's device called name,
+// confirmed with existing, an MFAAuthenticateResponse.
+func deleteMFADeviceSyncRequest(name string, existing pb) []byte {
+	return pb(nil).str(2, name).msg(3, existing)
+}
+
+// createPrivilegeTokenRequest asks for a privilege token of the calling
+// user, confirmed with existing, an MFAAuthenticateResponse.
+func createPrivilegeTokenRequest(existing pb) []byte {
+	return pb(nil).msg(1, existing)
+}
+
+// addMFADeviceWithTokenRequest adds cred, a CredentialCreationResponse, as a
+// passkey called name for the user of a privilege token.
+func addMFADeviceWithTokenRequest(token, name string, cred pb) []byte {
+	return pb(nil).str(1, token).str(2, name).msg(3, pb(nil).msg(3, cred)).int(4, deviceUsagePasswordless)
+}
+
+// privilegeToken is what the hub reads of a types.UserTokenV3.
+type privilegeToken struct {
+	id      string
+	expires time.Time
+}
+
+// privilegeTokenOf reads a CreatePrivilegeToken response, or returns nil
+// when it has no token ID.
+func privilegeTokenOf(resp fields) *privilegeToken {
+	meta := resp.msg(4)
+	id := meta.str(1)
+	if id == "" {
+		return nil
+	}
+	return &privilegeToken{id: id, expires: time.Unix(meta.msg(6).int(1), 0).UTC()}
+}
+
+// validTokenID reports whether id has the form of a user token ID from
+// auth: 32 lower case hex characters.
+func validTokenID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, c := range []byte(id) {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// passkey is what the passkeys page shows of a types.MFADevice.
+type passkey struct {
+	Name string `json:"name"`
+	// AddedAt is RFC 3339 in UTC, to the second.
+	AddedAt string `json:"addedAt"`
+}
+
+// passkeysOf reads the WebAuthn devices of a GetMFADevicesResponse. A
+// device of another kind, such as TOTP, is left out.
+func passkeysOf(resp fields) []passkey {
+	list := []passkey{}
+	for _, d := range resp.msgs(1) {
+		if !d.has(mfaDeviceWebAuthn) {
+			continue
+		}
+		added := time.Unix(d.msg(6).int(1), 0).UTC().Format(time.RFC3339)
+		list = append(list, passkey{Name: d.msg(4).str(1), AddedAt: added})
+	}
+	return list
 }
 
 func getWebSessionRequest(user, sid string) []byte {
@@ -40,11 +155,9 @@ func createRegisterChallengeRequest(token string) []byte {
 	return pb(nil).str(1, token).int(2, deviceTypeWebAuthn).int(3, deviceUsagePasswordless)
 }
 
-// changeUserAuthenticationRequest registers a passkey with the attestation
-// from the browser.
-func changeUserAuthenticationRequest(token, credType string, rawID, clientData, attestation []byte) []byte {
-	att := pb(nil).bytes(1, clientData).bytes(2, attestation)
-	cred := pb(nil).str(1, credType).bytes(2, rawID).msg(3, att)
+// changeUserAuthenticationRequest registers cred, a
+// CredentialCreationResponse, as the passkey of an invite's user.
+func changeUserAuthenticationRequest(token string, cred pb) []byte {
 	return pb(nil).str(1, token).msg(3, pb(nil).msg(3, cred)).str(4, "passkey")
 }
 
