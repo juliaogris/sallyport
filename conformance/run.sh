@@ -5,10 +5,12 @@
 #   ./run.sh              # go and rust
 #   ./run.sh go           # one hub
 #   NO_BUILD=1 ./run.sh   # use the hubs as last built
+#   OUT=dir ./run.sh      # write the go test -json output to dir
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(cd .. && pwd)
-out=$(mktemp -d)
+out=${OUT:-$(mktemp -d)}
+mkdir -p "$out"
 hubs=("$@")
 if [[ ${#hubs[@]} -eq 0 ]]; then
 	hubs=(go rust)

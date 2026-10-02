@@ -1,0 +1,12 @@
+[Unit]
+Description=sallyport conformance suite against the go and rust hubs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/julia/sallyport-conformance/bin/nightly.sh
+# run.sh has its own 3 h limit. This one stops a run that hangs outside it.
+TimeoutStartSec=4h
+Nice=19
+IOSchedulingClass=idle
