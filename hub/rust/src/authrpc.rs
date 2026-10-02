@@ -509,7 +509,14 @@ async fn connect_inner(
             String::from_utf8_lossy(&alpn)
         ));
     }
-    let (send, conn) = h2::client::handshake(tls)
+    // h2 keeps a stream that the hub resets, such as a call dropped at its
+    // deadline, with the time of the reset from `std::time::Instant::now`,
+    // which panics on wasm32-unknown-unknown. With 0, h2 keeps no reset
+    // streams and never reads the clock. A late frame for such a stream
+    // gets a reset of its own.
+    let (send, conn) = h2::client::Builder::new()
+        .max_concurrent_reset_streams(0)
+        .handshake(tls)
         .await
         .map_err(|e| format!("h2 handshake: {e}"))?;
     wasm_bindgen_futures::spawn_local(async move {
