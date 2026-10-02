@@ -215,7 +215,7 @@ func (a *Agent) serve(chans <-chan ssh.NewChannel) {
 					app := a.app
 					a.mu.Unlock()
 					if app != nil {
-						if !app.put(chanConn{ch}) {
+						if !app.put(newDeadlineConn(chanConn{ch})) {
 							ch.Close()
 						}
 						return

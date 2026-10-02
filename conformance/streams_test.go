@@ -71,13 +71,13 @@ func TestAppContentLengthAndChunked(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			s := stackFor(t, mode)
 			cookies := s.appCookies(t, "bench")
-			resp := s.get(t, appHost("bench"), "/t/clte", cookies...)
+			resp := s.get(t, appHost("bench"), testapp.CLTEPath, cookies...)
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			t.Logf("status %d, %q, %v", resp.StatusCode, body, err)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
-			require.Equal(t, "abcdefghijklmnopqrstuvwxyz", string(body))
+			require.Equal(t, testapp.CLTEBody, string(body))
 		})
 	}
 }

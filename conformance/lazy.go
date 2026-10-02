@@ -341,7 +341,7 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 			ws.Close()
 		}
 	case "app":
-		if app == nil || !app.ln.put(newFlowConn(ws, acks)) {
+		if app == nil || !app.ln.put(newDeadlineConn(newFlowConn(ws, acks))) {
 			ws.Close()
 		}
 	default:

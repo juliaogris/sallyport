@@ -24,6 +24,19 @@ var (
 	GzipPlain  = []byte("hello, gzipped\n")
 )
 
+// CLTEPath is the path that answers with CLTEResponse.
+const CLTEPath = "/t/clte"
+
+// CLTEResponse has both Content-Length: 5 and Transfer-Encoding: chunked,
+// and a chunked body of 26 bytes. A client must follow the chunked
+// encoding (RFC 9112, section 6.3) and read CLTEBody.
+const CLTEResponse = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n" +
+	"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+	"d\r\nabcdefghijklm\r\nd\r\nnopqrstuvwxyz\r\n0\r\n\r\n"
+
+// CLTEBody is the body of CLTEResponse.
+const CLTEBody = "abcdefghijklmnopqrstuvwxyz"
+
 // Echo is what /t/echo returns.
 type Echo struct {
 	Method string
@@ -83,16 +96,14 @@ func Handler(dir string) http.Handler {
 			w.WriteHeader(code)
 		})
 	}
-	// /t/clte answers with both Content-Length: 5 and Transfer-Encoding:
-	// chunked, and a chunked body of 26 bytes. A client must follow the
-	// chunked encoding (RFC 9112, section 6.3).
+	// /t/clte answers with CLTEResponse. It hijacks the connection, so the
+	// conn must support read deadlines.
 	mux.HandleFunc("/t/clte", func(w http.ResponseWriter, r *http.Request) {
 		conn, buf, err := http.NewResponseController(w).Hijack()
 		if err != nil {
 			return
 		}
-		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
-		buf.WriteString("d\r\nabcdefghijklm\r\nd\r\nnopqrstuvwxyz\r\n0\r\n\r\n")
+		buf.WriteString(CLTEResponse)
 		buf.Flush()
 		conn.Close()
 	})
