@@ -21,7 +21,7 @@
 //! Without the header the hub sends without waiting.
 //!
 //! Streams are accepted without hibernation, so the object stays awake while
-//! one is open. A stream closes after [`STREAM_IDLE`] without bytes.
+//! one is open. A stream closes after [`STREAM_IDLE`] without bytes or acks.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -73,9 +73,10 @@ const MAX_PENDING_ANONYMOUS: usize = 8;
 const MAX_APP_STREAMS: usize = 32;
 /// How long a dial waits for its stream.
 pub(crate) const STREAM_WAIT: Duration = Duration::from_secs(10);
-/// A stream closes after this long without bytes in either direction. This
-/// also closes an app response that sends nothing for that long, such as a
-/// quiet server-sent events stream or a long poll.
+/// A stream closes after this long without bytes in either direction, and
+/// without an ack from a callout that acks. This also closes an app response
+/// that sends nothing for that long, such as a quiet server-sent events
+/// stream or a long poll.
 pub const STREAM_IDLE: Duration = Duration::from_secs(30);
 /// How many bytes a stream passes on between two acks. Auth's window is
 /// 1 MiB, larger than this, so it can keep sending while an ack is on its
