@@ -18,7 +18,8 @@ type request struct {
 	// bodyReader is the body of an app request, which Go reads as it
 	// arrives, or nil. Only one of body and bodyReader is set. serve closes
 	// it once the request is answered, unless bodyTaken is true, and then
-	// the reader that took it closes it.
+	// the transport that took it closes it, at the latest when the
+	// response closes.
 	bodyReader io.ReadCloser
 	bodyTaken  bool
 }

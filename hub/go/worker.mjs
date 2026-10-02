@@ -584,9 +584,7 @@ export class Hub extends DurableObject {
           console.log('glue: response: ' + e);
           // Cancelling the body stream lets Go close the upstream
           // connection.
-          try {
-            stream?.cancel();
-          } catch {}
+          stream?.cancel().catch(() => {});
           resolve(new Response('bad response', { status: 502 }));
         }
       });
@@ -849,11 +847,14 @@ function respond(status, head, body, flags, ws, stream) {
   // edge. A body of known length goes out through a FixedLengthStream, which
   // the runtime aborts when the body is cut short, so that the client sees
   // an error.
+  // The Response is built before the pipe locks stream, so that the
+  // caller can still cancel stream if the Response throws.
   const len = h.get('content-length');
   if (stream && len !== null && /^[0-9]+$/.test(len)) {
     const fixed = new FixedLengthStream(Number(len));
+    const res = new Response(fixed.readable, init);
     stream.pipeTo(fixed.writable).catch(() => {});
-    stream = fixed.readable;
+    return res;
   }
   return new Response(stream || body || null, init);
 }

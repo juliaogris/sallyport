@@ -84,6 +84,8 @@ type FakeAuth struct {
 	RegisterChallenge []byte
 	// rateLimited makes the challenge calls fail with ResourceExhausted.
 	rateLimited bool
+	// delays holds a delay per gRPC method, before the fake answers.
+	delays map[string]time.Duration
 	// lazyDial and lazyAuthDial are how lazy app and auth dials are
 	// answered, and dials counts them.
 	lazyDial     LazyDial
@@ -103,6 +105,17 @@ func (a *FakeAuth) Devices(user string) []Device {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]Device(nil), a.devices[user]...)
+}
+
+// SetDelay makes the fake wait d before it answers each call to the gRPC
+// method, such as "GetAppSession". A zero d removes the delay.
+func (a *FakeAuth) SetDelay(method string, d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.delays == nil {
+		a.delays = map[string]time.Duration{}
+	}
+	a.delays[method] = d
 }
 
 // SetRateLimited makes CreateAuthenticateChallenge and
@@ -348,7 +361,15 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 	req := decodeFields(body[5:])
 	a.mu.Lock()
 	limited := a.rateLimited
+	delay := a.delays[method]
 	a.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if limited && (method == "CreateAuthenticateChallenge" || method == "CreateRegisterChallenge") {
 		grpcStatus(w, codeResourceExhausted, "too many requests")
 		return

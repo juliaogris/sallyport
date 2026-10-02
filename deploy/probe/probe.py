@@ -29,7 +29,7 @@ import time
 BASE = os.path.expanduser("~/sallyport-probe")
 DOMAIN = "example.com"
 FREE = {
-    "streams": ["octocam"], "every": 30, "octo": False, "domain": "example.net",
+    "streams": ["octocam"], "every": 10, "octo": False, "domain": "example.net",
     "bench_file": "/1mb.bin", "stream_seconds": 5,
 }
 CLUSTERS = {
@@ -41,7 +41,7 @@ CLUSTERS = {
     "lazy": {"streams": ["octocam"], "every": 5, "octo": False},
     # The free-plan clusters on example.net share one free account's daily
     # quota of 100,000 requests, so they get a 1 MB file and a 5 s stream
-    # every 30 minutes.
+    # every 10 minutes.
     "party": FREE | {"owner": "julia"},
     "party-rust": FREE | {"owner": "rust"},
     "party-go": FREE | {"owner": "go"},

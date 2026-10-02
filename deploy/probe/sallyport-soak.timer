@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the sallyport soak load every 10 minutes
+
+[Timer]
+# 30 s past the minute, so that the soak does not start with the probe.
+OnCalendar=*-*-* *:00/10:30
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
