@@ -276,6 +276,9 @@ func (h *hub) launch(req *request, name string) *response {
 	}()
 	if err != nil {
 		logf("web: launch %s: %v", name, err)
+		if errors.Is(err, errDialRefused) {
+			return textError("auth unavailable", 503)
+		}
 		return textError("launch failed", 502)
 	}
 	return (&response{status: 303}).
