@@ -22,6 +22,7 @@ export GOTOOLCHAIN=auto
 export LLVM_CLANG=clang LLVM_AR=llvm-ar
 
 start=$(date +%s)
+started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 git -C "$repo" fetch --quiet origin main
 git -C "$repo" checkout --quiet --detach FETCH_HEAD
 commit=$(git -C "$repo" log -1 --format='%h %s')
@@ -37,7 +38,8 @@ status=0
 OUT=$day nice -n 19 ionice -c3 timeout 3h "$repo/conformance/run.sh" "${hubs[@]}" >"$day/log.txt" 2>&1 || status=$?
 
 {
-	echo "date    $(date -Is)"
+	# The window lets the probe's numbers for these minutes be set aside.
+	echo "window  $started to $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo "commit  $commit"
 	echo "minutes $(( ($(date +%s) - start) / 60 ))"
 	echo "exit    $status"
