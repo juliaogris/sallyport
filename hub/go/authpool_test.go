@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 // add adds a verified stream to p as challenge would. It returns the stream
 // and whether the pool closed another one.
@@ -92,4 +96,39 @@ func TestAuthPoolIsFullAtTwiceTheStreamLimit(t *testing.T) {
 	if p.full() {
 		t.Error("full after a release")
 	}
+}
+
+func TestAuthPoolTakeWait(t *testing.T) {
+	t.Run("stream already waiting", func(t *testing.T) {
+		p := &authPool{}
+		a, _ := add(t, p)
+		if got := p.takeWait(context.Background(), time.Hour); got != a {
+			t.Errorf("takeWait = %p, want the waiting stream %p", got, a)
+		}
+	})
+	t.Run("stream arrives during the wait", func(t *testing.T) {
+		p := &authPool{}
+		got := make(chan *wsConn)
+		go func() { got <- p.takeWait(context.Background(), time.Hour) }()
+		// takeWait may not wait yet when push runs, and then it finds the
+		// stream at once.
+		a, _ := add(t, p)
+		if c := <-got; c != a {
+			t.Errorf("takeWait = %p, want the new stream %p", c, a)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		p := &authPool{}
+		if got := p.takeWait(context.Background(), time.Millisecond); got != nil {
+			t.Errorf("takeWait = %p, want nil", got)
+		}
+	})
+	t.Run("context ends", func(t *testing.T) {
+		p := &authPool{}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := p.takeWait(ctx, time.Hour); got != nil {
+			t.Errorf("takeWait = %p, want nil", got)
+		}
+	})
 }

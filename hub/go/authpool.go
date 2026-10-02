@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"slices"
 	"sync"
+	"time"
 )
 
 const (
@@ -20,6 +22,10 @@ const (
 	// socket closes the oldest socket of the client with the most in the
 	// challenge, so sockets that never answer cannot keep auth out.
 	maxUnverified = 2 * maxAuthStreams
+	// authTakeWait is how long a call to auth waits for auth to open a
+	// stream when none is waiting, for example right after auth's streams
+	// closed.
+	authTakeWait = 5 * time.Second
 )
 
 // authPool holds the verified streams waiting for the hub, oldest first.
@@ -31,6 +37,9 @@ type authPool struct {
 	open int
 	// unverified holds the WebSockets in the challenge.
 	unverified pendingSet
+	// arrived is closed when push adds a stream, for takeWait, and then
+	// replaced.
+	arrived chan struct{}
 }
 
 // full reports whether maxAccepted verified WebSockets are open.
@@ -56,6 +65,10 @@ func (p *authPool) push(c *wsConn) bool {
 	p.open++
 	p.ready = slices.DeleteFunc(p.ready, (*wsConn).isClosed)
 	p.ready = append(p.ready, c)
+	if p.arrived != nil {
+		close(p.arrived)
+		p.arrived = nil
+	}
 	var evicted *wsConn
 	if p.open > maxAuthStreams && len(p.ready) > 1 {
 		evicted = p.ready[0]
@@ -74,6 +87,37 @@ func (p *authPool) push(c *wsConn) bool {
 func (p *authPool) take() *wsConn {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.takeLocked()
+}
+
+// takeWait returns the oldest open stream, and waits up to d or until ctx
+// ends for auth to open one if there is none. It returns nil if none
+// arrives.
+func (p *authPool) takeWait(ctx context.Context, d time.Duration) *wsConn {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		p.mu.Lock()
+		if c := p.takeLocked(); c != nil {
+			p.mu.Unlock()
+			return c
+		}
+		if p.arrived == nil {
+			p.arrived = make(chan struct{})
+		}
+		arrived := p.arrived
+		p.mu.Unlock()
+		select {
+		case <-arrived:
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (p *authPool) takeLocked() *wsConn {
 	for len(p.ready) > 0 {
 		c := p.ready[0]
 		p.ready[0] = nil

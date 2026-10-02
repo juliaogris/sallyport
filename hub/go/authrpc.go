@@ -119,15 +119,16 @@ func (h *hub) connectAuth(ctx context.Context, cert tls.Certificate, h2 bool) (*
 }
 
 // authStream returns a stream to auth: a dial of kind auth in the lazy
-// hub, and otherwise a stream from the auth pipe pool.
+// hub, and otherwise a stream from the auth pipe pool, which it waits up to
+// authTakeWait for.
 func (h *hub) authStream(ctx context.Context) (net.Conn, error) {
 	if h.lazy != nil {
 		return h.lazy.dial(ctx, "auth")
 	}
-	if stream := h.pool.take(); stream != nil {
+	if stream := h.pool.takeWait(ctx, authTakeWait); stream != nil {
 		return stream, nil
 	}
-	return nil, errors.New("no auth pipe stream")
+	return nil, fmt.Errorf("no auth pipe stream within %v", authTakeWait)
 }
 
 // unary makes one unary call within callDeadline and returns the response
