@@ -148,6 +148,7 @@ main = "front.mjs"
 routes = [
   { pattern = "julia.example.net", custom_domain = true },
   { pattern = "bench-julia.example.net", custom_domain = true },
+  { pattern = "octo-julia.example.net", custom_domain = true },
   { pattern = "octocam-julia.example.net", custom_domain = true },
 ]
 
@@ -162,7 +163,7 @@ SERVER_VERSION = "18.11.1"
 CALLOUT_HOST = "julia.example.net"
 DOMAIN = "example.net"
 OWNER = "julia"
-APPS = "bench,octocam:/stream"
+APPS = "bench,octo,octocam:/stream"
 
 [[env.party.durable_objects.bindings]]
 name = "HUB"
