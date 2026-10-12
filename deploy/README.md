@@ -1,133 +1,82 @@
-# The live deploy, 2026-09-24
+# The live deploy
 
-The hub runs on Cloudflare at `julia.example.com`. Auth and the app service
-run on the Mac and dial out to it; nothing on the Mac listens inbound.
-Three users log in with passkeys: Julia, alice and `julia-teleport`.
+Two clusters run on `homesrv`, each behind its own hub on Cloudflare. Nothing
+on homesrv listens on the internet: each cluster's auth calls out to its hub.
 
-## What runs where
+| Cluster | Hub | Cloudflare account | homesrv config |
+|---|---|---|---|
+| julia | `julia.example.com` | gmail, paid Workers plan | `deploy/homesrv/` |
+| party | `julia.example.net` | juliaogris.com, free Workers plan | `deploy/homesrv-party/` |
 
-- **Cloudflare:** `cd hub/rust && npx wrangler@4 deploy --env edge`. The `edge`
-  env serves `julia.example.com` (login host) and the app hosts
-  `bench-julia.example.com`, `octo-julia.example.com` and
-  `octocam-julia.example.com`. The edge build leaves out the `spikes` Cargo
-  feature, so `/spike/*` answers 404. Live log:
-  `npx wrangler@4 tail --env edge --format pretty`. The hub logs a
-  heartbeat line every minute.
-- **Auth:** `deploy/auth.yaml`, built from the public fork branch
-  `sallyport/auth-callout-v18.11.1`. It dials the callout to
-  `wss://julia.example.com/tunnel/auth` and sets `keep_alive_interval: 30s`.
-- **App service:** stock 18.11.1 with `deploy/app.yaml`, which points at
-  `julia.example.com:443`. Run it with
-  `TELEPORT_TLS_ROUTING_CONN_UPGRADE=yes`.
+Each hub has a login host, `julia.<domain>`, and app hosts
+`<app>-julia.<domain>` for `bench`, `octo` and `octocam`.
 
-A deploy restarts the Durable Object and drops the agent's tunnel. With
-the 30 s keepalive the agent's watchdog is 90 s. The app service reads
-the keepalive when it starts, so restart it after changing auth's value.
+## Cloudflare
 
-## Results
+Deploy from `hub/go`:
 
-- **S2 answered by octocam.** An MJPEG stream from `~/bin/octocam` plays
-  through the Durable Object.
-- **Flat per-user hosts.** `<owner>.example.com` is the login host, and
-  `<app>-<owner>.example.com` is an app host.
-- **Rebased to 18.11.1.** Public `v18.11.1` is a different commit from
-  core's, so never push core history to the fork.
-- **`base64ct` 1.6.0 bug.** It rejects some valid OpenSSH private keys
-  with `InvalidLength`. The hub identity minted for `julia.example.com` hit
-  it. See `hub/rust/vendor/russh/PATCHES.md`.
-- **Stall at 14:09.** Discovery to the agent and auth passthroughs stopped
-  while pages still loaded, until a redeploy. russh adjusts the window
-  when data arrives and then waits for the channel's queue, so a reader
-  that stops reading blocks the session loop and every other channel.
-  The patched russh closes that channel instead, and
-  `hub/rust/vendor/russh/tests/test_backpressure.rs` fails on the old code and
-  passes on the new. The hub queues up to 256 messages per channel.
-- **OctoPrint.** `octo` is back on the dashboard without WebSocket
-  forwarding. OctoPrint asks for its own login. Its SockJS client should
-  fall back to HTTP polling; not yet confirmed through the hub.
-- **Security review** of the web route: `security-review.md`.
+```
+npx wrangler@4 deploy --env edge    # julia.example.com
+npx wrangler@4 deploy --env party   # julia.example.net
+npx wrangler@4 tail --env edge --format pretty
+```
 
-## Moved to homesrv, 2026-09-28
+Both envs set `HUB_MODE = "lazy"`: the hub's Durable Object sleeps while
+nobody uses the cluster. The hub logs a heartbeat line every minute while
+it is awake. A deploy restarts the Durable Object and drops the callout,
+which auth redials within about a minute.
 
-Nothing runs on the Mac any more. Auth (the fork binary built on homesrv from
-public `v18.11.1` plus the four fork commits), the stock 18.11.1 app
-service, the bench server and octocam run on `homesrv` as systemd user units
-`sallyport-auth`, `sallyport-app`, `sallyport-bench` and
-`sallyport-octocam`, under `/home/julia/sallyport`. Lingering is on, so
+The free plan allows 100,000 requests and 13,000 GB-s of Durable Object
+time a day, and resets at 00:00 UTC. One hub fits. Three hubs on that
+account used about 14,400 GB-s a day and ran out each evening, which is
+why the party account has one hub.
+
+## homesrv
+
+Each cluster is one process of the Teleport fork with auth and the app
+service, run by a systemd user unit: `sallyport-auth` for julia and
+`sallyport-party` for party. Auth's callout has `callout_mode: on_demand`.
+The app service starts no reverse tunnel and serves the streams the
+callout opens. The other units are `sallyport-bench` and
+`sallyport-party-bench` (static bench servers), `sallyport-octocam` (the
+webcam relay) and `sallyport-proxy` (the LAN web UI). Lingering is on, so
 they start at boot. Over ssh, set `XDG_RUNTIME_DIR=/run/user/$(id -u)`
-before `systemctl --user` or `journalctl --user`. The configs and units
-are copied in `deploy/homesrv/`.
+before `systemctl --user` or `journalctl --user`.
 
-**Admin web UI.** A stock 18.11.1 proxy, `sallyport-proxy`, serves
-Teleport's web UI at `https://teleport.julia.example.com:3080`. The DNS
-record points at homesrv's LAN address, 192.168.1.200, and is not proxied
-by Cloudflare, so the UI works only at home. The name is below
-`julia.example.com`, so passkeys registered for that `rp_id` work there.
-The cert is from Let's Encrypt, issued by `lego` with a DNS-01 challenge
-and the Cloudflare token in `~/sallyport/cf-token`. The
-`sallyport-cert.timer` renews it daily when 30 days or fewer are left,
-and the proxy reloads the files every 12 hours. The proxy joined with a
-one-time token, since revoked, and pins the auth CA with `ca_pin`. The
-fork `tctl` is at `~/sallyport/bin/tctl`; run it with
-`--config ~/sallyport/deploy/auth.yaml`.
-
-## On-demand, 2026-10-01
-
-All four clusters (julia, rust, go and lazy) now run in on-demand mode.
-The hub's Durable Object sleeps while nobody uses the cluster; see
-`hub/rust/src/lazy.rs` and the design in the notes repo,
-`tracks/sallyport/lazy-hub.md`.
-
-- **Home side.** Each cluster is one fork process with auth and the app
-  service, `deploy/<cluster>/teleport.yaml`, run by the cluster's auth
-  unit (`sallyport-auth`, `sallyport-rust-auth`, `sallyport-go-auth`,
-  `sallyport-lazy`). Auth's callout has `callout_mode: on_demand`. The
-  app service starts no reverse tunnel and serves the streams the
-  callout opens. The separate app units are stopped and disabled, and
-  `auth.yaml`, `app.yaml` and `firstjoin` are gone.
 - **Binary.** The fork with on-demand mode is built on homesrv from
   `~/src/teleport-fork-coder`, branch `sallyport/lazy`, into
   `~/sallyport-lazy/bin/` (`teleport`, `tctl`, `proxymint`,
-  `appsessmint`). Older `tctl` builds reject `callout_mode`, so use
+  `appsessmint`). Both clusters run that binary. Older `tctl` builds
+  reject `callout_mode`, so use
   `~/sallyport-lazy/bin/tctl --config <cluster>/deploy/teleport.yaml`.
-- **Hub.** The envs set `HUB_MODE = "lazy"`, and the Rust envs use the
-  JavaScript front Worker `hub/rust/front.mjs`. Without `HUB_MODE` a hub
-  runs as before, with the reverse tunnel and the auth stream pool.
-- **LAN web UI.** The `sallyport-proxy` UI still works for admin tasks,
-  but it cannot reach the apps, since there is no reverse tunnel.
-- **Rollback for one cluster.** Restore its `auth.yaml` and `app.yaml`
-  from git history, point its auth unit back at `~/sallyport/bin/teleport`
-  with `auth.yaml`, enable and start its app unit, remove `HUB_MODE` and
-  the `main = "front.mjs"` line from its env, and deploy the env.
-- **Probe.** julia, rust and go are still probed every minute, so they
-  stay awake; lazy is probed every 5 minutes. From 07:55 to 08:35 UTC
-  lazy was awake 435 s of 2,400 s, only in probe minutes.
-
-## Known bugs
-
-- **A trap after a Wasm restart.** After a trap, workers-rs starts a new
-  Wasm instance. A response body from the old instance that is still
-  streaming calls into the old instance's memory on its next read, which
-  traps again with "memory access out of bounds". Each trap restarts the
-  instance once more. The new instance closes the old instance's
-  WebSockets, so auth and the agents redial within about a second each
-  time.
+- **Admin web UI.** `sallyport-proxy`, a stock 18.11.1 proxy, serves
+  Teleport's web UI at `https://teleport.julia.example.com:3080`. The DNS
+  record points at homesrv's LAN address, 192.168.1.200, and is not proxied
+  by Cloudflare, so the UI works only at home. It cannot reach the apps,
+  since there is no reverse tunnel. The cert is from Let's Encrypt,
+  issued by `lego` with a DNS-01 challenge and the Cloudflare token in
+  `~/sallyport/cf-token`. `sallyport-cert.timer` renews it daily when 30
+  days or fewer are left, and the proxy reloads the files every 12 hours.
+- **Probe.** `deploy/probe` probes julia every minute and party every 10
+  minutes, and writes one CSV row per cluster and run to
+  `~/sallyport-probe/data/`. `summary.py` prints the success rates.
+- **Nightly conformance.** See `deploy/homesrv-conformance/README.md`.
 
 ## Gotchas
 
 - `wrangler dev` does not reload `.dev.vars` on a code reload. Restart it
   after changing secrets.
-- `Response::redirect` has immutable headers in workers-rs, so it cannot
-  set cookies. Use a 303 built with `Response::empty()`.
 - `AuthenticateWebUser` is HTTP/1.1 on the legacy route
   `/v2/users//web/authenticate`, sent with TLS and no ALPN. Auth offers
   only `h2`, and `h2` goes to gRPC, which answers 415.
 - The app session TLS key is `TLSPriv`, field 15, not `Priv`.
 - Auth rate-limits `CreateAuthenticateChallenge` per client address to a
-  burst of 40 calls, then 20 a minute. Every login on a hub reaches auth from
-  the same stream, so they share one limit. The hub answers 429 when it
-  is reached.
-- The first deploy needed a `workers.dev` subdomain. Opening the Workers
-  page in the dashboard once created it.
+  burst of 40 calls, then 20 a minute. Every login on a hub reaches auth
+  from the same stream, so they share one limit. The hub answers 429 when
+  it is reached.
+- Public `v18.11.1` is a different commit from core's, so never push core
+  history to the public fork.
 - The app service log can contain null bytes after a restart, so use
   `grep -a` or `tr -d '\000'`.
+- The hub does not forward WebSockets, so OctoPrint's web UI cannot
+  connect through it. The webcam and OctoPrint's API work.

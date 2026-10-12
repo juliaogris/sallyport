@@ -1,5 +1,9 @@
 # Web route security review, 2026-09-24
 
+This review read the Rust hub, which is on the `with-rust` branch. The Go
+hub has the same web routes and the same fixes, but the open items were
+not checked against it again.
+
 Reviewer: Claude (Opus 5.5), reading `rust/hub/src/web.rs` and
 `rust/hub/src/appproxy.rs` at `54981b3`. No live attacks were run. Findings and
 fix status below.
