@@ -1,6 +1,6 @@
-// Command livetable prints one table that compares the hubs from the files
-// live/run.sh writes: <hub>-<scenario>.load.json from the load tool and
-// <hub>-<scenario>.tail.sum.json from tailsum.
+// Command livetable prints one table from the files live/run.sh writes:
+// <scenario>.load.json from the load tool and <scenario>.tail.sum.json from
+// tailsum.
 //
 //	livetable DIR
 package main
@@ -45,81 +45,72 @@ var mainKind = map[string]string{
 	"upload": "upload-5m", "stream": "stream-gap", "mix": "small",
 }
 
-var hubs = []string{"go", "rust"}
-
 func main() {
 	if len(os.Args) != 2 {
 		log.Fatal("usage: livetable DIR")
 	}
 	dir := os.Args[1]
-	files, _ := filepath.Glob(filepath.Join(dir, "*-*.load.json"))
+	files, _ := filepath.Glob(filepath.Join(dir, "*.load.json"))
 	var scenarios []string
 	for _, f := range files {
-		s := strings.TrimSuffix(filepath.Base(f), ".load.json")
-		_, s, _ = strings.Cut(s, "-")
-		if !slices.Contains(scenarios, s) {
-			scenarios = append(scenarios, s)
-		}
+		scenarios = append(scenarios, strings.TrimSuffix(filepath.Base(f), ".load.json"))
 	}
 	order := []string{"small", "page", "bulk", "upload", "stream", "mix"}
 	slices.SortFunc(scenarios, func(a, b string) int { return slices.Index(order, a) - slices.Index(order, b) })
 
-	fmt.Printf("%-8s %-24s %12s %12s\n", "scenario", "metric", "go", "rust")
+	fmt.Printf("%-8s %-24s %12s\n", "scenario", "metric", "value")
 	for _, sc := range scenarios {
-		rows := map[string]map[string]string{}
+		rows := map[string]string{}
 		var names []string
-		set := func(name, hub, v string) {
-			if rows[name] == nil {
-				rows[name] = map[string]string{}
+		set := func(name, v string) {
+			if _, ok := rows[name]; !ok {
 				names = append(names, name)
 			}
-			rows[name][hub] = v
+			rows[name] = v
 		}
-		for _, hub := range hubs {
-			var l loadResult
-			var t tailSum
-			readJSON(filepath.Join(dir, hub+"-"+sc+".load.json"), &l)
-			readJSON(filepath.Join(dir, hub+"-"+sc+".tail.sum.json"), &t)
-			ok, errs := 0, 0
-			var mib float64
-			for _, k := range l.Kinds {
-				ok += k.OK
-				for _, n := range k.Errors {
-					errs += n
-				}
-				mib += k.MiBPerSec
-				if k.Kind == mainKind[sc] {
-					set(k.Kind+" p50/p95/p99 ms", hub, fmt.Sprintf("%.0f/%.0f/%.0f", k.P50, k.P95, k.P99))
-					set(k.Kind+" max ms", hub, fmt.Sprintf("%.0f", k.Max))
-				}
-				if k.Kind == "canary" {
-					set("canary p50/p95 ms", hub, fmt.Sprintf("%.0f/%.0f", k.P50, k.P95))
-				}
+		var l loadResult
+		var t tailSum
+		readJSON(filepath.Join(dir, sc+".load.json"), &l)
+		readJSON(filepath.Join(dir, sc+".tail.sum.json"), &t)
+		ok, errs := 0, 0
+		var mib float64
+		for _, k := range l.Kinds {
+			ok += k.OK
+			for _, n := range k.Errors {
+				errs += n
 			}
-			set("requests ok", hub, fmt.Sprint(ok))
-			set("errors", hub, fmt.Sprint(errs))
-			set("MiB/s", hub, fmt.Sprintf("%.2f", mib))
-			set("DO cpu ms total", hub, fmt.Sprintf("%.0f", t.DOCPUTotal))
-			if ok > 0 {
-				set("DO cpu ms per request", hub, fmt.Sprintf("%.2f", t.DOCPUTotal/float64(ok)))
+			mib += k.MiBPerSec
+			if k.Kind == mainKind[sc] {
+				set(k.Kind+" p50/p95/p99 ms", fmt.Sprintf("%.0f/%.0f/%.0f", k.P50, k.P95, k.P99))
+				set(k.Kind+" max ms", fmt.Sprintf("%.0f", k.Max))
 			}
-			if mib > 0 && l.Seconds > 0 {
-				set("DO cpu ms per MiB", hub, fmt.Sprintf("%.1f", t.DOCPUTotal/(mib*l.Seconds)))
+			if k.Kind == "canary" {
+				set("canary p50/p95 ms", fmt.Sprintf("%.0f/%.0f", k.P50, k.P95))
 			}
-			set("linear memory max MiB", hub, fmt.Sprintf("%.1f", t.MemoryMaxMiB))
-			set("DO starts", hub, fmt.Sprint(t.DOStarts))
-			exc := 0
-			for _, n := range t.Exceptions {
-				exc += n
-			}
-			set("exceptions", hub, fmt.Sprint(exc))
 		}
+		set("requests ok", fmt.Sprint(ok))
+		set("errors", fmt.Sprint(errs))
+		set("MiB/s", fmt.Sprintf("%.2f", mib))
+		set("DO cpu ms total", fmt.Sprintf("%.0f", t.DOCPUTotal))
+		if ok > 0 {
+			set("DO cpu ms per request", fmt.Sprintf("%.2f", t.DOCPUTotal/float64(ok)))
+		}
+		if mib > 0 && l.Seconds > 0 {
+			set("DO cpu ms per MiB", fmt.Sprintf("%.1f", t.DOCPUTotal/(mib*l.Seconds)))
+		}
+		set("linear memory max MiB", fmt.Sprintf("%.1f", t.MemoryMaxMiB))
+		set("DO starts", fmt.Sprint(t.DOStarts))
+		exc := 0
+		for _, n := range t.Exceptions {
+			exc += n
+		}
+		set("exceptions", fmt.Sprint(exc))
 		for i, name := range names {
 			label := ""
 			if i == 0 {
 				label = sc
 			}
-			fmt.Printf("%-8s %-24s %12s %12s\n", label, name, or(rows[name]["go"]), or(rows[name]["rust"]))
+			fmt.Printf("%-8s %-24s %12s\n", label, name, or(rows[name]))
 		}
 	}
 }

@@ -1,7 +1,7 @@
-// Command table reads `go test -json` output for each hub and prints one
-// row per test with its result on each hub.
+// Command table reads `go test -json` output for one or more runs and
+// prints one row per test with its result in each run.
 //
-//	table go=go.json rust=rust.json
+//	table go=go.json
 package main
 
 import (
@@ -26,7 +26,7 @@ func main() {
 	for _, arg := range os.Args[1:] {
 		hub, path, ok := strings.Cut(arg, "=")
 		if !ok {
-			log.Fatalf("argument %q, want hub=file.json", arg)
+			log.Fatalf("argument %q, want name=file.json", arg)
 		}
 		hubs = append(hubs, hub)
 		f, err := os.Open(path)

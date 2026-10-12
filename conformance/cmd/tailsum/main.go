@@ -55,8 +55,8 @@ type Summary struct {
 
 var (
 	// The wasm linear memory, which counts against the 128 MB limit. The
-	// Go hub logs "linear 47.25 MiB" and the Rust hub "memory 3 MiB".
-	memRE       = regexp.MustCompile(`(?:linear|memory) ([0-9.]+) ?MiB`)
+	// hub logs it as "linear 47.25 MiB".
+	memRE       = regexp.MustCompile(`linear ([0-9.]+) ?MiB`)
 	heapRE      = regexp.MustCompile(`heap ([0-9.]+) ?MiB`)
 	goroutineRE = regexp.MustCompile(`goroutines (\d+)`)
 )

@@ -41,7 +41,7 @@ func lazyHub(t *testing.T) *Hub {
 	t.Helper()
 	dir := filepath.Join(tmp, t.Name())
 	require.NoError(t, os.MkdirAll(dir, 0o700))
-	h, err := StartHub(t.Context(), hubKind, hubDir, dir, LazyVars(), pki.Secrets())
+	h, err := StartHub(t.Context(), hubDir, dir, LazyVars(), pki.Secrets())
 	require.NoError(t, err)
 	t.Cleanup(h.Stop)
 	logOnFailure(t, h)

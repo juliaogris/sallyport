@@ -18,8 +18,6 @@ import (
 // Hub is a hub under test, served by `wrangler dev` on a local port.
 // Requests reach it on Addr, with the host in the Host header.
 type Hub struct {
-	// Kind is "go" or "rust".
-	Kind string
 	// Addr is the local listen address, host:port.
 	Addr string
 	// Vars are the vars the hub runs with.
@@ -55,28 +53,15 @@ func BaseVars() map[string]string {
 	return out
 }
 
-// entries maps a hub kind to its Worker entry, relative to the hub
-// directory. Build the hub first with run.sh.
-var entries = map[string]string{
-	"go":   "worker.mjs",
-	"rust": "build/worker/shim.mjs",
-}
+// entry is the hub's Worker entry, relative to the hub directory.
+const entry = "worker.mjs"
 
 // StartHub starts `wrangler dev` for the hub in hubDir with vars and
 // secrets, in a fresh state directory under dir, and waits until it
 // answers.
-func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[string]string) (*Hub, error) {
-	entry, ok := entries[kind]
-	if !ok {
-		return nil, fmt.Errorf("unknown hub kind %q, want go or rust", kind)
-	}
-	if _, err := os.Stat(filepath.Join(hubDir, entry)); err != nil {
+func StartHub(ctx context.Context, hubDir, dir string, vars, secrets map[string]string) (*Hub, error) {
+	if _, err := os.Stat(filepath.Join(hubDir, "build", "hub.wasm")); err != nil {
 		return nil, fmt.Errorf("hub not built: %w", err)
-	}
-	if kind == "go" {
-		if _, err := os.Stat(filepath.Join(hubDir, "build", "hub.wasm")); err != nil {
-			return nil, fmt.Errorf("hub not built: %w", err)
-		}
 	}
 	// wrangler dev reloads when a file it serves changes, and a hub rebuilt
 	// during a run would be loaded half written. The hub runs from a copy.
@@ -84,10 +69,8 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 	if err := copyTree(filepath.Join(hubDir, "build"), filepath.Join(snap, "build")); err != nil {
 		return nil, fmt.Errorf("copy hub build: %w", err)
 	}
-	if kind == "go" {
-		if err := copyFile(filepath.Join(hubDir, entry), filepath.Join(snap, entry)); err != nil {
-			return nil, fmt.Errorf("copy hub entry: %w", err)
-		}
+	if err := copyFile(filepath.Join(hubDir, entry), filepath.Join(snap, entry)); err != nil {
+		return nil, fmt.Errorf("copy hub entry: %w", err)
 	}
 	main := filepath.Join(snap, entry)
 
@@ -96,7 +79,7 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 		return nil, err
 	}
 	var toml strings.Builder
-	fmt.Fprintf(&toml, "name = \"sallyport-conformance-%s\"\n", kind)
+	toml.WriteString("name = \"sallyport-conformance\"\n")
 	fmt.Fprintf(&toml, "main = %q\n", main)
 	toml.WriteString("compatibility_date = \"2026-09-01\"\n\n")
 	toml.WriteString("[[durable_objects.bindings]]\nname = \"HUB\"\nclass_name = \"Hub\"\n\n")
@@ -128,7 +111,6 @@ func StartHub(ctx context.Context, kind, hubDir, dir string, vars, secrets map[s
 	}
 
 	h := &Hub{
-		Kind:    kind,
 		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
 		Vars:    vars,
 		LogPath: filepath.Join(dir, "wrangler.log"),

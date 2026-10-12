@@ -1,19 +1,18 @@
 # Conformance tests
 
-The conformance tests run the same black-box tests against the Go hub and
-the Rust hub. Each hub runs locally under `wrangler dev`. The tests need no
-Teleport cluster and no deploy.
+The conformance tests are black-box tests of the hub, which runs locally
+under `wrangler dev`. The tests need no Teleport cluster and no deploy.
 
 ```
-./run.sh              # build both hubs, test both, print one table
-./run.sh go           # one hub
-NO_BUILD=1 ./run.sh   # use the hubs as last built
-SP_HUB=rust go test -run TestTunnelAuth -v .
-SP_HUB=go go test -run TestRekey -long -v .   # 2 GiB through one tunnel
+./run.sh              # build the hub, test it, print one table
+NO_BUILD=1 ./run.sh   # use the hub as last built
+go test -run TestTunnelAuth -v .
+go test -run TestRekey -long -v .   # 2 GiB through one tunnel
 ```
 
-`run.sh` needs `npx`, Go, `worker-build` and Homebrew's LLVM for the Rust
-hub. `go test` alone needs the hub to be built already.
+`run.sh` needs `npx` and Go. `go test` alone needs the hub to be built
+already, with `hub/go/build.sh`. `SP_HUB_DIR` points the tests at a hub
+directory other than `../hub/go`.
 
 ## What a run does
 
@@ -41,7 +40,7 @@ Most tests share one hub. A test that needs an empty callout pool or its
 own fake auth starts its own hub with `freshHub` or `newStack`.
 
 With `-keep`, the temporary directory stays, with the `wrangler dev` log of
-each hub.
+each hub the run started.
 
 ## What is not tested
 

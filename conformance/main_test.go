@@ -9,12 +9,11 @@ import (
 	"testing"
 )
 
-// The hub under test. SP_HUB is go or rust. SP_HUB_DIR is the hub's
-// directory, by default ../hub/go or ../hub/rust.
+// The hub under test. SP_HUB_DIR is the hub's directory, by default
+// ../hub/go.
 var (
-	hubKind = os.Getenv("SP_HUB")
-	hubDir  = os.Getenv("SP_HUB_DIR")
-	keep    = flag.Bool("keep", false, "keep the hub's state and logs after the run")
+	hubDir = os.Getenv("SP_HUB_DIR")
+	keep   = flag.Bool("keep", false, "keep the hub's state and logs after the run")
 )
 
 var (
@@ -29,12 +28,8 @@ func TestMain(m *testing.M) {
 }
 
 func run(m *testing.M) int {
-	if hubKind == "" {
-		fmt.Fprintln(os.Stderr, "SP_HUB must be go or rust; see run.sh")
-		return 2
-	}
 	if hubDir == "" {
-		hubDir = filepath.Join("..", "hub", hubKind)
+		hubDir = filepath.Join("..", "hub", "go")
 	}
 	abs, err := filepath.Abs(hubDir)
 	if err != nil {
@@ -43,7 +38,7 @@ func run(m *testing.M) int {
 	}
 	hubDir = abs
 
-	if tmp, err = os.MkdirTemp("", "sallyport-conformance-"+hubKind+"-"); err != nil {
+	if tmp, err = os.MkdirTemp("", "sallyport-conformance-"); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
@@ -59,12 +54,12 @@ func run(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if shared, err = StartHub(context.Background(), hubKind, hubDir, dir, BaseVars(), pki.Secrets()); err != nil {
+	if shared, err = StartHub(context.Background(), hubDir, dir, BaseVars(), pki.Secrets()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	defer shared.Stop()
-	fmt.Fprintf(os.Stderr, "hub %s on %s, log %s\n", hubKind, shared.Addr, shared.LogPath)
+	fmt.Fprintf(os.Stderr, "hub on %s, log %s\n", shared.Addr, shared.LogPath)
 	return m.Run()
 }
 
@@ -76,7 +71,7 @@ func freshHub(t *testing.T) *Hub {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h, err := StartHub(t.Context(), hubKind, hubDir, dir, BaseVars(), pki.Secrets())
+	h, err := StartHub(t.Context(), hubDir, dir, BaseVars(), pki.Secrets())
 	if err != nil {
 		t.Fatal(err)
 	}

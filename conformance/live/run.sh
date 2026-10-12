@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Runs each load scenario against the live go and rust hubs, one hub at a
-# time, from homesrv. It tails the hub during each run and prints one table
-# that compares the hubs.
+# Runs each load scenario against the live hub on julia.example.com, from
+# homesrv. It tails the hub during each run and prints one table.
 #
 #   live/run.sh                   # every scenario
 #   live/run.sh small mix         # some scenarios
@@ -36,25 +35,23 @@ for spec in "${all[@]}"; do
 		continue
 	fi
 	secs=$(awk -v s="$secs" -v k="$scale" 'BEGIN { printf "%d", s * k }')
-	for hub in go rust; do
-		echo "$scenario on $hub: $workers workers, ${secs}s" >&2
-		tail_for=$((secs + 40))
-		(
-			cd "$root/hub/$hub"
-			perl -e 'alarm shift; exec @ARGV' "$tail_for" \
-				npx wrangler@4 tail --env "$hub" --format json >"$out/$hub-$scenario.tail.json" 2>/dev/null || true
-		) &
-		tail_pid=$!
-		sleep 15
-		# shellcheck disable=SC2029
-		ssh homesrv "\$HOME/sallyport-probe/bin/load -url https://bench-$hub.example.com \
-			-session \$HOME/sallyport-probe/secrets/$hub/sessions/bench \
-			-scenario $scenario -c $workers -d ${secs}s -label $hub \
-			-json /tmp/sallyport-load-$hub-$scenario.json" >"$out/$hub-$scenario.load.txt" 2>&1 || true
-		scp -q "homesrv:/tmp/sallyport-load-$hub-$scenario.json" "$out/$hub-$scenario.load.json" || true
-		wait "$tail_pid" || true
-		"$out/tailsum" -json "$out/$hub-$scenario.tail.sum.json" "$out/$hub-$scenario.tail.json" >"$out/$hub-$scenario.tail.txt" || true
-	done
+	echo "$scenario: $workers workers, ${secs}s" >&2
+	tail_for=$((secs + 40))
+	(
+		cd "$root/hub/go"
+		perl -e 'alarm shift; exec @ARGV' "$tail_for" \
+			npx wrangler@4 tail --env edge --format json >"$out/$scenario.tail.json" 2>/dev/null || true
+	) &
+	tail_pid=$!
+	sleep 15
+	# shellcheck disable=SC2029
+	ssh homesrv "\$HOME/sallyport-probe/bin/load -url https://bench-julia.example.com \
+		-session \$HOME/sallyport-probe/secrets/julia/sessions/bench \
+		-scenario $scenario -c $workers -d ${secs}s -label julia \
+		-json /tmp/sallyport-load-$scenario.json" >"$out/$scenario.load.txt" 2>&1 || true
+	scp -q "homesrv:/tmp/sallyport-load-$scenario.json" "$out/$scenario.load.json" || true
+	wait "$tail_pid" || true
+	"$out/tailsum" -json "$out/$scenario.tail.sum.json" "$out/$scenario.tail.json" >"$out/$scenario.tail.txt" || true
 done
 "$out/livetable" "$out" | tee "$out/table.txt"
 echo "results: $out" >&2

@@ -246,7 +246,7 @@ func TestLazyNoSSHSecrets(t *testing.T) {
 	}
 	dir := filepath.Join(tmp, t.Name())
 	require.NoError(t, os.MkdirAll(dir, 0o700))
-	h, err := StartHub(t.Context(), hubKind, hubDir, dir, LazyVars(), secrets)
+	h, err := StartHub(t.Context(), hubDir, dir, LazyVars(), secrets)
 	require.NoError(t, err)
 	t.Cleanup(h.Stop)
 	logOnFailure(t, h)

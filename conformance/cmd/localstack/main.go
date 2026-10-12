@@ -2,7 +2,7 @@
 // behind its callout and a fake agent that serves the test app, then
 // prints an app session for the load command and waits until interrupted.
 //
-//	localstack -hub go
+//	localstack
 package main
 
 import (
@@ -20,12 +20,11 @@ import (
 )
 
 func main() {
-	kind := flag.String("hub", "go", "go or rust")
-	hubDir := flag.String("hub-dir", "", "the hub directory, by default ../hub/<hub>")
+	hubDir := flag.String("hub-dir", "", "the hub directory, by default ../hub/go")
 	streams := flag.Int("streams", 8, "callout streams to keep open")
 	flag.Parse()
 	if *hubDir == "" {
-		*hubDir = filepath.Join("..", "hub", *kind)
+		*hubDir = filepath.Join("..", "hub", "go")
 	}
 	abs, err := filepath.Abs(*hubDir)
 	if err != nil {
@@ -34,7 +33,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	dir, err := os.MkdirTemp("", "sallyport-localstack-"+*kind+"-")
+	dir, err := os.MkdirTemp("", "sallyport-localstack-")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -42,7 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	h, err := conformance.StartHub(ctx, *kind, abs, dir, conformance.BaseVars(), p.Secrets())
+	h, err := conformance.StartHub(ctx, abs, dir, conformance.BaseVars(), p.Secrets())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +73,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("hub %s on %s, log %s\n", *kind, h.Addr, h.LogPath)
+	fmt.Printf("hub on %s, log %s\n", h.Addr, h.LogPath)
 	fmt.Printf("go run ./cmd/load -url https://bench-hub.test -connect %s -insecure -sid %s -bearer %s\n", h.Addr, sid, bearer)
 	<-ctx.Done()
 }

@@ -334,9 +334,9 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 	case "auth":
 		// Auth answers are small, so they never fill the window, and the
 		// stream needs no FlowConn. Under wrangler dev, a FlowConn's
-		// reader delays the last message of a legacy HTTP answer to the
-		// Rust hub, which the real callout does not do. Acks go both ways
-		// as on app streams.
+		// reader can delay the last message of a legacy HTTP answer, which
+		// the real callout does not do. Acks go both ways as on app
+		// streams.
 		if !a.ln.put(&ackConn{WSConn: NewWSConn(ws), acks: acks}) {
 			ws.Close()
 		}

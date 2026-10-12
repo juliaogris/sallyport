@@ -91,9 +91,9 @@ func parallelDownloads(t *testing.T, s *stack) {
 	t.Logf("%d x %d MiB in %v, %.1f MiB/s", n, size>>20, took, float64(n*size>>20)/took.Seconds())
 }
 
-// TestRekey checks that 2 GiB through one tunnel completes. The Rust hub
-// rekeys after every 1 GiB it writes, so the download crosses at least one
-// rekey the hub starts. It runs only with -long.
+// TestRekey checks that 2 GiB through one tunnel completes. With
+// chacha20-poly1305, SSH rekeys after every 1 GiB, so the download can
+// cross a rekey the hub starts. It runs only with -long.
 func TestRekey(t *testing.T) {
 	if !*long {
 		t.Skip("moves 2 GiB; run with -long")
