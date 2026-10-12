@@ -245,6 +245,18 @@ func buildResponse(resp *http.Response, done context.CancelFunc) *response {
 		logf("appproxy: upstream %s %q", resp.Status, resp.Header.Get("Server"))
 	}
 	res := &response{status: resp.StatusCode}
+	// The runtime compresses a body to match Content-Encoding by default,
+	// so an app's gzipped body would be compressed twice. The runtime and
+	// the edge also compress a text body for a browser that accepts gzip or
+	// brotli, and the compressor holds a body of unknown length until it
+	// ends, which breaks a long-held stream such as SockJS xhr_streaming.
+	// Neither compresses a body that has a Content-Encoding, so such a body
+	// is sent as identity.
+	encoded := resp.Header.Get("Content-Encoding") != ""
+	res.manual = encoded || resp.ContentLength < 0
+	if !encoded && resp.ContentLength < 0 {
+		res.add("content-encoding", "identity")
+	}
 	for name, values := range resp.Header {
 		lower := strings.ToLower(name)
 		if hopByHop[lower] {
@@ -270,11 +282,6 @@ func buildResponse(resp *http.Response, done context.CancelFunc) *response {
 		resp.Request != nil && resp.Request.Method == "HEAD":
 		body.Close()
 		return res
-	}
-	// The runtime compresses a body to match Content-Encoding by default,
-	// so an app's gzipped body would be compressed twice.
-	if resp.Header.Get("Content-Encoding") != "" {
-		res.manual = true
 	}
 	res.stream = newBodyStream(body)
 	return res
