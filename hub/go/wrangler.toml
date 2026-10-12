@@ -35,6 +35,61 @@ DOMAIN = "example.workers.dev"
 OWNER = "julia-sallyport-gohub-dev"
 APPS = "bench,octo,octocam:/stream"
 
+# julia.example.com, on the gmail account. The Worker is the one the Rust hub's
+# edge env deployed, so its secrets and Durable Object class carry over and
+# the auth cluster on homesrv needs no change. To go back to the Rust hub, run
+# `npx wrangler@4 deploy --env edge` in the Rust hub's directory.
+[env.edge]
+name = "sallyport-hub-edge"
+routes = [
+  { pattern = "julia.example.com", custom_domain = true },
+  { pattern = "bench-julia.example.com", custom_domain = true },
+  { pattern = "octo-julia.example.com", custom_domain = true },
+  { pattern = "octocam-julia.example.com", custom_domain = true },
+]
+
+[env.edge.vars]
+HUB_MODE = "lazy"
+CLUSTER_NAME = "sallyport"
+PUBLIC_ADDR = "julia.example.com:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "julia.example.com"
+DOMAIN = "example.com"
+OWNER = "julia"
+APPS = "bench,octo,octocam:/stream"
+
+[[env.edge.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+# julia.example.net, on the free account. The Worker is the one the Rust
+# hub's party env deployed, as for edge. The free plan allows about one
+# always-connected hub a day of Durable Object time, so this is the only hub
+# on that account.
+[env.party]
+name = "sallyport-hub-party"
+account_id = "11111111111111111111111111111111"
+routes = [
+  { pattern = "julia.example.net", custom_domain = true },
+  { pattern = "bench-julia.example.net", custom_domain = true },
+  { pattern = "octo-julia.example.net", custom_domain = true },
+  { pattern = "octocam-julia.example.net", custom_domain = true },
+]
+
+[env.party.vars]
+HUB_MODE = "lazy"
+CLUSTER_NAME = "sallyport-party"
+PUBLIC_ADDR = "julia.example.net:443"
+SERVER_VERSION = "18.11.1"
+CALLOUT_HOST = "julia.example.net"
+DOMAIN = "example.net"
+OWNER = "julia"
+APPS = "bench,octo,octocam:/stream"
+
+[[env.party.durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
 [env.go]
 name = "sallyport-hub-go"
 routes = [

@@ -17,11 +17,12 @@ import os
 import sys
 
 BASE = os.path.expanduser("~/sallyport-probe")
-ORDER = ["julia", "rust", "go"]
-MB10 = str(10 * 1024 * 1024)
+ORDER = ["julia", "party"]
+# The full bench file: 10 MiB on example.com, and 1 MB on the free plan.
+FULL = {str(10 * 1024 * 1024), "1000000"}
 
 CHECKS = {
-    "download": lambda r: r["dl_status"] == "200" and r["dl_bytes"] == MB10,
+    "download": lambda r: r["dl_status"] == "200" and r["dl_bytes"] in FULL,
     "latency": lambda r: r["lat_ok"] == "5",
     "snapshot": lambda r: r["snap_status"] == "200",
     "octo": lambda r: r["octo_status"] == "403",

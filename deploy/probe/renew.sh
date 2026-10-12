@@ -46,16 +46,6 @@ renew() {
 failed=0
 renew julia "$HOME/sallyport/deploy/teleport.yaml" 127.0.0.1:3025 sallyport "$base/secrets/julia/proxy" \
   bench=bench-julia.example.com octo=octo-julia.example.com octocam=octocam-julia.example.com || failed=1
-renew rust "$HOME/sallyport-rust/deploy/teleport.yaml" 127.0.0.1:3126 sallyport-rust "$HOME/sallyport-rust/hub-identity" \
-  bench=bench-rust.example.com octo=octo-rust.example.com octocam=octocam-rust.example.com || failed=1
-renew go "$HOME/sallyport-go/deploy/teleport.yaml" 127.0.0.1:3226 sallyport-go "$HOME/sallyport-go/hub-identity" \
-  bench=bench-go.example.com octo=octo-go.example.com octocam=octocam-go.example.com || failed=1
-renew lazy "$HOME/sallyport-lazy/deploy/teleport.yaml" 127.0.0.1:3326 sallyport-lazy "$HOME/sallyport-lazy/hub-identity" \
-  bench=bench-lazy.example.com octocam=octocam-lazy.example.com || failed=1
 renew party "$HOME/sallyport-party/deploy/teleport.yaml" 127.0.0.1:3426 sallyport-party "$HOME/sallyport-party/hub-identity" \
   bench=bench-julia.example.net octocam=octocam-julia.example.net || failed=1
-renew party-rust "$HOME/sallyport-party-rust/deploy/teleport.yaml" 127.0.0.1:3526 sallyport-party-rust "$HOME/sallyport-party-rust/hub-identity" \
-  bench=bench-rust.example.net octocam=octocam-rust.example.net || failed=1
-renew party-go "$HOME/sallyport-party-go/deploy/teleport.yaml" 127.0.0.1:3626 sallyport-party-go "$HOME/sallyport-party-go/hub-identity" \
-  bench=bench-go.example.net octocam=octocam-go.example.net || failed=1
 exit "$failed"

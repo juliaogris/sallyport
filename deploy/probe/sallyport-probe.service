@@ -1,5 +1,5 @@
 [Unit]
-Description=sallyport probe of the julia, rust and go clusters
+Description=sallyport probe of the julia and party clusters
 After=network-online.target
 Wants=network-online.target
 

@@ -34,17 +34,9 @@ FREE = {
 }
 CLUSTERS = {
     "julia": {"streams": ["octocam"]},
-    "rust": {"streams": ["octocam"]},
-    "go": {"streams": ["octocam"]},
-    # The lazy hub sleeps while nobody uses it, so it is probed only every
-    # 5 minutes, and its cluster has no octo app.
-    "lazy": {"streams": ["octocam"], "every": 5, "octo": False},
-    # The free-plan clusters on example.net share one free account's daily
-    # quota of 100,000 requests, so they get a 1 MB file and a 5 s stream
-    # every 10 minutes.
+    # The free-plan cluster on example.net has a daily quota of 100,000
+    # requests, so it gets a 1 MB file and a 5 s stream every 10 minutes.
     "party": FREE | {"owner": "julia"},
-    "party-rust": FREE | {"owner": "rust"},
-    "party-go": FREE | {"owner": "go"},
 }
 BENCH_FILE = "/10mb.bin"
 BENCH_BYTES = 10 * 1024 * 1024
