@@ -1,7 +1,8 @@
 // Package testapp is the app behind the hub in the conformance tests and
 // the load runs. It serves generated responses of each kind a browser
 // meets: static bodies, large and slow downloads, gzip, bodyless statuses,
-// MJPEG streams, uploads, and a page with many small assets.
+// MJPEG streams, uploads, a page with many small assets, a SockJS-like
+// stream of short lines, and a WebSocket echo.
 //
 // Every path starts with /t/. With a directory, other paths are served
 // from it, so the app can replace a plain file server.
@@ -11,11 +12,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Bodies the app serves.
@@ -203,7 +209,133 @@ func Handler(dir string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		writePattern(w, n, 0, 0)
 	})
+	// /t/drip?n=N&ms=M sends a SockJS-like stream: a 2 KiB prelude line,
+	// then N short lines, one every M milliseconds, each flushed.
+	mux.HandleFunc("/t/drip", func(w http.ResponseWriter, r *http.Request) {
+		n, ms := intParam(r, "n", 8), intParam(r, "ms", 500)
+		w.Header().Set("Content-Type", "application/javascript; charset=UTF-8")
+		rc := http.NewResponseController(w)
+		w.Write(append(bytes.Repeat([]byte("h"), 2048), '\n'))
+		if rc.Flush() != nil {
+			return
+		}
+		for i := range n {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Duration(ms) * time.Millisecond):
+			}
+			fmt.Fprintf(w, "a[\"%d\"]\n", i)
+			if rc.Flush() != nil {
+				return
+			}
+		}
+	})
+	mux.HandleFunc("/t/ws", ws.serve)
+	mux.HandleFunc("/t/wsclosed", ws.closed)
 	return mux
+}
+
+// wsApp is the WebSocket endpoint of the app. It records the close code
+// each socket got from its peer, by the id query parameter.
+type wsApp struct {
+	mu    sync.Mutex
+	codes map[string]int
+	cond  *sync.Cond
+}
+
+var ws = newWSApp()
+
+func newWSApp() *wsApp {
+	a := &wsApp{codes: make(map[string]int)}
+	a.cond = sync.NewCond(&a.mu)
+	return a
+}
+
+var upgrader = websocket.Upgrader{
+	Subprotocols: []string{"chat"},
+	// The hub checks the origin.
+	CheckOrigin: func(*http.Request) bool { return true },
+}
+
+// serve answers /t/ws?id=I&hello=1. With hello=1 the first message is the
+// handshake as an Echo in JSON. Then each message is echoed with its type,
+// except two text commands: "close CODE REASON" closes the socket with
+// that code and reason, and "big N" sends N bytes of Pattern as one binary
+// message.
+func (a *wsApp) serve(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(64 << 20)
+	id := r.URL.Query().Get("id")
+	if r.URL.Query().Get("hello") == "1" {
+		client := ""
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			client = r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		b, _ := json.Marshal(Echo{Method: r.Method, Host: r.Host, URI: r.RequestURI, Header: r.Header, Client: client})
+		if conn.WriteMessage(websocket.TextMessage, b) != nil {
+			return
+		}
+	}
+	for {
+		typ, msg, err := conn.ReadMessage()
+		if err != nil {
+			code := websocket.CloseAbnormalClosure
+			var ce *websocket.CloseError
+			if errors.As(err, &ce) {
+				code = ce.Code
+			}
+			a.mu.Lock()
+			a.codes[id] = code
+			a.cond.Broadcast()
+			a.mu.Unlock()
+			return
+		}
+		if typ == websocket.TextMessage {
+			f := strings.SplitN(string(msg), " ", 3)
+			switch {
+			case f[0] == "close" && len(f) == 3:
+				code, _ := strconv.Atoi(f[1])
+				conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, f[2]), time.Now().Add(5*time.Second))
+				// Waits for the peer's close, which ends the next read.
+				continue
+			case f[0] == "big" && len(f) == 2:
+				n, _ := strconv.Atoi(f[1])
+				if conn.WriteMessage(websocket.BinaryMessage, Pattern(n)) != nil {
+					return
+				}
+				continue
+			}
+		}
+		if conn.WriteMessage(typ, msg) != nil {
+			return
+		}
+	}
+}
+
+// closed answers /t/wsclosed?id=I with the close code the socket I got
+// from its peer, waiting up to 10 seconds for it, or 0.
+func (a *wsApp) closed(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	t := time.AfterFunc(10*time.Second, func() {
+		a.mu.Lock()
+		a.cond.Broadcast()
+		a.mu.Unlock()
+	})
+	defer t.Stop()
+	end := time.Now().Add(10 * time.Second)
+	a.mu.Lock()
+	code, ok := a.codes[id]
+	for !ok && time.Now().Before(end) {
+		a.cond.Wait()
+		code, ok = a.codes[id]
+	}
+	a.mu.Unlock()
+	fmt.Fprintf(w, "%d\n", code)
 }
 
 // PageAssets is the number of assets on /t/page.
