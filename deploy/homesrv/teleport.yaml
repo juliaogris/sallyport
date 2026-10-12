@@ -38,6 +38,12 @@ app_service:
   - name: octo
     uri: http://octo.lan
     public_addr: octo-julia.example.com
+    # OctoPrint accepts a WebSocket only when its Origin matches the Host
+    # header and X-Scheme, and the app service sends Host: octo.lan.
+    rewrite:
+      headers:
+      - "Host: octo-julia.example.com"
+      - "X-Scheme: https"
     labels:
       sallyport-spike: s4
       # The deny-octo role matches this label.

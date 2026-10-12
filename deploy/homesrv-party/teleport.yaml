@@ -38,6 +38,12 @@ app_service:
   - name: octo
     uri: http://octo.lan
     public_addr: octo-julia.example.net
+    # OctoPrint accepts a WebSocket only when its Origin matches the Host
+    # header and X-Scheme, and the app service sends Host: octo.lan.
+    rewrite:
+      headers:
+      - "Host: octo-julia.example.net"
+      - "X-Scheme: https"
   # The OctoPrint webcam, through julia's relay on 127.0.0.1:18081.
   - name: octocam
     uri: http://127.0.0.1:18081
