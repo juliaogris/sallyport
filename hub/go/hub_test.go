@@ -20,7 +20,7 @@ func TestClassify(t *testing.T) {
 		{"Bench-go.example.com", hostNone, ""},
 		{"-go.example.com", hostNone, ""},
 		{"a-b-go.example.com", hostNone, ""},
-		{"rust.example.com", hostNone, ""},
+		{"julia.example.com", hostNone, ""},
 		{"go.example.com.evil", hostNone, ""},
 		{"x.go.example.com", hostNone, ""},
 	}

@@ -43,8 +43,7 @@ func (r *response) add(name, value string) *response {
 	return r
 }
 
-// textError is the Rust hub's `Response::error`: the message as a body
-// with no Content-Type.
+// textError returns the message as a body with no Content-Type.
 func textError(msg string, status int) *response {
 	return &response{status: status, body: msg, raw: true}
 }

@@ -1,7 +1,5 @@
 package main
 
-// The pages are the Rust hub's, byte for byte.
-
 // style makes text and buttons larger, so they are easy to tap on a phone.
 const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>`
 

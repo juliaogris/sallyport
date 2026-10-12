@@ -133,7 +133,7 @@ function sameOriginFetch(req, host) {
 }
 
 // Returns an error with the message as a body of bytes, so that it has no
-// Content-Type, like the Rust hub's errors.
+// Content-Type.
 function textError(msg, status) {
   return new Response(new TextEncoder().encode(msg), { status });
 }
@@ -156,7 +156,7 @@ function classify(env, host) {
 }
 
 // The /webapi/find response a stock agent needs to pick TLS routing and the
-// tunnel address. The keys are in the same order as the Rust hub's.
+// tunnel address.
 function find(env) {
   const addr = env.PUBLIC_ADDR;
   return Response.json({

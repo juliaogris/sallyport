@@ -58,7 +58,7 @@ func (e *grpcError) Error() string {
 }
 
 // rateLimitedMsg is the body of the 429 for a call that auth refused with
-// ResourceExhausted, the same as the Rust hub's.
+// ResourceExhausted.
 const rateLimitedMsg = "too many requests, try again in a minute"
 
 // rateLimited returns true when auth answered the call in err with gRPC
