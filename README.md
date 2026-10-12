@@ -34,6 +34,36 @@ service. The fork adds an on-demand callout: auth dials out to the hub
 when a user needs it, so nothing on the home server listens on the
 internet. See `deploy/README.md`.
 
+## Rust and Go
+
+The project started with two hubs, one in Rust and one in Go, and settled
+on Go. The Rust hub is on the branch
+[`with-rust`](https://github.com/juliaogris/sallyport/tree/with-rust).
+
+The Rust hub used `workers-rs` compiled to wasm. It had about 7,900 lines
+of Rust, with its inline tests, and about 160 lines of JavaScript. It
+needed patched copies of `russh` and `ssh-key`, about 31,000 lines. The
+Go hub is Go compiled to js/wasm, with about 4,700 lines of Go and about
+860 lines of JavaScript in `worker.mjs`.
+
+Both hubs passed the same conformance suite: 246 pass, 0 fail and 2 skip.
+Then both ran for 7 days on homesrv, with a probe every minute. The numbers
+are from the last 139.5 hours, after the last fix to a Rust crash. In that
+crash, `h2` 0.4.19 called `Instant::now` when a stream was reset, which
+panics on wasm32.
+
+| | Rust | Go |
+|---|---|---|
+| Complete 10 MB downloads | 95.4% | 100% |
+| 10 MB download, median | 1.90 s | 1.80 s |
+| Small request, median | 164 ms | 76 ms |
+| Time to first byte, median | 182 ms | 96 ms |
+| 8 parallel 1 MB downloads, free plan | about 50% | about 100% |
+
+Go was more reliable, with no short downloads, and it was faster for
+small requests. Its code is smaller, with no patched libraries to keep.
+The short Rust downloads remained after several fixes.
+
 ## License
 
 sallyport is licensed under the GNU Affero General Public License v3.0 or
