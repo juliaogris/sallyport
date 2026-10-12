@@ -6,7 +6,7 @@
 // them from a directory with the files session-id and bearer-token, as
 // appsessmint writes them.
 //
-//	load -url https://bench-go.example.com -session DIR -scenario mix -c 8 -d 5m
+//	load -url https://bench-julia.example.com -session DIR -scenario mix -c 8 -d 5m
 //
 // Scenarios:
 //
@@ -58,7 +58,7 @@ type config struct {
 
 func main() {
 	var c config
-	flag.StringVar(&c.base, "url", "", "the app host, such as https://bench-go.example.com")
+	flag.StringVar(&c.base, "url", "", "the app host, such as https://bench-julia.example.com")
 	connect := flag.String("connect", "", "dial this host:port for every request, such as a wrangler dev address")
 	insecure := flag.Bool("insecure", false, "do not check the TLS certificate")
 	session := flag.String("session", "", "a directory with session-id and bearer-token")
