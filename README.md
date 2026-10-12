@@ -1,4 +1,4 @@
-# sallyport
+# <img src="logo.svg" alt="" height="32"> sallyport
 
 A Teleport proxy in Rust, compiled to WebAssembly, running on Cloudflare
 Workers with one Durable Object as the stateful hub. It fronts a Teleport
