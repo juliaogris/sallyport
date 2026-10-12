@@ -128,8 +128,10 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	// Every <app>-<owner>.<domain> is the same site, so SameSite=Lax still
 	// sends the app cookies on a POST from a sibling app host. Only this
 	// host may send a request that can change state.
-	switch req.method {
-	case "GET", "HEAD", "OPTIONS":
+	// A WebSocket handshake is a GET, but it opens a connection that can
+	// change state, so it gets the same check.
+	switch {
+	case req.method == "GET" && !req.isUpgrade(), req.method == "HEAD", req.method == "OPTIONS":
 	default:
 		if !req.sameOriginFetch(host) {
 			return textError("bad origin", 403)
@@ -167,6 +169,9 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	cert, err := h.userCert(s.tlsCert, s.tlsPriv)
 	if err != nil {
 		return textError(err.Error(), 500)
+	}
+	if req.isUpgrade() {
+		return h.forwardWS(cert, host, req)
 	}
 	return h.forward(sid, cert, host, req)
 }

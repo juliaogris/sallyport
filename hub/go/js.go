@@ -16,6 +16,7 @@ import (
 var glue struct {
 	accept, send, sendText, close, stream, chunk, linearMem, jsValues js.Value
 	tokenUsed, tokenUse, dial, connected, readBody, cancelBody        js.Value
+	acceptBrowser, wsSend                                             js.Value
 }
 
 var uint8Array = js.Global().Get("Uint8Array")
@@ -34,6 +35,7 @@ func main() {
 		"tokenUsed": &glue.tokenUsed, "tokenUse": &glue.tokenUse,
 		"dial": &glue.dial, "connected": &glue.connected,
 		"readBody": &glue.readBody, "cancelBody": &glue.cancelBody,
+		"acceptBrowser": &glue.acceptBrowser, "wsSend": &glue.wsSend,
 	} {
 		*v = g.Get(name)
 	}
@@ -67,6 +69,24 @@ func main() {
 	api.Set("closed", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if c := conns.get(args[0].Int()); c != nil {
 			c.remoteClosed(args[1].Int())
+		}
+		return nil
+	}))
+	api.Set("wsText", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if b := browserOf(args[0].Int()); b != nil {
+			b.text(args[1].String())
+		}
+		return nil
+	}))
+	api.Set("wsBinary", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if b := browserOf(args[0].Int()); b != nil {
+			b.binary(args[1].Int(), args[2].Bool())
+		}
+		return nil
+	}))
+	api.Set("wsClosed", js.FuncOf(func(this js.Value, args []js.Value) any {
+		if b := browserOf(args[0].Int()); b != nil {
+			b.browserClosed(args[1].Int(), args[2].String())
 		}
 		return nil
 	}))
@@ -166,6 +186,9 @@ func (r *response) send(done js.Value) {
 	ws, stream := js.Null(), js.Null()
 	if r.ws != nil {
 		ws = r.ws.client
+	}
+	if r.browser != nil {
+		ws = r.browser.client
 	}
 	if r.stream != nil {
 		stream = r.stream.js

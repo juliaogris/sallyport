@@ -131,7 +131,8 @@ func (h *hub) forwardInner(sid string, cert tls.Certificate, host string, req *r
 		cancel()
 		return nil, fmt.Errorf("app request: %w", err)
 	}
-	// A 101 cannot be forwarded. The hub sends no Upgrade header upstream.
+	// A 101 to a request without Upgrade cannot be forwarded. The hub sends
+	// no Upgrade header upstream on a plain request.
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		closeBoth{resp.Body, cancel}.Close()
 		return nil, errSwitchingProtocols
@@ -142,7 +143,6 @@ func (h *hub) forwardInner(sid string, cert tls.Certificate, host string, req *r
 // appTransport returns a transport that connects to the app service with
 // cert, for the requests of one app session.
 func (h *hub) appTransport(cert tls.Certificate) *http.Transport {
-	sni := hex.EncodeToString([]byte(h.cfg.cluster)) + "." + apiDomain
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true)
 	return &http.Transport{
@@ -152,24 +152,30 @@ func (h *hub) appTransport(cert tls.Certificate) *http.Transport {
 		MaxIdleConnsPerHost: appConnsPerSession,
 		IdleConnTimeout:     appConnIdle,
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			conn, err := h.dialApp(ctx)
-			if err != nil {
-				return nil, err
-			}
-			ctx, cancel := context.WithTimeout(ctx, appHandshakeDeadline)
-			defer cancel()
-			tc := tls.Client(conn, &tls.Config{
-				ServerName:   sni,
-				RootCAs:      h.cfg.hostCATLS,
-				Certificates: []tls.Certificate{cert},
-			})
-			if err := tc.HandshakeContext(ctx); err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("tls connect: %w", err)
-			}
-			return tc, nil
+			return h.dialAppTLS(ctx, cert)
 		},
 	}
+}
+
+// dialAppTLS opens a connection to the app service and runs TLS on it with
+// cert.
+func (h *hub) dialAppTLS(ctx context.Context, cert tls.Certificate) (net.Conn, error) {
+	conn, err := h.dialApp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, appHandshakeDeadline)
+	defer cancel()
+	tc := tls.Client(conn, &tls.Config{
+		ServerName:   hex.EncodeToString([]byte(h.cfg.cluster)) + "." + apiDomain,
+		RootCAs:      h.cfg.hostCATLS,
+		Certificates: []tls.Certificate{cert},
+	})
+	if err := tc.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("tls connect: %w", err)
+	}
+	return tc, nil
 }
 
 // hopByHop are the header names that describe one hop of the connection,

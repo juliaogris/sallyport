@@ -12,9 +12,9 @@ a time.
 
 The hub serves two clusters on the home server `homesrv`: `julia.example.com`
 on a paid Workers plan, and `julia.example.net` on the free plan. Users
-log in with passkeys and open the apps from the dashboard. The hub does
-not forward WebSockets yet, so OctoPrint's web UI cannot connect. The
-webcam and OctoPrint's API work.
+log in with passkeys and open the apps from the dashboard. The hub
+forwards an app's WebSockets, which OctoPrint's web UI uses, and streams
+a long-held response to the browser as the app sends it.
 
 ## Layout
 

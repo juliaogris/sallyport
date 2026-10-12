@@ -13,15 +13,20 @@ inside one Durable Object. It serves `julia.example.com` and
   these. A login host path that `web.go` does not route gets 404. On an
   app host, `/teleport-logout` and a request without both app cookies go
   to the login host, `/x-teleport-dbsc` paths get 404, and a request that
-  can change state from another origin gets 403. Only the Durable Object
-  starts the Go program, so a stateless Worker isolate never pays the Go
-  runtime's startup CPU and 38 MiB of memory. The Durable Object passes
-  an app request body to Go as Go reads it. It reads any other request
-  body before Go runs, and answers 413 for one over 64 KiB. It also owns
-  the SQLite table of used privilege tokens, which Go reads and writes
-  through the glue.
+  can change state or a WebSocket handshake from another origin gets 403.
+  Only the Durable Object starts the Go program, so a stateless Worker
+  isolate never pays the Go runtime's startup CPU and 38 MiB of memory.
+  The Durable Object passes an app request body to Go as Go reads it. It
+  reads any other request body before Go runs, and answers 413 for one
+  over 64 KiB. It also owns the SQLite table of used privilege tokens,
+  which Go reads and writes through the glue.
 - `js.go` and `wsconn.go` are the Go side of the glue. `wsconn.go` is a
   `net.Conn` over a Workers WebSocket and a response body stream.
+- `appproxy.go` forwards an app request to the app service over TLS with
+  the user's certificate. `appws.go` forwards a WebSocket to an app. The
+  runtime hands the Durable Object whole messages and not the upgraded
+  bytes, so the hub opens its own WebSocket to the app and copies each
+  message across with its type.
 - `tunnel.go` is the reverse tunnel: TLS with `crypto/tls` and the SSH
   server with `golang.org/x/crypto/ssh`.
 - `authpipe.go` is the `/tunnel/auth` WebSocket with the Ed25519

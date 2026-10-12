@@ -7,6 +7,8 @@ package main
 
 type bodyStream struct{}
 
+type browserWS struct{}
+
 // wsConn stands in for the WebSocket connection. It records a close and
 // nothing else, so that authPool can be tested natively.
 type wsConn struct {

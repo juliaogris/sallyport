@@ -92,13 +92,19 @@ function appRequest(req, env, url) {
   if (path === AUTH_PATH) return hub(env).fetch(req);
   if (path === '/teleport-logout') return toLogin(env);
   if (path.startsWith('/x-teleport-dbsc')) return textError('not found', 404);
+  // A WebSocket handshake is a GET, but it opens a connection that can
+  // change state, so it gets the same check as a POST.
+  const upgrade = (req.headers.get('Upgrade') || '').toLowerCase() === 'websocket';
   switch (req.method) {
     case 'GET':
+      if (!upgrade) break;
+    // falls through
+    default:
+      if (!sameOriginFetch(req, url.hostname)) return textError('bad origin', 403);
+      break;
     case 'HEAD':
     case 'OPTIONS':
       break;
-    default:
-      if (!sameOriginFetch(req, url.hostname)) return textError('bad origin', 403);
   }
   if (!cookie(req, APP_COOKIE) || !cookie(req, SUBJECT_COOKIE)) return toLogin(env);
   return hub(env).fetch(req);
@@ -189,6 +195,9 @@ class program {
     this.inst = null;
     this.api = null;
     this.sockets = new Map();
+    // The pieces of the message Go is sending on a browser's WebSocket, by
+    // socket ID.
+    this.parts = new Map();
     this.streams = new Map();
     this.pending = new Set();
     // The app request bodies Go reads as they arrive, by ID, each with its
@@ -315,12 +324,80 @@ class program {
           return false;
         }
       },
+      // Closes WebSocket id with code and reason, or with neither when code
+      // is 0.
       close(id, code, reason) {
         const ws = p.sockets.get(id);
         p.sockets.delete(id);
+        p.parts.delete(id);
         try {
-          ws?.close(code, reason);
+          if (code) ws?.close(code, reason);
+          else ws?.close();
         } catch {}
+      },
+      // Accepts the browser's end of a WebSocket to an app, id, and returns
+      // the client end for the 101 response. Its messages go to Go whole,
+      // with their type: a text message as a string, and a binary one in
+      // pieces through inBuf. Its close goes to Go with its code and
+      // reason, and the socket stays in the map until Go closes it.
+      acceptBrowser(id, inBuf) {
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const ws = pair[1];
+        ws.binaryType = 'arraybuffer';
+        ws.accept();
+        p.sockets.set(id, ws);
+        ws.addEventListener('message', (e) => {
+          if (p.exited) return;
+          if (typeof e.data === 'string') return p.api.wsText(id, e.data);
+          const d = new Uint8Array(e.data);
+          let off = 0;
+          do {
+            const k = Math.min(d.length - off, inBuf.length);
+            inBuf.set(d.subarray(off, off + k));
+            off += k;
+            p.api.wsBinary(id, k, off >= d.length);
+          } while (off < d.length);
+        });
+        const closed = (e) => {
+          if (!p.sockets.has(id) || p.exited) return;
+          p.api.wsClosed(id, e.code || 0, e.reason || '');
+        };
+        ws.addEventListener('close', closed);
+        ws.addEventListener('error', closed);
+        return client;
+      },
+      // Sends the first n bytes of outBuf on WebSocket id as a piece of a
+      // message: kind 0 has more pieces to come, 1 ends a binary message,
+      // and 2 ends a text message.
+      wsSend(id, outBuf, n, kind) {
+        const ws = p.sockets.get(id);
+        if (!ws) return false;
+        const piece = outBuf.slice(0, n);
+        let parts = p.parts.get(id);
+        if (kind === 0) {
+          if (!parts) p.parts.set(id, (parts = []));
+          parts.push(piece);
+          return true;
+        }
+        let msg = piece;
+        if (parts) {
+          p.parts.delete(id);
+          parts.push(piece);
+          msg = new Uint8Array(parts.reduce((m, x) => m + x.length, 0));
+          let off = 0;
+          for (const x of parts) {
+            msg.set(x, off);
+            off += x.length;
+          }
+        }
+        try {
+          ws.send(kind === 2 ? new TextDecoder().decode(msg) : msg);
+          return true;
+        } catch (e) {
+          console.log('glue: websocket send: ' + e);
+          return false;
+        }
       },
       // Returns a ReadableStream whose chunks Go supplies through buf.
       stream(sid, buf) {

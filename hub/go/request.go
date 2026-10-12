@@ -25,13 +25,15 @@ type request struct {
 }
 
 // response is what the Durable Object answers. At most one of body,
-// stream and ws is set.
+// stream, ws and browser is set.
 type response struct {
 	status int
 	header [][2]string
 	body   string
 	stream *bodyStream
 	ws     *wsConn
+	// browser is the browser's end of a WebSocket to an app.
+	browser *browserWS
 	// manual sends the body as is, for a body that is already encoded.
 	manual bool
 	// raw sends body as bytes, so the runtime adds no Content-Type.
