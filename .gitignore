@@ -1,10 +1,7 @@
-target/
 .wrangler/
 *.pem
 *.key
 node_modules/
 .local/
 .dev.vars
-hub/rust/.dev.vars
-hub/rust/build/
 __pycache__/
