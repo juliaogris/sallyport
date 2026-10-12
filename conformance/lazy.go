@@ -430,9 +430,8 @@ type FlowConn struct {
 	wmu      sync.Mutex
 }
 
-// NewFlowConn wraps ws and starts its reader. It sends no upload acks.
-func NewFlowConn(ws *websocket.Conn) *FlowConn { return newFlowConn(ws, false) }
-
+// newFlowConn wraps ws and starts its reader. With acks, it sends upload
+// acks.
 func newFlowConn(ws *websocket.Conn, acks bool) *FlowConn {
 	c := &FlowConn{ws: ws, acks: acks}
 	c.cond = sync.NewCond(&c.mu)

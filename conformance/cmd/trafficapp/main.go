@@ -2,7 +2,7 @@
 // service to publish. Paths outside /t/ are served from -dir, so it can
 // replace a plain file server.
 //
-//	trafficapp -addr 127.0.0.1:18180 -dir ~/sallyport-go/bench
+//	trafficapp -addr 127.0.0.1:18080 -dir ~/sallyport/bench
 package main
 
 import (

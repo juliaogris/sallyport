@@ -7,7 +7,9 @@
 #   SCALE=0.5 live/run.sh         # half the durations
 #
 # It needs `ssh homesrv`, the load tool at ~/sallyport-probe/bin/load on homesrv,
-# the probe's app sessions, and wrangler logged in to the account.
+# the probe's app sessions, and wrangler logged in to the account. The
+# scenarios use the /t/ paths of cmd/trafficapp, so julia's bench app must
+# be trafficapp, not the plain file server that sallyport-bench runs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$(cd .. && pwd)
