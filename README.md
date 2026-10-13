@@ -1,7 +1,9 @@
 # <img src="logo.svg" alt="" height="32"> sallyport
 
-A Teleport proxy in Go, compiled to WebAssembly, running on Cloudflare
-Workers with one Durable Object as the stateful hub. It fronts a Teleport
+A stand-in for the Teleport proxy service, for web login with passkeys and
+app access. It is written in Go, compiled to WebAssembly, and runs on
+Cloudflare Workers with one Durable Object as the stateful hub. It does not
+cover SSH, databases, Kubernetes or `tsh`. It fronts a Teleport
 auth and app service that run on a home server with no inbound ports. The
 first app is OctoPrint.
 
@@ -21,8 +23,9 @@ a long-held response to the browser as the app sends it.
 - `hub/go/` - the Worker and the Durable Object in Go (js/wasm).
 - `conformance/` - a black-box suite that runs against the hub under
   `wrangler dev`.
-- `deploy/` - the configs and systemd units for homesrv, the probe, the live
-  deploy notes and the web route security review.
+- `deploy/` - the configs and systemd units for homesrv, the probe and the
+  live deploy notes. `deploy/security-review.md` reviewed the web routes of
+  the Rust hub, and the Go hub has the same routes and fixes.
 
 The spikes S1 to S5 and their results were removed after the tag
 `spikes-final`.
@@ -30,9 +33,9 @@ The spikes S1 to S5 and their results were removed after the tag
 ## Home side
 
 Each cluster is one process of a Teleport fork that runs auth and the app
-service. The fork adds an on-demand callout: auth dials out to the hub
-when a user needs it, so nothing on the home server listens on the
-internet. See `deploy/README.md`.
+service. The fork adds an on-demand callout: auth keeps one control
+WebSocket open to the hub, and dials a new stream on it only when a request
+needs one. Nothing on the home server listens on the internet. See `deploy/README.md`.
 
 ## Rust and Go
 
@@ -43,8 +46,8 @@ on Go. The Rust hub is on the branch
 The Rust hub used `workers-rs` compiled to wasm. It had about 7,900 lines
 of Rust, with its inline tests, and about 160 lines of JavaScript. It
 needed patched copies of `russh` and `ssh-key`, about 31,000 lines. The
-Go hub is Go compiled to js/wasm, with about 4,700 lines of Go and about
-860 lines of JavaScript in `worker.mjs`.
+Go hub is Go compiled to js/wasm. At the switch it had about 4,700 lines
+of Go and about 860 lines of JavaScript in `worker.mjs`.
 
 Both hubs passed the same conformance suite: 246 pass, 0 fail and 2 skip.
 Then both ran for 7 days on homesrv, with a probe every minute. The numbers
