@@ -3,7 +3,7 @@
 Sallyport gives access to web apps on a home network from anywhere, with
 Teleport login and passkeys, through a Cloudflare Worker. The server at
 home only dials out, so no port is open to the internet, and there is no
-need for a VPN or a tunnel to a machine.
+need for a VPN.
 
 Sallyport is a personal proof of concept and is not battle-tested. The
 author works at Teleport, but Sallyport is not a Teleport project, and
@@ -30,8 +30,9 @@ internet:
 The usual ways to reach them from outside each have a cost. A forwarded
 port puts the device's own login, or no login, on the internet. A VPN
 gives each client the whole home network and needs a client on every
-phone and laptop. A tunnel to one machine gives access to that machine
-and everything it can reach.
+phone and laptop. Cloudflare Tunnel with Cloudflare Access gives per-app
+access with no open ports, but the users, rules and audit log then live
+in Cloudflare. Sallyport keeps them in Teleport at home.
 
 Sallyport gives access to one app at a time, in a normal browser:
 
