@@ -16,52 +16,6 @@ import { DurableObject } from 'cloudflare:workers';
 import './build/wasm_exec.js';
 import mod from './build/hub.wasm';
 
-// DIAG: temporary diagnostics for why the lazy hub does not hibernate.
-const diagModuleAt = Date.now();
-const diagTimers = new Map();
-const diagAll = new Map();
-const diagSetTimeout = globalThis.setTimeout;
-const diagClearTimeout = globalThis.clearTimeout;
-globalThis.setTimeout = (fn, ms, ...args) => {
-  let h;
-  h = diagSetTimeout(() => {
-    diagTimers.delete(h);
-    if (ms >= 1000) console.log('diag: timer fired ms=' + ms + ' ' + diagState());
-    fn(...args);
-  }, ms);
-  diagTimers.set(h, { ms, at: Date.now() });
-  return h;
-};
-globalThis.clearTimeout = (h) => {
-  diagTimers.delete(h);
-  return diagClearTimeout(h);
-};
-function diagTrack(ws, kind) {
-  diagAll.set(ws, { kind, at: Date.now() });
-  const gone = () => diagAll.delete(ws);
-  ws.addEventListener('close', gone);
-  ws.addEventListener('error', gone);
-}
-function diagState() {
-  const now = Date.now();
-  const age = (at) => Math.round((now - at) / 1000) + 's';
-  const timers = [...diagTimers.values()].map((t) => t.ms + 'ms@' + age(t.at));
-  const all = [...diagAll.entries()].map(([ws, a]) => a.kind + ':rs' + ws.readyState + ':' + age(a.at));
-  const p = current;
-  if (!p) return 'no program timers=[' + timers + '] all=[' + all + ']';
-  let g = '';
-  try {
-    if (!p.exited && p.api && p.api.diag) g = p.api.diag();
-  } catch (e) {
-    g = 'diag error ' + e;
-  }
-  return (
-    'map=' + p.sockets.size + ' all=[' + all + '] bodies=' + p.bodies.size + ' streams=' + p.streams.size +
-    ' pending=' + p.pending.size + ' timers=[' + timers + '] goTimeouts=' + (p.go._scheduledTimeouts ? p.go._scheduledTimeouts.size : '?') +
-    ' exited=' + p.exited + ' | ' + g
-  );
-}
-
 const HUB_INSTANCE = 'hub';
 
 // The most bytes a login host request body, or the body of the handoff on
@@ -326,7 +280,6 @@ class program {
         ws.binaryType = 'arraybuffer';
         ws.accept();
         p.sockets.set(id, ws);
-        diagTrack(ws, 'stream' + id);
         ws.addEventListener('message', (e) => {
           if (p.exited) return;
           // A text message is a lazy stream's ack, which Go checks.
@@ -339,7 +292,6 @@ class program {
           }
         });
         const closed = (e) => {
-          console.log('diag: stream' + id + ' ' + e.type + ' code=' + (e.code || 0) + ' inMap=' + p.sockets.has(id));
           if (!p.sockets.delete(id) || p.exited) return;
           p.api.closed(id, e.code || 0);
         };
@@ -375,7 +327,6 @@ class program {
       // Closes WebSocket id with code and reason, or with neither when code
       // is 0.
       close(id, code, reason) {
-        console.log('diag: go closes ' + id + ' code=' + code + ' ' + reason);
         const ws = p.sockets.get(id);
         p.sockets.delete(id);
         p.parts.delete(id);
@@ -396,7 +347,6 @@ class program {
         ws.binaryType = 'arraybuffer';
         ws.accept();
         p.sockets.set(id, ws);
-        diagTrack(ws, 'browser' + id);
         ws.addEventListener('message', (e) => {
           if (p.exited) return;
           if (typeof e.data === 'string') return p.api.wsText(id, e.data);
@@ -628,7 +578,6 @@ const OPEN = 1;
 export class Hub extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    this.diagBornAt = Date.now();
     console.log('hub: durable object started');
     // The privilege tokens that have added a passkey, so that a token is
     // used once. Storage outlives a deploy, which restarts the Go program.
@@ -655,7 +604,6 @@ export class Hub extends DurableObject {
   async fetch(req) {
     if (this.badMode) return textError('bad HUB_MODE', 500);
     const url = new URL(req.url);
-    console.log('diag: fetch ' + url.hostname + url.pathname + ' instAge=' + Math.round((Date.now() - this.diagBornAt) / 1000) + 's moduleAge=' + Math.round((Date.now() - diagModuleAt) / 1000) + 's ' + diagState());
     if (this.lazy) {
       this.prune();
       if (
@@ -754,7 +702,6 @@ export class Hub extends DurableObject {
   // pending, and "refuse <id>" once it is verified. A verified socket that
   // sends anything else is closed. "ping" never arrives here.
   async webSocketMessage(ws, msg) {
-    console.log('diag: control message ' + (typeof msg === 'string' ? msg.slice(0, 20) : 'binary') + ' instAge=' + Math.round((Date.now() - this.diagBornAt) / 1000) + 's ' + diagState());
     if (!this.lazy) return closeWS(ws, 1011, 'no handler');
     this.prune();
     if (ws.readyState !== OPEN) return;
@@ -804,7 +751,6 @@ export class Hub extends DurableObject {
   // A hibernatable WebSocket does not answer a close by itself, so the
   // handler closes it.
   async webSocketClose(ws, code, reason) {
-    console.log('diag: control close ' + code + ' ' + diagState());
     console.log('lazy: control socket closed, code ' + code + ' ' + JSON.stringify(reason));
     closeWS(ws, 1000, 'closed');
   }
