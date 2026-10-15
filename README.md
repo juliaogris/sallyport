@@ -140,16 +140,6 @@ with a probe every minute (see [Rust and Go](#rust-and-go)).
 - The hub does not limit requests per client. See
   [Rate limiting](#rate-limiting).
 
-## Possible directions
-
-- Move the on-demand callout into Teleport, so that the stock auth
-  service can serve a hub without a fork.
-- A proxy for app access with no proxy server to run. A stock Teleport
-  cluster needs a proxy with a public address and port 443 open. With a
-  hub on Cloudflare, a home or a small office behind a router with no
-  public address needs only the auth and app services.
-- More of the proxy's features in the hub, such as access requests.
-
 ## Setup
 
 ### Sample setup
