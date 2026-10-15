@@ -79,8 +79,9 @@ callout:
 Stock Teleport agents keep a reverse tunnel open to the proxy, and send
 keepalives and heartbeats on it. On Cloudflare, each of those messages
 wakes the Durable Object and counts toward the daily request limit. With
-on-demand streams, an idle hub gets only the control WebSocket's pings.
-Cloudflare answers these without running the hub's code.
+the on-demand streams of the [Teleport fork][fork], an idle hub gets only
+the control WebSocket's pings. Cloudflare answers these without running
+the hub's code.
 
 The changes are mostly one new package, `lib/authcallout`, about 1,600
 lines, with about 200 lines of wiring in existing Teleport code.
