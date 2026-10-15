@@ -8,7 +8,7 @@ import (
 )
 
 func TestClassify(t *testing.T) {
-	c := &config{owner: "me", domain: "example.com"}
+	c := &config{owner: "me", domain: "example.com", subApps: map[string]bool{"tp": true}}
 	tests := []struct {
 		host string
 		kind hostKind
@@ -23,6 +23,9 @@ func TestClassify(t *testing.T) {
 		{"other.example.com", hostNone, ""},
 		{"me.example.com.evil", hostNone, ""},
 		{"x.me.example.com", hostNone, ""},
+		{"tp.me.example.com", hostApp, "tp"},
+		{"tp-me.example.com", hostNone, ""},
+		{"a.tp.me.example.com", hostNone, ""},
 	}
 	for _, tt := range tests {
 		kind, app := c.classify(tt.host)

@@ -255,7 +255,7 @@ func (h *hub) launch(req *request, name string) *response {
 	if s == nil {
 		return redirect("/web/login")
 	}
-	publicAddr := name + "-" + h.cfg.owner + "." + h.cfg.domain
+	publicAddr := h.cfg.appHost(name)
 	sid, bearer, err := func() (string, string, error) {
 		cert, err := h.sessionCert(s)
 		if err != nil {

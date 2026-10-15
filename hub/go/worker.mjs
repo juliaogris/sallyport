@@ -148,7 +148,8 @@ function hub(env) {
   return env.HUB.get(env.HUB.idFromName(HUB_INSTANCE));
 }
 
-// Returns 'login' for OWNER.DOMAIN, 'app' for <app>-OWNER.DOMAIN, or null.
+// Returns 'login' for OWNER.DOMAIN, 'app' for <app>-OWNER.DOMAIN or, for an
+// app in SUB_APPS, <app>.OWNER.DOMAIN, or null.
 // App names match ^[a-z][a-z0-9]*$ and are at most 30 bytes.
 function classify(env, host) {
   if (!env.OWNER || !env.DOMAIN) return null;
@@ -156,9 +157,15 @@ function classify(env, host) {
   if (!host.endsWith(suffix)) return null;
   const label = host.slice(0, -suffix.length);
   if (label === env.OWNER) return 'login';
+  const sub = (env.SUB_APPS || '').split(',').map((n) => n.trim());
+  if (label.endsWith('.' + env.OWNER)) {
+    return sub.includes(label.slice(0, -env.OWNER.length - 1)) ? 'app' : null;
+  }
   const own = '-' + env.OWNER;
   if (!label.endsWith(own)) return null;
-  return /^[a-z][a-z0-9]{0,29}$/.test(label.slice(0, -own.length)) ? 'app' : null;
+  const name = label.slice(0, -own.length);
+  if (sub.includes(name)) return null;
+  return /^[a-z][a-z0-9]{0,29}$/.test(name) ? 'app' : null;
 }
 
 // The /webapi/find response a stock agent needs to pick TLS routing and the

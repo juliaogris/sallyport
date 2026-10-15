@@ -16,7 +16,7 @@ import (
 // that multi-line PEM survives `wrangler secret put`.
 var envNames = []string{
 	"CLUSTER_NAME", "PUBLIC_ADDR", "SERVER_VERSION", "CALLOUT_HOST",
-	"DOMAIN", "OWNER", "APPS",
+	"DOMAIN", "OWNER", "APPS", "SUB_APPS",
 	"HUB_TLS_CERT", "HUB_TLS_KEY", "HUB_SSH_KEY", "HUB_SSH_CERT",
 	"HOST_CA_SSH", "HOST_CA_TLS", "AUTH_CALLOUT_PUBKEY", "HUB_MODE",
 }
@@ -28,8 +28,12 @@ type config struct {
 	cluster     string
 	calloutHost string
 	owner       string
-	domain      string
-	apps        []app
+	// subApps are the apps served at <app>.<owner>.<domain>, under the login
+	// host, in place of <app>-<owner>.<domain>. A web UI that logs in with a
+	// passkey must be under the login host, the WebAuthn relying party.
+	subApps map[string]bool
+	domain  string
+	apps    []app
 	// lazy is true when HUB_MODE is lazy: auth's callout keeps one control
 	// socket open, and the hub asks it for a stream each time it needs one.
 	// HUB_MODE unset or pool is the pool hub, and any other value is an
@@ -63,6 +67,7 @@ func parseConfig(env map[string]string) *config {
 		owner:       env["OWNER"],
 		domain:      env["DOMAIN"],
 		apps:        parseApps(env["APPS"]),
+		subApps:     parseSubApps(env["SUB_APPS"]),
 		lazy:        env["HUB_MODE"] == "lazy",
 		errs:        make(map[string]error),
 	}
@@ -247,11 +252,36 @@ func (c *config) classify(host string) (hostKind, string) {
 	if label == c.owner {
 		return hostLogin, ""
 	}
+	if name, ok := strings.CutSuffix(label, "."+c.owner); ok {
+		if !c.subApps[name] {
+			return hostNone, ""
+		}
+		return hostApp, name
+	}
 	name, ok := strings.CutSuffix(label, "-"+c.owner)
-	if !ok || !validName(name) {
+	if !ok || !validName(name) || c.subApps[name] {
 		return hostNone, ""
 	}
 	return hostApp, name
+}
+
+// appHost returns the host of the app name.
+func (c *config) appHost(name string) string {
+	if c.subApps[name] {
+		return name + "." + c.owner + "." + c.domain
+	}
+	return name + "-" + c.owner + "." + c.domain
+}
+
+// parseSubApps parses a comma-separated list of app names.
+func parseSubApps(s string) map[string]bool {
+	m := make(map[string]bool)
+	for _, n := range strings.Split(s, ",") {
+		if n = strings.TrimSpace(n); validName(n) {
+			m[n] = true
+		}
+	}
+	return m
 }
 
 func (c *config) loginHost() string { return c.owner + "." + c.domain }
