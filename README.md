@@ -12,8 +12,8 @@ Teleport does not support it. For full Teleport features and support, use
 
 ## Why
 
-Teleport works well for this, but a full Teleport cluster is a lot to run
-for a home network. Its proxy needs a public address, an open port and a
+Teleport gives access to apps with roles, passkeys and an audit log, but
+a full Teleport cluster is a lot to run for a home network. Its proxy needs a public address, an open port and a
 server that is always on. Sallyport is a variant that puts only a small
 part on the internet, a hub on Cloudflare's free Workers plan. Teleport's
 auth service, with the users, roles, sessions and audit log, stays on the
