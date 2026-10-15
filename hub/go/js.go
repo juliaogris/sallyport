@@ -113,6 +113,9 @@ func main() {
 		}
 		return nil
 	}))
+	api.Set("diag", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return diagString()
+	}))
 	api.Set("shutdown", js.FuncOf(func(this js.Value, args []js.Value) any {
 		logf("hub: shutting down for a new Durable Object instance")
 		os.Exit(0)
