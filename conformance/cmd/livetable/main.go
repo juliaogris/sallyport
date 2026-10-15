@@ -1,6 +1,6 @@
-// Command livetable prints one table from the files live/run.sh writes:
-// <scenario>.load.json from the load tool and <scenario>.tail.sum.json from
-// tailsum.
+// Command livetable prints one table from the files of a live load run in
+// DIR: <scenario>.load.json from the load tool and <scenario>.tail.sum.json
+// from tailsum.
 //
 //	livetable DIR
 package main

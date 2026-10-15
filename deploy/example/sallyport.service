@@ -1,0 +1,19 @@
+# A systemd user unit for the fork's auth and app service. Install it in
+# ~/.config/systemd/user/, then run:
+#
+#   systemctl --user enable --now sallyport
+#   loginctl enable-linger "$USER"
+#
+# Lingering starts the unit at boot without a login.
+[Unit]
+Description=sallyport auth and app service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/sallyport/bin/teleport start --config=%h/sallyport/teleport.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

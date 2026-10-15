@@ -1,7 +1,0 @@
-[Unit]
-Description=Renew the sallyport probe app sessions
-After=sallyport-auth.service sallyport-party.service
-
-[Service]
-Type=oneshot
-ExecStart=/home/julia/sallyport-probe/bin/renew.sh

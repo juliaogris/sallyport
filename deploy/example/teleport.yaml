@@ -1,0 +1,47 @@
+# Auth and the app service in one process of the Teleport fork, for a hub
+# at me.example.com. Auth calls out to the hub, and the app service serves
+# the apps through the callout. Nothing in this process listens on the
+# internet.
+version: v3
+teleport:
+  nodename: home
+  data_dir: /home/me/sallyport/data
+  log:
+    output: stderr
+    severity: INFO
+auth_service:
+  enabled: true
+  # CLUSTER_NAME in the hub's wrangler.toml.
+  cluster_name: home
+  listen_addr: 127.0.0.1:3025
+  proxy_protocol: off
+  proxy_listener_mode: multiplex
+  # The hub's login host, which is CALLOUT_HOST in its wrangler.toml.
+  callout_to: wss://me.example.com/tunnel/auth
+  # The Ed25519 key whose public half is AUTH_CALLOUT_PUBKEY on the hub.
+  callout_key_file: /home/me/sallyport/callout.pem
+  callout_mode: on_demand
+  authentication:
+    type: local
+    second_factor: "on"
+    webauthn:
+      # The hub's login host.
+      rp_id: me.example.com
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false
+app_service:
+  enabled: true
+  apps:
+  # An app's public_addr is <app>-OWNER.DOMAIN, and its name is in APPS.
+  - name: printer
+    uri: http://printer.lan
+    public_addr: printer-me.example.com
+    # OctoPrint accepts a WebSocket only when its Origin matches the Host
+    # header and X-Scheme. The app service sends the Host of the uri, so
+    # OctoPrint needs these two headers.
+    rewrite:
+      headers:
+      - "Host: printer-me.example.com"
+      - "X-Scheme: https"
