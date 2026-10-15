@@ -5,10 +5,9 @@ Teleport login and passkeys, through a Cloudflare Worker. The server at
 home only dials out, so no port is open to the internet, and there is no
 need for a VPN or a tunnel to a machine.
 
-Sallyport is a personal proof of concept, not code for real deployments.
-It is not affiliated with or supported by Teleport, and it is not
-battle-tested. For full Teleport features and support, use
-[Teleport Cloud][cloud].
+Sallyport is a personal proof of concept and is not battle-tested. It is
+not affiliated with or supported by Teleport. For full Teleport features
+and support, use [Teleport Cloud][cloud].
 
 ## Why
 
@@ -33,7 +32,8 @@ Sallyport gives access to one app at a time, in a normal browser:
   See [Temporary access](#temporary-access).
 - **Passkeys.** Users log in with a passkey. A user can have several,
   for example one on a phone and one on a laptop.
-- **Audit.** Teleport records each login and app session.
+- **Audit.** Teleport records each login and app session. The records
+  show a Cloudflare address in place of the user's IP.
 
 ## Screenshots
 
@@ -60,8 +60,7 @@ Sallyport has two parts.
 
 On each app request, the hub asks auth whether the user's app session is
 still valid. It then sends the request through the app service with the
-user's certificate, so Teleport's roles and audit apply as with a stock
-proxy.
+user's certificate, so Teleport's roles apply as with a stock proxy.
 
 ### The Teleport fork
 
@@ -75,8 +74,6 @@ callout:
    control WebSocket to dial a new stream.
 3. Auth opens the stream, and the hub uses it for one connection: a call
    to auth, or an app request through the app service.
-
-Between requests, only the control WebSocket is open.
 
 Stock Teleport agents keep a reverse tunnel open to the proxy, and send
 keepalives and heartbeats on it. On Cloudflare, each of those messages
@@ -106,8 +103,10 @@ are from October 2026.
   about 20 requests, an app page about 50 to 100, and a webcam stream is
   one long request. These are estimates.
 
-Several hubs on one free account can run out of Durable Object time. The
-account then stops serving until 00:00 UTC.
+Several hubs on one free account can run out of Durable Object time, and
+the account then stops serving until 00:00 UTC. Anyone who knows the
+hostnames can do the same with the request limit, or flood the login page
+until auth refuses new streams. See [Rate limiting](#rate-limiting).
 
 ## Status
 
@@ -124,6 +123,13 @@ with a probe every minute (see [Rust and Go](#rust-and-go)).
 - Cloudflare ends the browser's TLS connection, so Cloudflare can read the
   traffic between the browser and the hub.
 - The Teleport fork is based on Teleport 18.11.1 and is not upstream.
+- Auth trusts the hub by the public TLS certificate of the login host. A
+  takeover of the Cloudflare account or the Worker can act as the proxy,
+  so the Cloudflare account needs strong login protection.
+- Logout clears the browser's cookies, but the session stays valid at auth
+  until it expires.
+- The hub does not limit requests per client. See
+  [Rate limiting](#rate-limiting).
 
 ## Possible directions
 
@@ -288,7 +294,7 @@ echo '<public key from step 2>' | npx wrangler@4 secret put AUTH_CALLOUT_PUBKEY 
 ```
 
 The deploy comes first, because `wrangler secret put` on a Worker that
-does not exist yet asks whether to create it. Each `secret put` makes a
+does not exist asks whether to create it. Each `secret put` makes a
 new version of the Worker, so the hub reads the secrets without another
 deploy.
 
@@ -329,7 +335,8 @@ work with Sallyport:
 - **Changing roles.** `tctl users update alice --set-roles=...` changes
   what a user may open. The change applies at the user's next login,
   because the app session takes its roles from the login.
-- **Locks.** `tctl lock --user=alice --ttl=1h` blocks a user for a time.
+- **Locks.** `tctl lock --user=alice --ttl=1h` blocks a user's new app
+  requests for a time. The app service checks locks, not the hub.
 
 For example, a guest can have a role that allows no apps. To show them
 the printer for an afternoon, give them a role that allows it, and set a
@@ -340,6 +347,13 @@ session at once, and that a deleted user's sessions stop working. -->
 
 Teleport's access requests, where a user asks for a role for a while and
 someone approves it, are not supported. The hub has no pages for them.
+
+### Rate limiting
+
+In the Cloudflare dashboard, add a rate limiting rule for the hub's
+hostnames, for example for paths that start with `/webapi/`, or put the
+hostnames behind Cloudflare Access. Both run before the Worker, so blocked
+requests do not count toward the quota.
 
 ### 7. Add more passkeys
 
