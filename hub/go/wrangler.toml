@@ -1,13 +1,15 @@
-# The Go hub. Each env is one deployment:
+# The Go hub. Each env is one deployment. Set your own values in the home
+# env below, or in a copy of this file in this directory, and deploy with:
 #
-#   npx wrangler@4 deploy --env edge    # julia.example.com, gmail account
-#   npx wrangler@4 deploy --env party   # julia.example.net, free account
+#   npx wrangler@4 deploy --env home
+#   npx wrangler@4 deploy -c <copy>.toml --env home
+#
+# A copy must stay in this directory, because wrangler finds main and the
+# build command relative to the config file.
 #
 # Always pass an env. Without one, wrangler deploys a Worker with this
 # name, no routes and no vars.
 name = "sallyport-hub"
-# The gmail account, so that wrangler does not ask when a login sees two.
-account_id = "00000000000000000000000000000000"
 main = "worker.mjs"
 compatibility_date = "2026-09-01"
 
@@ -22,54 +24,33 @@ class_name = "Hub"
 tag = "v1"
 new_sqlite_classes = ["Hub"]
 
-# julia.example.com, on the gmail account, for the auth cluster in
-# deploy/homesrv.
-[env.edge]
-name = "sallyport-hub-edge"
+# An example deployment. The login host is OWNER.DOMAIN, here
+# me.example.com, and each app is at <app>-OWNER.DOMAIN. Every host needs a
+# route, and DOMAIN must be a zone in the Cloudflare account.
+[env.home]
+name = "sallyport-hub-home"
+# Your Cloudflare account ID, from the dashboard or `npx wrangler@4 whoami`.
+account_id = "YOUR_ACCOUNT_ID"
 routes = [
-  { pattern = "julia.example.com", custom_domain = true },
-  { pattern = "bench-julia.example.com", custom_domain = true },
-  { pattern = "octo-julia.example.com", custom_domain = true },
-  { pattern = "octocam-julia.example.com", custom_domain = true },
+  { pattern = "me.example.com", custom_domain = true },
+  { pattern = "printer-me.example.com", custom_domain = true },
 ]
 
-[env.edge.vars]
+[env.home.vars]
 HUB_MODE = "lazy"
-CLUSTER_NAME = "sallyport"
-PUBLIC_ADDR = "julia.example.com:443"
+# The cluster_name in the auth service's teleport.yaml.
+CLUSTER_NAME = "home"
+PUBLIC_ADDR = "me.example.com:443"
+# The Teleport version of the fork.
 SERVER_VERSION = "18.11.1"
-CALLOUT_HOST = "julia.example.com"
+# The host in the auth service's callout_to URL.
+CALLOUT_HOST = "me.example.com"
 DOMAIN = "example.com"
-OWNER = "julia"
-APPS = "bench,octo,octocam:/stream"
+OWNER = "me"
+# The apps on the dashboard, comma-separated. An app may have a start path
+# after a colon, such as cam:/stream.
+APPS = "printer"
 
-[[env.edge.durable_objects.bindings]]
-name = "HUB"
-class_name = "Hub"
-
-# julia.example.net, on the free account, for the cluster in
-# deploy/homesrv-party. The free plan's daily Durable Object time is enough for
-# one hub, so this is the only hub on that account.
-[env.party]
-name = "sallyport-hub-party"
-account_id = "11111111111111111111111111111111"
-routes = [
-  { pattern = "julia.example.net", custom_domain = true },
-  { pattern = "bench-julia.example.net", custom_domain = true },
-  { pattern = "octo-julia.example.net", custom_domain = true },
-  { pattern = "octocam-julia.example.net", custom_domain = true },
-]
-
-[env.party.vars]
-HUB_MODE = "lazy"
-CLUSTER_NAME = "sallyport-party"
-PUBLIC_ADDR = "julia.example.net:443"
-SERVER_VERSION = "18.11.1"
-CALLOUT_HOST = "julia.example.net"
-DOMAIN = "example.net"
-OWNER = "julia"
-APPS = "bench,octo,octocam:/stream"
-
-[[env.party.durable_objects.bindings]]
+[[env.home.durable_objects.bindings]]
 name = "HUB"
 class_name = "Hub"

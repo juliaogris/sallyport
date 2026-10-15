@@ -21,8 +21,8 @@ import (
 // total codewords, error correction codewords per block, and blocks.
 var qrLevelM = [][3]int{{26, 10, 1}, {44, 16, 1}, {70, 26, 1}, {100, 18, 2}, {134, 24, 2}, {172, 16, 4}}
 
-// qrLink is the text of a real link, 70 bytes.
-const qrLink = "https://go.example.com/web/add-passkey#0123456789abcdef0123456789abcdef"
+// qrLink is the text of a real link, 71 bytes.
+const qrLink = "https://me.example.com/web/add-passkey#0123456789abcdef0123456789abcdef"
 
 func TestPageQR(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -34,8 +34,8 @@ func TestPageQR(t *testing.T) {
 		size       int
 	}{
 		{"short", "hello", 21},
-		{"go link", qrLink, 37},
-		{"edge link", strings.Replace(qrLink, "go.", "julia.", 1), 37},
+		{"link", qrLink, 37},
+		{"longer link", strings.Replace(qrLink, "me.", "alice.", 1), 37},
 		{"four blocks", strings.Repeat("sallyport ", 10), 41},
 		{"longest", strings.Repeat("x", 106), 41},
 	}

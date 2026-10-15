@@ -14,7 +14,7 @@ import (
 )
 
 func TestCertForHost(t *testing.T) {
-	const host = "bench-julia.example.com"
+	const host = "bench-me.example.com"
 	appName := asn1.ObjectIdentifier{1, 3, 9999, 1, 10}
 	tests := []struct {
 		name  string
@@ -31,7 +31,7 @@ func TestCertForHost(t *testing.T) {
 		},
 		{
 			name:  "address of another app host",
-			extra: []pkix.AttributeTypeAndValue{{Type: appPublicAddrOID, Value: "other-julia.example.com"}},
+			extra: []pkix.AttributeTypeAndValue{{Type: appPublicAddrOID, Value: "other-me.example.com"}},
 			want:  false,
 		},
 		{
@@ -63,7 +63,7 @@ func testCert(t *testing.T, extra []pkix.AttributeTypeAndValue) []byte {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "julia", ExtraNames: extra},
+		Subject:      pkix.Name{CommonName: "alice", ExtraNames: extra},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 	}

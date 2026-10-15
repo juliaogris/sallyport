@@ -1,8 +1,7 @@
 # Go hub
 
 The sallyport hub runs on Cloudflare Workers as `GOOS=js` WebAssembly
-inside one Durable Object. It serves `julia.example.com` and
-`julia.example.net`.
+inside one Durable Object.
 
 ## Layout
 
@@ -56,8 +55,7 @@ inside one Durable Object. It serves `julia.example.com` and
 
 ```
 ./build.sh                          # build/hub.wasm, about 11.85 MB
-npx wrangler@4 deploy --env edge    # julia.example.com
-npx wrangler@4 deploy --env party   # julia.example.net
+npx wrangler@4 deploy --env home    # the env in wrangler.toml
 ```
 
 `wrangler deploy` runs `build.sh` itself. `NO_OPT=1 ./build.sh` skips

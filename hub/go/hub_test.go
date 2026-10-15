@@ -8,21 +8,21 @@ import (
 )
 
 func TestClassify(t *testing.T) {
-	c := &config{owner: "go", domain: "example.com"}
+	c := &config{owner: "me", domain: "example.com"}
 	tests := []struct {
 		host string
 		kind hostKind
 		app  string
 	}{
-		{"go.example.com", hostLogin, ""},
-		{"bench-go.example.com", hostApp, "bench"},
-		{"octocam-go.example.com", hostApp, "octocam"},
-		{"Bench-go.example.com", hostNone, ""},
-		{"-go.example.com", hostNone, ""},
-		{"a-b-go.example.com", hostNone, ""},
-		{"julia.example.com", hostNone, ""},
-		{"go.example.com.evil", hostNone, ""},
-		{"x.go.example.com", hostNone, ""},
+		{"me.example.com", hostLogin, ""},
+		{"bench-me.example.com", hostApp, "bench"},
+		{"octocam-me.example.com", hostApp, "octocam"},
+		{"Bench-me.example.com", hostNone, ""},
+		{"-me.example.com", hostNone, ""},
+		{"a-b-me.example.com", hostNone, ""},
+		{"other.example.com", hostNone, ""},
+		{"me.example.com.evil", hostNone, ""},
+		{"x.me.example.com", hostNone, ""},
 	}
 	for _, tt := range tests {
 		kind, app := c.classify(tt.host)
