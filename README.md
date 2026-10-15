@@ -466,6 +466,11 @@ that rate.
   Rust hub depended on about 47 changes to russh and ssh-key, which each
   upgrade of those crates would need again.
 
+Go has costs too. Its WebAssembly is about 3.3 MB gzipped, against about
+0.7 MB for Rust, and it starts at about 39 MiB of the Durable Object's
+128 MB of memory, against under 2 MiB for Rust. Neither caused a problem
+in the 7-day run.
+
 ## Name
 
 The name comes from military terminology. A sallyport is a fortified
