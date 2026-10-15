@@ -20,18 +20,18 @@ import (
 // through the agent tunnel.
 func TestAppWebSocket(t *testing.T) {
 	s := newStack(t)
-	testAppWebSocket(t, s, s.appCookies(t, "bench"))
+	testAppWebSocket(t, s, appHost("bench"), s.appCookies(t, "bench"))
 }
 
 // TestLazyAppWebSocket checks a WebSocket from a logged-in browser to an
 // app, through a stream from auth's callout.
 func TestLazyAppWebSocket(t *testing.T) {
 	s := newLazyStack(t)
-	testAppWebSocket(t, s, s.appCookies(t, "bench"))
+	testAppWebSocket(t, s, appHost("bench"), s.appCookies(t, "bench"))
 }
 
-func testAppWebSocket(t *testing.T, s *stack, cookies []*http.Cookie) {
-	host := appHost("bench")
+// testAppWebSocket checks WebSockets to the test app at host.
+func testAppWebSocket(t *testing.T, s *stack, host string, cookies []*http.Cookie) {
 
 	t.Run("handshake", func(t *testing.T) {
 		extra := append([]*http.Cookie{{Name: "app", Value: "1"}}, cookies...)

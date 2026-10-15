@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -26,11 +27,37 @@ func TestClassify(t *testing.T) {
 		{"tp.me.example.com", hostApp, "tp"},
 		{"tp-me.example.com", hostNone, ""},
 		{"a.tp.me.example.com", hostNone, ""},
+		{"bench.me.example.com", hostNone, ""},
+		{".me.example.com", hostNone, ""},
+		{"TP.me.example.com", hostNone, ""},
 	}
 	for _, tt := range tests {
 		kind, app := c.classify(tt.host)
 		if kind != tt.kind || app != tt.app {
 			t.Errorf("classify(%q) = %v, %q, want %v, %q", tt.host, kind, app, tt.kind, tt.app)
+		}
+	}
+}
+
+func TestParseSubApps(t *testing.T) {
+	got := parseSubApps(" tp, ,Bad,a.b,web ")
+	want := map[string]bool{"tp": true, "web": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseSubApps = %v, want %v", got, want)
+	}
+	if got := parseSubApps(""); len(got) != 0 {
+		t.Errorf("parseSubApps(\"\") = %v, want none", got)
+	}
+}
+
+func TestAppHost(t *testing.T) {
+	c := &config{owner: "me", domain: "example.com", subApps: map[string]bool{"tp": true}}
+	for name, want := range map[string]string{"tp": "tp.me.example.com", "bench": "bench-me.example.com"} {
+		if got := c.appHost(name); got != want {
+			t.Errorf("appHost(%q) = %q, want %q", name, got, want)
+		}
+		if kind, app := c.classify(want); kind != hostApp || app != name {
+			t.Errorf("classify(appHost(%q)) = %v, %q", name, kind, app)
 		}
 	}
 }

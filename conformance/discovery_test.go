@@ -58,7 +58,7 @@ func TestUpgradeRequired(t *testing.T) {
 // app host gets 404.
 func TestUnknownHost(t *testing.T) {
 	logOnFailure(t, shared)
-	for _, host := range []string{"other.test", "hub.example", "-hub.test", "bench_x-hub.test"} {
+	for _, host := range []string{"other.test", "hub.example", "-hub.test", "bench_x-hub.test", ".hub.test", "bench.hub.test"} {
 		t.Run(host, func(t *testing.T) {
 			resp, err := shared.Get(host, "/")
 			require.NoError(t, err)

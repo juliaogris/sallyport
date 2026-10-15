@@ -67,11 +67,17 @@ func run(m *testing.M) int {
 // connection count.
 func freshHub(t *testing.T) *Hub {
 	t.Helper()
+	return freshHubVars(t, BaseVars())
+}
+
+// freshHubVars is freshHub for a hub that runs with vars.
+func freshHubVars(t *testing.T, vars map[string]string) *Hub {
+	t.Helper()
 	dir := filepath.Join(tmp, t.Name())
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h, err := StartHub(t.Context(), hubDir, dir, BaseVars(), pki.Secrets())
+	h, err := StartHub(t.Context(), hubDir, dir, vars, pki.Secrets())
 	if err != nil {
 		t.Fatal(err)
 	}

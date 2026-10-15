@@ -20,7 +20,13 @@ import (
 // it, and serves the test app on the app streams it asks for.
 func newLazyStack(t *testing.T) *stack {
 	t.Helper()
-	h := lazyHub(t)
+	return newLazyStackVars(t, LazyVars())
+}
+
+// newLazyStackVars is newLazyStack for a hub that runs with vars.
+func newLazyStackVars(t *testing.T, vars map[string]string) *stack {
+	t.Helper()
+	h := lazyHubVars(t, vars)
 	auth, err := NewFakeAuth(pki)
 	require.NoError(t, err)
 	t.Cleanup(auth.Close)
@@ -33,15 +39,21 @@ func newLazyStack(t *testing.T) *stack {
 	t.Cleanup(func() {
 		require.Empty(t, auth.BadDialIDs(), "dial ids that are not 43 characters of base64url")
 	})
-	return &stack{hub: h, auth: auth}
+	return &stack{hub: h, auth: auth, sub: subApps(vars)}
 }
 
 // lazyHub starts a hub of its own in lazy mode.
 func lazyHub(t *testing.T) *Hub {
 	t.Helper()
+	return lazyHubVars(t, LazyVars())
+}
+
+// lazyHubVars is lazyHub for a hub that runs with vars.
+func lazyHubVars(t *testing.T, vars map[string]string) *Hub {
+	t.Helper()
 	dir := filepath.Join(tmp, t.Name())
 	require.NoError(t, os.MkdirAll(dir, 0o700))
-	h, err := StartHub(t.Context(), hubDir, dir, LazyVars(), pki.Secrets())
+	h, err := StartHub(t.Context(), hubDir, dir, vars, pki.Secrets())
 	require.NoError(t, err)
 	t.Cleanup(h.Stop)
 	logOnFailure(t, h)

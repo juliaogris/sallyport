@@ -23,13 +23,21 @@ type stack struct {
 	hub   *Hub
 	auth  *FakeAuth
 	agent *Agent
+	// sub are the apps in the hub's SUB_APPS.
+	sub map[string]bool
 }
 
 // newStack starts a hub, keeps 4 callout streams open to it, and connects
 // an App agent that serves the test app, dialed with opts.
 func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	t.Helper()
-	h := freshHub(t)
+	return newStackVars(t, BaseVars(), opts...)
+}
+
+// newStackVars is newStack for a hub that runs with vars.
+func newStackVars(t *testing.T, vars map[string]string, opts ...func(*ssh.ClientConfig)) *stack {
+	t.Helper()
+	h := freshHubVars(t, vars)
 	auth, err := NewFakeAuth(pki)
 	require.NoError(t, err)
 	t.Cleanup(auth.Close)
@@ -45,7 +53,7 @@ func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	s := &stack{hub: h, auth: auth, agent: a}
+	s := &stack{hub: h, auth: auth, agent: a, sub: subApps(vars)}
 	// The hub registers the tunnel after it answers the first ping, and
 	// takes callout streams once they are verified.
 	time.Sleep(time.Second)
@@ -54,6 +62,28 @@ func newStack(t *testing.T, opts ...func(*ssh.ClientConfig)) *stack {
 
 // appHost returns the app host of app.
 func appHost(app string) string { return app + "-" + LoginHost }
+
+// subAppHost returns the host of app when it is in SUB_APPS.
+func subAppHost(app string) string { return app + "." + LoginHost }
+
+// appHost returns the host the hub serves app at.
+func (s *stack) appHost(app string) string {
+	if s.sub[app] {
+		return subAppHost(app)
+	}
+	return appHost(app)
+}
+
+// subApps returns the apps in the SUB_APPS of vars.
+func subApps(vars map[string]string) map[string]bool {
+	m := make(map[string]bool)
+	for _, n := range strings.Split(vars["SUB_APPS"], ",") {
+		if n != "" {
+			m[n] = true
+		}
+	}
+	return m
+}
 
 // post sends a POST with Origin set to origin, unless origin is "".
 func (s *stack) post(t *testing.T, host, path, origin, body string, cookies ...*http.Cookie) *http.Response {
@@ -131,7 +161,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	require.NoError(t, err)
 	require.Equal(t, "https", loc.Scheme)
-	require.Equal(t, appHost(app), loc.Host)
+	require.Equal(t, s.appHost(app), loc.Host)
 	require.Equal(t, "/x-teleport-auth", loc.Path)
 	parts := strings.Split(loc.Fragment, ".")
 	require.Len(t, parts, 3, "fragment %q", loc.Fragment)
@@ -144,7 +174,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp := s.post(t, appHost(app), "/x-teleport-auth", origin(appHost(app)), string(body))
+	resp := s.post(t, s.appHost(app), "/x-teleport-auth", origin(s.appHost(app)), string(body))
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")
