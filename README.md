@@ -5,9 +5,10 @@ Teleport login and passkeys, through a Cloudflare Worker. The server at
 home only dials out, so no port is open to the internet, and there is no
 need for a VPN or a tunnel to a machine.
 
-Sallyport is a personal proof of concept and is not battle-tested. It is
-not affiliated with or supported by Teleport. For full Teleport features
-and support, use [Teleport Cloud][cloud].
+Sallyport is a personal proof of concept and is not battle-tested. The
+author works at Teleport, but Sallyport is not a Teleport project, and
+Teleport does not support it. For full Teleport features and support, use
+[Teleport Cloud][cloud].
 
 ## Why
 
