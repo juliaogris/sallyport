@@ -36,7 +36,7 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("login finish refused", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-mallory","type":"public-key"}`)
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), loginAssertion("cred-mallory"))
 		readBody(t, resp)
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 		require.Nil(t, cookie(resp, "__Host-sp_session"))
@@ -54,7 +54,7 @@ func TestWeb(t *testing.T) {
 	for _, path := range []string{"/webapi/login/begin", "/webapi/login/finish", "/web/launch/bench", "/web/logout", "/webapi/invite/" + BobInvite + "/begin"} {
 		// An http:// Origin is not tested, because wrangler dev rewrites
 		// the scheme of Origin to its own.
-		for _, o := range []string{"", "https://other.test", origin(appHost("bench"))} {
+		for _, o := range []string{"", "https://other.test", origin(appHost("bench")), origin(subAppHost("tp"))} {
 			t.Run("origin "+o+" "+path, func(t *testing.T) {
 				resp := s.post(t, LoginHost, path, o, `{"id":"`+AliceCredID+`"}`)
 				readBody(t, resp)
@@ -79,14 +79,7 @@ func TestWeb(t *testing.T) {
 			"authenticatorSelection": {"requireResidentKey": true, "residentKey": "required", "userVerification": "required"}
 		}`, string(body))
 
-		cred, _ := json.Marshal(map[string]any{
-			"type":  "public-key",
-			"rawId": b64([]byte(BobCredID)),
-			"response": map[string]string{
-				"clientDataJSON":    b64([]byte(`{"type":"webauthn.create"}`)),
-				"attestationObject": b64([]byte("attestation")),
-			},
-		})
+		cred, _ := json.Marshal(newCredential(BobCredID))
 		resp = s.post(t, LoginHost, "/webapi/invite/"+BobInvite+"/finish", origin(LoginHost), string(cred))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)

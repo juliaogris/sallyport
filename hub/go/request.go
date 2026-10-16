@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,8 +51,14 @@ func textError(msg string, status int) *response {
 	return &response{status: status, body: msg, raw: true}
 }
 
+// html returns a hub page. No other page may frame it, so that a page on
+// another host, such as an app host under the login host, cannot put the
+// hub's buttons or passkey prompts under its own.
 func html(body string) *response {
-	return (&response{status: 200, body: body}).add("content-type", "text/html; charset=utf-8")
+	return (&response{status: 200, body: body}).
+		add("content-type", "text/html; charset=utf-8").
+		add("content-security-policy", "frame-ancestors 'none'").
+		add("x-frame-options", "DENY")
 }
 
 func jsonResponse(v any) *response {
@@ -118,17 +125,51 @@ func ctEq(a, b string) bool {
 }
 
 // checkAssertion returns an error unless a is a JSON object with an id
-// and the type "public-key", as a WebAuthn assertion has.
-func checkAssertion(a []byte) error {
+// and the type "public-key", as a WebAuthn assertion has, and its client
+// data is from a page at origin, as checkClientData checks.
+func checkAssertion(a []byte, origin string) error {
 	var v struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Response struct {
+			ClientDataJSON string `json:"clientDataJSON"`
+		} `json:"response"`
 	}
 	if err := json.Unmarshal(a, &v); err != nil {
 		return fmt.Errorf("assertion: %w", err)
 	}
 	if v.ID == "" || v.Type != "public-key" {
 		return errors.New("assertion: not a public-key credential")
+	}
+	return checkClientData(v.Response.ClientDataJSON, "webauthn.get", origin)
+}
+
+// checkClientData returns an error unless clientDataJSON, in base64url
+// without padding, is the client data of a WebAuthn call of type typ, made
+// by a page at origin and not in a frame from another origin.
+func checkClientData(clientDataJSON, typ, origin string) error {
+	b, err := base64.RawURLEncoding.DecodeString(clientDataJSON)
+	if err != nil {
+		return fmt.Errorf("client data: %w", err)
+	}
+	var v struct {
+		Type        string `json:"type"`
+		Origin      string `json:"origin"`
+		CrossOrigin bool   `json:"crossOrigin"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("client data: %w", err)
+	}
+	// Auth accepts a page on any host under the relying party ID, and an app
+	// in SUB_APPS is on such a host, so only the hub checks that the answer
+	// is from its own page.
+	switch {
+	case v.Type != typ:
+		return fmt.Errorf("client data: type %q, want %q", v.Type, typ)
+	case v.Origin != origin:
+		return fmt.Errorf("client data: origin %q, want %q", v.Origin, origin)
+	case v.CrossOrigin:
+		return errors.New("client data: from a frame on another origin")
 	}
 	return nil
 }

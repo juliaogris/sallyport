@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var long = flag.Bool("long", false, "run the tests that move gigabytes")
+var long = flag.Bool("long", false, "run the tests that move gigabytes or wait minutes")
 
 // TestSlowReader checks that a download the browser stops reading does
 // not stall other requests through the same tunnel.

@@ -28,12 +28,12 @@ type config struct {
 	cluster     string
 	calloutHost string
 	owner       string
+	domain      string
+	apps        []app
 	// subApps are the apps served at <app>.<owner>.<domain>, under the login
 	// host, in place of <app>-<owner>.<domain>. A web UI that logs in with a
 	// passkey must be under the login host, the WebAuthn relying party.
 	subApps map[string]bool
-	domain  string
-	apps    []app
 	// lazy is true when HUB_MODE is lazy: auth's callout keeps one control
 	// socket open, and the hub asks it for a stream each time it needs one.
 	// HUB_MODE unset or pool is the pool hub, and any other value is an
@@ -239,8 +239,10 @@ const (
 	hostApp
 )
 
-// classify returns the host kind and, for an app host, the app name. App
-// names match ^[a-z][a-z0-9]*$, so `<app>-<owner>` splits once.
+// classify returns the host kind and, for an app host, the app name. An app
+// in subApps is an app host only as <app>.<owner>, and any other app only
+// as <app>-<owner>. App names match ^[a-z][a-z0-9]*$, so `<app>-<owner>`
+// splits once.
 func (c *config) classify(host string) (hostKind, string) {
 	if c.owner == "" || c.domain == "" {
 		return hostNone, ""
@@ -273,7 +275,8 @@ func (c *config) appHost(name string) string {
 	return name + "-" + c.owner + "." + c.domain
 }
 
-// parseSubApps parses a comma-separated list of app names.
+// parseSubApps parses SUB_APPS, a comma-separated list of app names. A name
+// that does not match ^[a-z][a-z0-9]*$ is dropped.
 func parseSubApps(s string) map[string]bool {
 	m := make(map[string]bool)
 	for _, n := range strings.Split(s, ",") {
@@ -285,3 +288,6 @@ func parseSubApps(s string) map[string]bool {
 }
 
 func (c *config) loginHost() string { return c.owner + "." + c.domain }
+
+// loginOrigin returns the origin of the hub's pages on the login host.
+func (c *config) loginOrigin() string { return "https://" + c.loginHost() }

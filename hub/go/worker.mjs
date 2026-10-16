@@ -148,16 +148,19 @@ function hub(env) {
   return env.HUB.get(env.HUB.idFromName(HUB_INSTANCE));
 }
 
-// Returns 'login' for OWNER.DOMAIN, 'app' for <app>-OWNER.DOMAIN or, for an
-// app in SUB_APPS, <app>.OWNER.DOMAIN, or null.
 // App names match ^[a-z][a-z0-9]*$ and are at most 30 bytes.
+const APP_NAME = /^[a-z][a-z0-9]{0,29}$/;
+
+// Returns 'login' for OWNER.DOMAIN, 'app' for <app>-OWNER.DOMAIN or, for an
+// app in SUB_APPS, <app>.OWNER.DOMAIN, or null. An app in SUB_APPS is not
+// an app at <app>-OWNER.DOMAIN.
 function classify(env, host) {
   if (!env.OWNER || !env.DOMAIN) return null;
   const suffix = '.' + env.DOMAIN;
   if (!host.endsWith(suffix)) return null;
   const label = host.slice(0, -suffix.length);
   if (label === env.OWNER) return 'login';
-  const sub = (env.SUB_APPS || '').split(',').map((n) => n.trim());
+  const sub = subApps(env);
   if (label.endsWith('.' + env.OWNER)) {
     return sub.includes(label.slice(0, -env.OWNER.length - 1)) ? 'app' : null;
   }
@@ -165,7 +168,13 @@ function classify(env, host) {
   if (!label.endsWith(own)) return null;
   const name = label.slice(0, -own.length);
   if (sub.includes(name)) return null;
-  return /^[a-z][a-z0-9]{0,29}$/.test(name) ? 'app' : null;
+  return APP_NAME.test(name) ? 'app' : null;
+}
+
+// Returns the app names in SUB_APPS, a comma-separated list. A name that is
+// not an app name is dropped, as config.go drops it.
+function subApps(env) {
+  return (env.SUB_APPS || '').split(',').map((n) => n.trim()).filter((n) => APP_NAME.test(n));
 }
 
 // The /webapi/find response a stock agent needs to pick TLS routing and the

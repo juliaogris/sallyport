@@ -32,7 +32,6 @@ func TestLazyAppWebSocket(t *testing.T) {
 
 // testAppWebSocket checks WebSockets to the test app at host.
 func testAppWebSocket(t *testing.T, s *stack, host string, cookies []*http.Cookie) {
-
 	t.Run("handshake", func(t *testing.T) {
 		extra := append([]*http.Cookie{{Name: "app", Value: "1"}}, cookies...)
 		ws, resp := s.dialWS(t, host, "/t/ws?hello=1", origin(host), extra...)

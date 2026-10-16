@@ -12,12 +12,14 @@ import (
 
 // The browser side of the hub: invite, login, launcher and app hosts.
 //
-// Hosts are flat, one level below DOMAIN:
+// Hosts are the login host and one host per app:
 //
 //   - <owner>.<domain> is the login host. It serves the invite page, the
 //     passkey login and a dashboard with one launch button per app. Its
 //     cookie is __Host-sp_session, the user and the web session ID.
-//   - <app>-<owner>.<domain> is an app host. A launch creates an app session
+//   - <app>-<owner>.<domain> is an app host. An app in SUB_APPS is at
+//     <app>.<owner>.<domain> instead, under the login host, and is not
+//     served at <app>-<owner>.<domain>. A launch creates an app session
 //     and redirects to /x-teleport-auth on the app host with the session ID
 //     and its bearer token in the URL fragment. The page there posts them
 //     back and the hub sets __Host-sp_app and __Host-sp_subject. Every other
@@ -125,9 +127,9 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	case strings.HasPrefix(req.path, "/x-teleport-dbsc"):
 		return textError("not found", 404)
 	}
-	// Every <app>-<owner>.<domain> is the same site, so SameSite=Lax still
-	// sends the app cookies on a POST from a sibling app host. Only this
-	// host may send a request that can change state.
+	// Every app host is the same site, so SameSite=Lax still sends the app
+	// cookies on a POST from a sibling app host. Only this host may send a
+	// request that can change state.
 	// A WebSocket handshake is a GET, but it opens a connection that can
 	// change state, so it gets the same check.
 	switch {
@@ -311,7 +313,7 @@ func (h *hub) loginFinish(assertion []byte) *response {
 		}
 		// A call to auth takes a stream, or a dial in the lazy hub, so a
 		// body that is not an assertion is refused before one is taken.
-		if err := checkAssertion(a); err != nil {
+		if err := checkAssertion(a, h.cfg.loginOrigin()); err != nil {
 			return "", "", err
 		}
 		if err := h.cfg.err("HUB_TLS_CERT", "HUB_TLS_KEY"); err != nil {
@@ -367,7 +369,7 @@ func (h *hub) inviteFinish(token string, body []byte) *response {
 		if err := json.Unmarshal(body, &c); err != nil {
 			return "", "", fmt.Errorf("credential: %w", err)
 		}
-		cred, err := c.proto()
+		cred, err := c.proto(h.cfg.loginOrigin())
 		if err != nil {
 			return "", "", fmt.Errorf("credential: %w", err)
 		}

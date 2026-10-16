@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -18,18 +19,16 @@ func TestClassify(t *testing.T) {
 		{"me.example.com", hostLogin, ""},
 		{"bench-me.example.com", hostApp, "bench"},
 		{"octocam-me.example.com", hostApp, "octocam"},
+		{"tp.me.example.com", hostApp, "tp"},
 		{"Bench-me.example.com", hostNone, ""},
 		{"-me.example.com", hostNone, ""},
 		{"a-b-me.example.com", hostNone, ""},
+		{"tp-me.example.com", hostNone, ""},
+		{"bench.me.example.com", hostNone, ""},
+		{"a.tp.me.example.com", hostNone, ""},
+		{".me.example.com", hostNone, ""},
 		{"other.example.com", hostNone, ""},
 		{"me.example.com.evil", hostNone, ""},
-		{"x.me.example.com", hostNone, ""},
-		{"tp.me.example.com", hostApp, "tp"},
-		{"tp-me.example.com", hostNone, ""},
-		{"a.tp.me.example.com", hostNone, ""},
-		{"bench.me.example.com", hostNone, ""},
-		{".me.example.com", hostNone, ""},
-		{"TP.me.example.com", hostNone, ""},
 	}
 	for _, tt := range tests {
 		kind, app := c.classify(tt.host)
@@ -309,22 +308,60 @@ func TestParseConfigHubMode(t *testing.T) {
 }
 
 func TestCheckAssertion(t *testing.T) {
+	const origin = "https://me.example.com"
+	ok := clientData(`{"type":"webauthn.get","origin":"https://me.example.com"}`)
 	tests := []struct {
 		name    string
 		body    string
 		wantErr bool
 	}{
-		{name: "assertion", body: `{"id":"a","type":"public-key","response":{}}`, wantErr: false},
+		{name: "assertion", body: `{"id":"a","type":"public-key","response":{"clientDataJSON":"` + ok + `"}}`, wantErr: false},
 		{name: "empty object", body: `{}`, wantErr: true},
 		{name: "not an object", body: `"x"`, wantErr: true},
 		{name: "no id", body: `{"type":"public-key"}`, wantErr: true},
 		{name: "other type", body: `{"id":"a","type":"password"}`, wantErr: true},
+		{name: "no client data", body: `{"id":"a","type":"public-key","response":{}}`, wantErr: true},
+		{name: "sub app origin", body: `{"id":"a","type":"public-key","response":{"clientDataJSON":"` + clientData(`{"type":"webauthn.get","origin":"https://tp.me.example.com"}`) + `"}}`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := checkAssertion([]byte(tt.body)); (err != nil) != tt.wantErr {
+			if err := checkAssertion([]byte(tt.body), origin); (err != nil) != tt.wantErr {
 				t.Errorf("checkAssertion error = %v, want error %v", err, tt.wantErr)
 			}
 		})
 	}
 }
+
+func TestCheckClientData(t *testing.T) {
+	const origin = "https://me.example.com"
+	tests := []struct {
+		name       string
+		clientData string
+		typ        string
+		wantErr    bool
+	}{
+		{name: "get", clientData: clientData(`{"type":"webauthn.get","origin":"https://me.example.com","challenge":"x"}`), typ: "webauthn.get", wantErr: false},
+		{name: "create", clientData: clientData(`{"type":"webauthn.create","origin":"https://me.example.com"}`), typ: "webauthn.create", wantErr: false},
+		{name: "same origin frame", clientData: clientData(`{"type":"webauthn.get","origin":"https://me.example.com","crossOrigin":false}`), typ: "webauthn.get", wantErr: false},
+		{name: "sub app origin", clientData: clientData(`{"type":"webauthn.get","origin":"https://tp.me.example.com"}`), typ: "webauthn.get", wantErr: true},
+		{name: "app host origin", clientData: clientData(`{"type":"webauthn.get","origin":"https://tp-me.example.com"}`), typ: "webauthn.get", wantErr: true},
+		{name: "origin with port", clientData: clientData(`{"type":"webauthn.get","origin":"https://me.example.com:8443"}`), typ: "webauthn.get", wantErr: true},
+		{name: "http origin", clientData: clientData(`{"type":"webauthn.get","origin":"http://me.example.com"}`), typ: "webauthn.get", wantErr: true},
+		{name: "no origin", clientData: clientData(`{"type":"webauthn.get"}`), typ: "webauthn.get", wantErr: true},
+		{name: "cross origin frame", clientData: clientData(`{"type":"webauthn.get","origin":"https://me.example.com","crossOrigin":true}`), typ: "webauthn.get", wantErr: true},
+		{name: "other type", clientData: clientData(`{"type":"webauthn.create","origin":"https://me.example.com"}`), typ: "webauthn.get", wantErr: true},
+		{name: "empty", clientData: "", typ: "webauthn.get", wantErr: true},
+		{name: "not base64url", clientData: "a+b/", typ: "webauthn.get", wantErr: true},
+		{name: "not JSON", clientData: clientData(`x`), typ: "webauthn.get", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := checkClientData(tt.clientData, tt.typ, origin); (err != nil) != tt.wantErr {
+				t.Errorf("checkClientData error = %v, want error %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// clientData encodes s as the pages encode clientDataJSON.
+func clientData(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }

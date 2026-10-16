@@ -40,3 +40,16 @@ fix status below.
 | L4 | Low | Any request with junk app cookies makes one `GetAppSession` call to auth, so auth load follows request rate. | Same rate limit rule as M2, on app hosts | open |
 | I1 | Info | Headers named in a `Connection` header are forwarded; RFC 9110 says they are hop-by-hop too. Not checked: whether the app service overwrites a browser's `X-Forwarded-*` and `Teleport-Jwt-Assertion` headers. | Also drop the headers `Connection` names | open |
 | I2 | Info | `GET /teleport-logout` on an app host clears the app cookies with no origin check, so any page can log a user out of an app. | None needed for now | accepted |
+
+## Addendum, 2026-10-16: apps under the login host
+
+An app in `SUB_APPS` is served at `<app>.<owner>.example.com`, under the
+login host, so that a web UI there can log in with a passkey. This review
+read the Go hub.
+
+| ID | Severity | Finding | Fix | Status |
+|---|---|---|---|---|
+| S1 | High | A page on a `SUB_APPS` host can ask for a passkey answer for the login host, because the WebAuthn relying party ID is a suffix of its host. A server can post that answer to `/webapi/login/finish` or the passkey routes with any `Origin`, and auth accepts an answer from a page on any host under the relying party ID. One passkey tap gives the page's author a hub web session, and a second one can add their own passkey. | Before the hub sends an answer to auth, require its `clientDataJSON` to have the expected `type`, `origin` equal to the login host, and no `crossOrigin` | fixed in `request.go`, `checkClientData` |
+| S2 | Low | The hub's pages could be framed by any page, such as one on a `SUB_APPS` host, which could put the hub's buttons and passkey prompts under its own. | Send `frame-ancestors 'none'` and `X-Frame-Options: DENY` with every hub page | fixed in `request.go`, `html` |
+| S3 | Low | The Worker and the Go hub read `SUB_APPS` differently: the Worker kept an empty name and names that are not app names, so it sent hosts such as `.<owner>.example.com` to the Durable Object. | Drop the same names in the Worker as in Go | fixed in `worker.mjs`, `subApps` |
+| S4 | Info | A page on a `SUB_APPS` host can still use the user's passkeys with its own upstream, which is what the Teleport web UI needs. A cookie it sets with `Domain=<owner>.example.com` reaches the login host and the other app hosts, as one with `Domain=example.com` from any app host already did (M1). | List only apps whose pages are trusted with passkey prompts | accepted |

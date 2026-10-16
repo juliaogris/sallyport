@@ -66,8 +66,8 @@ func appHost(app string) string { return app + "-" + LoginHost }
 // subAppHost returns the host of app when it is in SUB_APPS.
 func subAppHost(app string) string { return app + "." + LoginHost }
 
-// appHost returns the host the hub serves app at.
-func (s *stack) appHost(app string) string {
+// hostOf returns the host the hub serves app at.
+func (s *stack) hostOf(app string) string {
 	if s.sub[app] {
 		return subAppHost(app)
 	}
@@ -138,7 +138,7 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 // do not refuse tests that log in many times.
 func (s *stack) login(t *testing.T) *http.Cookie {
 	t.Helper()
-	req, _ := http.NewRequest("POST", "https://"+LoginHost+"/webapi/login/finish", strings.NewReader(`{"id":"`+AliceCredID+`","type":"public-key"}`))
+	req, _ := http.NewRequest("POST", "https://"+LoginHost+"/webapi/login/finish", strings.NewReader(loginAssertion(AliceCredID)))
 	req.Header.Set("Origin", origin(LoginHost))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Cf-Connecting-Ip", randomIP())
@@ -161,7 +161,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	require.NoError(t, err)
 	require.Equal(t, "https", loc.Scheme)
-	require.Equal(t, s.appHost(app), loc.Host)
+	require.Equal(t, s.hostOf(app), loc.Host)
 	require.Equal(t, "/x-teleport-auth", loc.Path)
 	parts := strings.Split(loc.Fragment, ".")
 	require.Len(t, parts, 3, "fragment %q", loc.Fragment)
@@ -174,7 +174,7 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp := s.post(t, s.appHost(app), "/x-teleport-auth", origin(s.appHost(app)), string(body))
+	resp := s.post(t, s.hostOf(app), "/x-teleport-auth", origin(s.hostOf(app)), string(body))
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")

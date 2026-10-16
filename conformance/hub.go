@@ -30,7 +30,7 @@ type Hub struct {
 }
 
 // The vars every test hub runs with. The login host is hub.test and app
-// hosts are <app>-hub.test.
+// hosts are <app>-hub.test, or <app>.hub.test for an app in SUB_APPS.
 var baseVars = map[string]string{
 	"CLUSTER_NAME":   "sallyport-test",
 	"PUBLIC_ADDR":    "hub.test:443",

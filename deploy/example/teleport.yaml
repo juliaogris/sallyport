@@ -34,7 +34,8 @@ ssh_service:
 app_service:
   enabled: true
   apps:
-  # An app's public_addr is <app>-OWNER.DOMAIN, and its name is in APPS.
+  # An app's public_addr is <app>-OWNER.DOMAIN, or <app>.OWNER.DOMAIN when
+  # the app is in SUB_APPS, and its name is in APPS.
   - name: printer
     uri: http://printer.lan
     public_addr: printer-me.example.com

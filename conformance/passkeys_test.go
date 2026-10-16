@@ -89,7 +89,7 @@ func TestPasskeys(t *testing.T) {
 	})
 
 	t.Run("login with the new passkey", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-alice-2","type":"public-key"}`)
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), loginAssertion("cred-alice-2"))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		c := cookie(resp, "__Host-sp_session")
@@ -337,7 +337,7 @@ func TestPasskeyLink(t *testing.T) {
 	})
 
 	t.Run("login with the phone's passkey", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), `{"id":"cred-alice-phone","type":"public-key"}`)
+		resp := s.post(t, LoginHost, "/webapi/login/finish", origin(LoginHost), loginAssertion("cred-alice-phone"))
 		readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		c := cookie(resp, "__Host-sp_session")
@@ -502,25 +502,15 @@ func (s *stack) passkeyAnswer(t *testing.T, session *http.Cookie, credID string)
 }
 
 // passkeyAssertion is a browser's answer to challenge with the passkey
-// credID, as the pages send it. The fake auth reads the challenge from the
-// clientDataJSON.
+// credID, as the login host's pages send it. The fake auth reads the
+// challenge from the clientDataJSON.
 func passkeyAssertion(credID string, challenge []byte) string {
-	b64 := base64.RawURLEncoding.EncodeToString
-	clientData, _ := json.Marshal(map[string]string{"type": "webauthn.get", "challenge": b64(challenge)})
-	v, _ := json.Marshal(map[string]any{
-		"id":         credID,
-		"rawId":      b64([]byte(credID)),
-		"type":       "public-key",
-		"extensions": map[string]any{},
-		"response": map[string]any{
-			"authenticatorData": b64([]byte("authenticator data")),
-			"clientDataJSON":    b64(clientData),
-			"signature":         b64([]byte("signature")),
-			"userHandle":        nil,
-		},
-	})
-	return string(v)
+	return Assertion(origin(LoginHost), credID, challenge)
 }
+
+// loginAssertion is the login page's answer with the passkey credID. The
+// fake auth does not check the challenge of a login.
+func loginAssertion(credID string) string { return passkeyAssertion(credID, nil) }
 
 // passkeyCredential is the body of a finish: the name and the browser's new
 // credential with ID credID.
@@ -543,14 +533,21 @@ func addPasskeyCredential(token, name, credID string) string {
 }
 
 // newCredential is the browser's new credential with ID credID, as the
-// pages send it.
+// login host's pages send it.
 func newCredential(credID string) map[string]any {
+	return newCredentialFrom(origin(LoginHost), credID)
+}
+
+// newCredentialFrom is the browser's new credential with ID credID, made by
+// a page at o.
+func newCredentialFrom(o, credID string) map[string]any {
 	b64 := base64.RawURLEncoding.EncodeToString
+	clientData, _ := json.Marshal(map[string]string{"type": "webauthn.create", "origin": o})
 	return map[string]any{
 		"type":  "public-key",
 		"rawId": b64([]byte(credID)),
 		"response": map[string]string{
-			"clientDataJSON":    b64([]byte(`{"type":"webauthn.create"}`)),
+			"clientDataJSON":    b64(clientData),
 			"attestationObject": b64([]byte("attestation")),
 		},
 	}

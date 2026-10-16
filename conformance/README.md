@@ -8,6 +8,7 @@ under `wrangler dev`. The tests need no Teleport cluster and no deploy.
 NO_BUILD=1 ./run.sh   # use the hub as last built
 go test -run TestTunnelAuth -v .
 go test -run TestRekey -long -v .   # 2 GiB through one tunnel
+go test -run TestSubApps -long -v . # a WebSocket quiet for 150 s
 ```
 
 `run.sh` needs `npx` and Go. `go test` alone needs the hub to be built
@@ -22,7 +23,8 @@ directory other than `../hub/go`.
   and those secrets to a temporary directory, and starts `wrangler dev` on
   a free port. The hub's own `wrangler.toml` is not used.
 - Requests go to `127.0.0.1:<port>` with the host in the Host header. The
-  login host is `hub.test` and app hosts are `<app>-hub.test`.
+  login host is `hub.test` and app hosts are `<app>-hub.test`, or
+  `<app>.hub.test` for an app in `SUB_APPS`.
 - `wrangler dev` serves HTTPS with a self-signed certificate, which the
   tests do not check. Over plain HTTP it rewrites the Origin header to
   `http://`, so no POST would pass the hub's Origin check.

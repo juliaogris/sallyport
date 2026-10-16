@@ -166,6 +166,26 @@ func (s *stack) echo(t *testing.T, cookies []*http.Cookie, header http.Header) t
 	return s.echoAt(t, appHost("bench"), cookies, header)
 }
 
+// echoAt sends GET /t/echo?a=1&b=%2F to host with cookies and extra
+// headers and returns what the app saw.
+func (s *stack) echoAt(t *testing.T, host string, cookies []*http.Cookie, header http.Header) testapp.Echo {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "https://"+host+"/t/echo?a=1&b=%2F", nil)
+	for k, vs := range header {
+		req.Header[k] = vs
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := s.hub.Do(req)
+	require.NoError(t, err)
+	body := readBody(t, resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
+	var e testapp.Echo
+	require.NoError(t, json.Unmarshal(body, &e), "body %s", body)
+	return e
+}
+
 // TestAppProxyExpired checks that an expired app session sends the browser
 // back to the login host.
 func TestAppProxyExpired(t *testing.T) {

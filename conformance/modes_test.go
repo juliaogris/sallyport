@@ -13,10 +13,17 @@ import (
 // stackFor returns a new stack in mode, "tunnel" or "lazy".
 func stackFor(t *testing.T, mode string) *stack {
 	t.Helper()
+	return stackForVars(t, mode, BaseVars())
+}
+
+// stackForVars returns a new stack in mode whose hub runs with vars.
+func stackForVars(t *testing.T, mode string, vars map[string]string) *stack {
+	t.Helper()
 	if mode == "lazy" {
-		return newLazyStack(t)
+		vars["HUB_MODE"] = "lazy"
+		return newLazyStackVars(t, vars)
 	}
-	return newStack(t)
+	return newStackVars(t, vars)
 }
 
 var modes = []string{"tunnel", "lazy"}

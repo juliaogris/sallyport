@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 		return resp, nil
 	}
 
-	resp, err := post(LoginHost, "/webapi/login/finish", `{"id":"`+AliceCredID+`"}`, nil)
+	resp, err := post(LoginHost, "/webapi/login/finish", Assertion("https://"+LoginHost, AliceCredID, nil), nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -61,7 +62,7 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 	sid, bearer = parts[0], parts[1]
 
 	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp, err = post(app+"-"+LoginHost, "/x-teleport-auth", string(body), nil)
+	resp, err = post(loc.Host, "/x-teleport-auth", string(body), nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -69,4 +70,24 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 		return "", "", fmt.Errorf("handoff: status %d", resp.StatusCode)
 	}
 	return sid, bearer, nil
+}
+
+// Assertion is a browser's answer to challenge with the passkey credID, made
+// by a page at origin, as the hub's pages send it.
+func Assertion(origin, credID string, challenge []byte) string {
+	b64 := base64.RawURLEncoding.EncodeToString
+	clientData, _ := json.Marshal(map[string]string{"type": "webauthn.get", "origin": origin, "challenge": b64(challenge)})
+	v, _ := json.Marshal(map[string]any{
+		"id":         credID,
+		"rawId":      b64([]byte(credID)),
+		"type":       "public-key",
+		"extensions": map[string]any{},
+		"response": map[string]any{
+			"authenticatorData": b64([]byte("authenticator data")),
+			"clientDataJSON":    b64(clientData),
+			"signature":         b64([]byte("signature")),
+			"userHandle":        nil,
+		},
+	})
+	return string(v)
 }

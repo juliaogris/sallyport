@@ -178,9 +178,9 @@ The setup also uses:
   build and deploy the hub. This can be any machine, such as a laptop.
 
 The examples use `me.example.com` as the login host and one app,
-`printer`, at `printer-me.example.com`. The hub's hosts follow one
-pattern: the login host is `OWNER.DOMAIN`, and each app is at
-`<app>-OWNER.DOMAIN`.
+`printer`, at `printer-me.example.com`. The login host is `OWNER.DOMAIN`,
+and each app is at `<app>-OWNER.DOMAIN`. An app in `SUB_APPS` is at
+`<app>.OWNER.DOMAIN` instead, under the login host.
 
 ### 1. Build the fork
 
@@ -221,7 +221,8 @@ Copy [`deploy/example/teleport.yaml`](deploy/example/teleport.yaml) to
 - `callout_to` and `webauthn.rp_id`, to the login host
 - `callout_key_file` and `data_dir`, to the local paths
 - the apps: for each app, its `name`, its `uri` on the home network and
-  its `public_addr`, `<app>-OWNER.DOMAIN`
+  its `public_addr`, `<app>-OWNER.DOMAIN`, or `<app>.OWNER.DOMAIN` for an
+  app in `SUB_APPS`
 
 The example app has a `rewrite` for OctoPrint. OctoPrint accepts a
 WebSocket only when the Origin matches the Host header and `X-Scheme`.
@@ -278,6 +279,15 @@ In this repo, edit the `home` env in
 - `CLUSTER_NAME`, `CALLOUT_HOST`, `PUBLIC_ADDR`, `DOMAIN` and `OWNER`
 - `APPS`, the apps on the dashboard, comma-separated. An app may have a
   start path after a colon, such as `cam:/stream`.
+- `SUB_APPS`, the apps in `APPS` to serve at `<app>.OWNER.DOMAIN`, under
+  the login host, comma-separated. A web UI that logs in with a passkey,
+  such as the Teleport web UI, must be under the login host, the WebAuthn
+  relying party. A page on such a host can ask for the user's passkeys
+  and use them with its own upstream. The hub takes a passkey answer only
+  from its own pages on the login host. List only apps whose pages you
+  trust with passkey prompts.
+  Cloudflare issues the certificate for a custom domain two levels below
+  the zone a minute or two after the deploy.
 
 Then deploy, and set the secrets. The hub reads each secret as base64, so
 that a PEM file keeps its line breaks.

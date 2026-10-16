@@ -91,8 +91,12 @@ type assertion struct {
 	} `json:"response"`
 }
 
-// proto encodes the assertion as an MFAAuthenticateResponse.
-func (a *assertion) proto() (pb, error) {
+// proto encodes the assertion as an MFAAuthenticateResponse. It returns an
+// error unless the assertion is from a page at origin.
+func (a *assertion) proto(origin string) (pb, error) {
+	if err := checkClientData(a.Response.ClientDataJSON, "webauthn.get", origin); err != nil {
+		return nil, err
+	}
 	b, err := decodeAll(a.RawID, a.Response.ClientDataJSON, a.Response.AuthenticatorData, a.Response.Signature, a.Response.UserHandle)
 	if err != nil {
 		return nil, err
@@ -111,8 +115,12 @@ type credential struct {
 	} `json:"response"`
 }
 
-// proto encodes the credential as a CredentialCreationResponse.
-func (c *credential) proto() (pb, error) {
+// proto encodes the credential as a CredentialCreationResponse. It returns
+// an error unless the credential is from a page at origin.
+func (c *credential) proto(origin string) (pb, error) {
+	if err := checkClientData(c.Response.ClientDataJSON, "webauthn.create", origin); err != nil {
+		return nil, err
+	}
 	b, err := decodeAll(c.RawID, c.Response.ClientDataJSON, c.Response.AttestationObject)
 	if err != nil {
 		return nil, err
@@ -216,7 +224,7 @@ func (h *hub) passkeyBegin(cert tls.Certificate, body []byte) *response {
 	if err := json.Unmarshal(body, &a); err != nil {
 		return passkeyError("bad request", 400)
 	}
-	existing, err := a.proto()
+	existing, err := a.proto(h.cfg.loginOrigin())
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
@@ -239,7 +247,7 @@ func (h *hub) passkeyFinish(cert tls.Certificate, body []byte) *response {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return passkeyError("bad request", 400)
 	}
-	cred, err := in.Credential.proto()
+	cred, err := in.Credential.proto(h.cfg.loginOrigin())
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
@@ -262,7 +270,7 @@ func (h *hub) passkeyDelete(cert tls.Certificate, body []byte) *response {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return passkeyError("bad request", 400)
 	}
-	existing, err := in.Assertion.proto()
+	existing, err := in.Assertion.proto(h.cfg.loginOrigin())
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
@@ -288,7 +296,7 @@ func (h *hub) passkeyLink(cert tls.Certificate, body []byte) *response {
 	if err := json.Unmarshal(body, &a); err != nil {
 		return passkeyError("bad request", 400)
 	}
-	existing, err := a.proto()
+	existing, err := a.proto(h.cfg.loginOrigin())
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}
@@ -348,7 +356,7 @@ func (h *hub) addPasskeyFinish(body []byte) *response {
 	if refused := in.parse(body); refused != nil {
 		return refused
 	}
-	cred, err := in.Credential.proto()
+	cred, err := in.Credential.proto(h.cfg.loginOrigin())
 	if err != nil {
 		return passkeyError("bad request", 400)
 	}

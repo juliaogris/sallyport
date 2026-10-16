@@ -25,8 +25,9 @@ tag = "v1"
 new_sqlite_classes = ["Hub"]
 
 # An example deployment. The login host is OWNER.DOMAIN, here
-# me.example.com, and each app is at <app>-OWNER.DOMAIN. Every host needs a
-# route, and DOMAIN must be a zone in the Cloudflare account.
+# me.example.com, and each app is at <app>-OWNER.DOMAIN, or at
+# <app>.OWNER.DOMAIN when it is in SUB_APPS. Every host needs a route, and
+# DOMAIN must be a zone in the Cloudflare account.
 [env.home]
 name = "sallyport-hub-home"
 # Your Cloudflare account ID, from the dashboard or `npx wrangler@4 whoami`.
@@ -50,6 +51,10 @@ OWNER = "me"
 # The apps on the dashboard, comma-separated. An app may have a start path
 # after a colon, such as cam:/stream.
 APPS = "printer"
+# The apps in APPS to serve at <app>.OWNER.DOMAIN, under the login host,
+# comma-separated. A web UI that logs in with a passkey must be under the
+# login host, the WebAuthn relying party.
+# SUB_APPS = ""
 
 [[env.home.durable_objects.bindings]]
 name = "HUB"
