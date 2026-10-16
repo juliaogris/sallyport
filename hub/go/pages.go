@@ -1,7 +1,7 @@
 package main
 
 // style makes text and buttons larger, so they are easy to tap on a phone.
-const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style>`
+const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button,a.app{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}a.app{display:inline-block;box-sizing:border-box;text-align:center;text-decoration:none;color:ButtonText;background:ButtonFace;border:1px solid ButtonBorder}</style>`
 
 const loginPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport login</title>
 <button id="go">Log in with passkey</button><pre id="out"></pre><script>

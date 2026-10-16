@@ -113,6 +113,22 @@ func (s *stack) get(t *testing.T, host, path string, cookies ...*http.Cookie) *h
 	return resp
 }
 
+// launchFrom sends a GET for the launch of app with Sec-Fetch-Site set to
+// site, unless site is "".
+func (s *stack) launchFrom(t *testing.T, app, site string, cookies ...*http.Cookie) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/"+app, nil)
+	if site != "" {
+		req.Header.Set("Sec-Fetch-Site", site)
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err := s.hub.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 func origin(host string) string { return "https://" + host }
 
 // cookie returns the cookie called name that resp sets, or nil.
@@ -155,7 +171,7 @@ func (s *stack) login(t *testing.T) *http.Cookie {
 // and the start path from the handoff URL.
 func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bearer, start string) {
 	t.Helper()
-	resp := s.post(t, LoginHost, "/web/launch/"+app, origin(LoginHost), "", session)
+	resp := s.launchFrom(t, app, "same-origin", session)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	loc, err := url.Parse(resp.Header.Get("Location"))

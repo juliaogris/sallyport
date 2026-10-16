@@ -15,7 +15,7 @@ import (
 // Hosts are the login host and one host per app:
 //
 //   - <owner>.<domain> is the login host. It serves the invite page, the
-//     passkey login and a dashboard with one launch button per app. Its
+//     passkey login and a dashboard with one launch link per app. Its
 //     cookie is __Host-sp_session, the user and the web session ID.
 //   - <app>-<owner>.<domain> is an app host. An app in SUB_APPS is at
 //     <app>.<owner>.<domain> instead, under the login host, and is not
@@ -27,7 +27,9 @@ import (
 //     over the tunnel. An app session is valid only on the app host of its
 //     certificate's app public address.
 //
-// Every POST must have an Origin equal to its own host.
+// Every POST must have an Origin equal to its own host. A launch is a GET,
+// so that a launch link opens in a new tab, and is taken only from a page
+// on the login host.
 const (
 	sessionCookie = "__Host-sp_session"
 	appCookie     = "__Host-sp_app"
@@ -71,7 +73,10 @@ func (h *hub) loginHostRequest(req *request) *response {
 		default:
 			return textError("not found", 404)
 		}
-	case req.method == "POST" && strings.HasPrefix(p, "/web/launch/"):
+	case req.method == "GET" && strings.HasPrefix(p, "/web/launch/"):
+		if !req.fromOwnPage() {
+			return textError("bad origin", 403)
+		}
 		return h.launch(req, strings.TrimPrefix(p, "/web/launch/"))
 	case req.method == "GET" && p == "/web/passkeys":
 		return h.showPasskeys(req)
@@ -237,7 +242,7 @@ func (h *hub) dashboard(req *request) *response {
 	}
 	var b strings.Builder
 	for _, a := range h.cfg.apps {
-		fmt.Fprintf(&b, `<form method="post" action="/web/launch/%s"><button>%s</button></form>`, a.name, a.name)
+		fmt.Fprintf(&b, `<div><a class="app" href="/web/launch/%s">%s</a></div>`, a.name, a.name)
 	}
 	return html(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">` + style + `<title>sallyport</title>
 <p>Logged in as ` + user + `.</p>` + b.String() + `<p><a href="/web/passkeys">Passkeys</a></p><form method="post" action="/web/logout"><button>Log out</button></form>`)

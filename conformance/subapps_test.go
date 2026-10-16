@@ -173,10 +173,10 @@ func testSubApps(t *testing.T, s *stack) {
 	t.Run("login pages not served at tp", func(t *testing.T) {
 		gets := []string{
 			"/", "/web/login", "/web/passkeys", "/web/add-passkey",
-			"/web/invite/x", "/webapi/passkeys", "/webapi/find", "/webapi/ping",
+			"/web/invite/x", "/web/launch/bench", "/webapi/passkeys", "/webapi/find", "/webapi/ping",
 		}
 		posts := []string{
-			"/webapi/login/begin", "/webapi/login/finish", "/web/launch/bench",
+			"/webapi/login/begin", "/webapi/login/finish",
 			"/webapi/passkeys/challenge", "/webapi/add-passkey/begin", "/webapi/invite/x/begin",
 		}
 		for _, p := range gets {

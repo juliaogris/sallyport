@@ -51,7 +51,7 @@ func TestWeb(t *testing.T) {
 		require.Equal(t, before, countCalls(s.auth, "/v2/users//web/authenticate"), "the hub asked auth about an empty assertion")
 	})
 
-	for _, path := range []string{"/webapi/login/begin", "/webapi/login/finish", "/web/launch/bench", "/web/logout", "/webapi/invite/" + BobInvite + "/begin"} {
+	for _, path := range []string{"/webapi/login/begin", "/webapi/login/finish", "/web/logout", "/webapi/invite/" + BobInvite + "/begin"} {
 		// An http:// Origin is not tested, because wrangler dev rewrites
 		// the scheme of Origin to its own.
 		for _, o := range []string{"", "https://other.test", origin(appHost("bench")), origin(subAppHost("tp"))} {
@@ -104,8 +104,8 @@ func TestWeb(t *testing.T) {
 		resp = s.get(t, LoginHost, "/", s.login(t))
 		body := readBody(t, resp)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Contains(t, string(body), `action="/web/launch/bench"`)
-		require.Contains(t, string(body), `action="/web/launch/cam"`)
+		require.Contains(t, string(body), `href="/web/launch/bench"`)
+		require.Contains(t, string(body), `href="/web/launch/cam"`)
 	})
 
 	t.Run("logout", func(t *testing.T) {
@@ -138,16 +138,38 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("launch unknown app", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/web/launch/nope", origin(LoginHost), "", s.login(t))
+		resp := s.launchFrom(t, "nope", "same-origin", s.login(t))
 		readBody(t, resp)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 
 	t.Run("launch without session", func(t *testing.T) {
-		resp := s.post(t, LoginHost, "/web/launch/bench", origin(LoginHost), "")
+		resp := s.launchFrom(t, "bench", "same-origin")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "/web/login", resp.Header.Get("Location"))
+	})
+
+	t.Run("launch not from the dashboard", func(t *testing.T) {
+		session := s.login(t)
+		before := countCalls(s.auth, "/proto.AuthService/CreateAppSession")
+		for _, site := range []string{"", "none", "same-site", "cross-site"} {
+			resp := s.launchFrom(t, "bench", site, session)
+			readBody(t, resp)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, "Sec-Fetch-Site %q", site)
+		}
+		req, _ := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/bench", nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-Purpose", "prefetch")
+		req.AddCookie(session)
+		resp, err := s.hub.Do(req)
+		require.NoError(t, err)
+		readBody(t, resp)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode, "prefetch")
+		resp = s.post(t, LoginHost, "/web/launch/bench", origin(LoginHost), "", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "POST")
+		require.Equal(t, before, countCalls(s.auth, "/proto.AuthService/CreateAppSession"))
 	})
 
 	t.Run("handoff", func(t *testing.T) {

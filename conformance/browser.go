@@ -47,10 +47,18 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 		return "", "", fmt.Errorf("login: status %d", resp.StatusCode)
 	}
 
-	resp, err = post(LoginHost, "/web/launch/"+app, "", session)
+	req, err := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/"+app, nil)
 	if err != nil {
 		return "", "", err
 	}
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.AddCookie(session)
+	resp, err = h.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	if resp.StatusCode != http.StatusSeeOther || err != nil {
 		return "", "", fmt.Errorf("launch: status %d, location %q", resp.StatusCode, resp.Header.Get("Location"))

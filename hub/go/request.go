@@ -99,6 +99,14 @@ func (r *request) sameOrigin(host string) bool {
 	return ok && o == "https://"+host
 }
 
+// fromOwnPage reports whether the browser says the request came from a page
+// on its own origin and is not a prefetch. A request without
+// Sec-Fetch-Site is refused.
+func (r *request) fromOwnPage() bool {
+	_, prefetch := r.header["sec-purpose"]
+	return r.header["sec-fetch-site"] == "same-origin" && !prefetch
+}
+
 // sameOriginFetch returns false when the browser says the request came
 // from another origin. A request with neither Sec-Fetch-Site nor Origin is
 // not from a browser page and passes.

@@ -262,6 +262,26 @@ func TestSameOriginFetch(t *testing.T) {
 	}
 }
 
+func TestFromOwnPage(t *testing.T) {
+	tests := []struct {
+		header map[string]string
+		want   bool
+	}{
+		{map[string]string{"sec-fetch-site": "same-origin"}, true},
+		{map[string]string{}, false},
+		{map[string]string{"origin": "https://h"}, false},
+		{map[string]string{"sec-fetch-site": "none"}, false},
+		{map[string]string{"sec-fetch-site": "same-site"}, false},
+		{map[string]string{"sec-fetch-site": "cross-site"}, false},
+		{map[string]string{"sec-fetch-site": "same-origin", "sec-purpose": "prefetch"}, false},
+	}
+	for _, tt := range tests {
+		if got := (&request{header: tt.header}).fromOwnPage(); got != tt.want {
+			t.Errorf("fromOwnPage(%v) = %v, want %v", tt.header, got, tt.want)
+		}
+	}
+}
+
 // TestParseSecrets parses a real identity when SALLYPORT_SECRETS names a
 // JSON file of secrets, as `wrangler secret bulk` takes it.
 func TestParseSecrets(t *testing.T) {
