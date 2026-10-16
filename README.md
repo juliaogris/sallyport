@@ -379,6 +379,51 @@ The link opens `/web/add-passkey` on the other device. It needs no login,
 and it adds one passkey. After that, or when it expires, the link stops
 working.
 
+### The Teleport web UI
+
+The stock Teleport web UI can be an app. It logs in with a passkey, so it
+must be under the login host, at `tp.me.example.com`.
+
+1. Run a stock proxy at home, joined to the cluster. For the web
+   terminal, enable `ssh_service` on it too.
+2. Add the app to `teleport.yaml`:
+
+   ```yaml
+   - name: tp
+     uri: https://teleport.lan:3080
+     public_addr: tp.me.example.com
+     rewrite:
+       headers:
+       - "Host: teleport.lan:3080"
+   ```
+
+   Set `Host` to the proxy's `public_addr`. The proxy treats a request
+   whose `Host` is an app's public address as an app launch. If the
+   proxy's certificate is self-signed, add `insecure_skip_verify: true`.
+3. In `hub/go/wrangler.toml`, add the route and the vars, and deploy:
+
+   ```toml
+   routes = [
+     { pattern = "me.example.com", custom_domain = true },
+     { pattern = "printer-me.example.com", custom_domain = true },
+     { pattern = "tp.me.example.com", custom_domain = true },
+   ]
+
+   [env.home.vars]
+   APPS = "printer,tp:/web"
+   SUB_APPS = "tp"
+   ```
+
+   ```
+   npx wrangler@4 deploy --env home
+   ```
+
+   The start path is `/web`, because the proxy redirects `/` to its own
+   address.
+
+The app tiles in the UI do not work, because the hub does not answer
+Teleport's app launch.
+
 ## Conformance tests
 
 `conformance/` is a black-box test suite for the hub. It runs the hub
