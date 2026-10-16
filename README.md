@@ -62,7 +62,8 @@ Sallyport has two parts.
   a fixed name, that every request reaches. The hub serves a minimal
   login page, the app dashboard and the passkey pages, and it forwards
   app requests and WebSockets. It does not cover SSH, databases,
-  Kubernetes or `tsh` at this stage.
+  Kubernetes or `tsh` at this stage. The Teleport web UI can run as an
+  app, and its web terminal opens SSH sessions.
 - **The home side** is one process of a Teleport fork that runs the auth
   service and the app service. The fork is on the branch
   [`sallyport/lazy`][fork] of `juliaogris/teleport`.
@@ -127,7 +128,8 @@ with a probe every minute (see [Rust and Go](#rust-and-go)).
 
 ## Limitations
 
-- Only web login and app access. SSH, databases, Kubernetes, `tsh` and
+- Only web login and app access. SSH works only in the web terminal of
+  the Teleport web UI, as an app. Databases, Kubernetes, `tsh` and
   Teleport's access requests are not supported.
 - One owner per hub. The login host is `OWNER.DOMAIN`.
 - Cloudflare ends the browser's TLS connection, so Cloudflare can read the
@@ -381,8 +383,9 @@ working.
 
 ### The Teleport web UI
 
-The stock Teleport web UI can be an app. It logs in with a passkey, so it
-must be under the login host, at `tp.me.example.com`.
+The stock Teleport web UI can be an app. Its web terminal opens SSH
+sessions to the cluster's nodes. It logs in with a passkey, so it must be
+under the login host, at `tp.me.example.com`.
 
 1. Run a stock proxy at home, joined to the cluster. For the web
    terminal, enable `ssh_service` on it too.
