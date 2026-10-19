@@ -35,6 +35,9 @@ const (
 	appCookie     = "__Host-sp_app"
 	subjectCookie = "__Host-sp_subject"
 	authPath      = "/x-teleport-auth"
+	// stateCookiePrefix is the prefix of the state cookie of a launch, which
+	// is followed by the ID part of the launch state.
+	stateCookiePrefix = "__Host-sp_state_"
 )
 
 // loginHostRequest answers a request for the login host.
@@ -74,9 +77,6 @@ func (h *hub) loginHostRequest(req *request) *response {
 			return textError("not found", 404)
 		}
 	case req.method == "GET" && strings.HasPrefix(p, "/web/launch/"):
-		if !req.fromOwnPage() {
-			return textError("bad origin", 403)
-		}
 		return h.launch(req, strings.TrimPrefix(p, "/web/launch/"))
 	case req.method == "GET" && p == "/web/passkeys":
 		return h.showPasskeys(req)
@@ -118,12 +118,15 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	case req.path == authPath:
 		switch req.method {
 		case "GET":
-			return html(handoffPage)
+			if _, ok := req.queryValue("state"); ok {
+				return html(handoffPage)
+			}
+			return h.startLaunch(app)
 		case "POST":
 			if !req.sameOrigin(host) {
 				return textError("bad origin", 403)
 			}
-			return h.handoff(host, req.body)
+			return h.handoff(req)
 		default:
 			return textError("method not allowed", 405)
 		}
@@ -186,18 +189,38 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	return h.forward(sid, cert, host, req)
 }
 
-// handoff checks the handoff from the launcher for an app session of host,
-// and sets the app cookies.
-func (h *hub) handoff(host string, body []byte) *response {
+// startLaunch sets a state cookie for a launch of app and sends the
+// browser to the launch on the login host with the state. The handoff
+// takes only a state whose cookie this browser has, so a handoff link made
+// by another browser does not sign this one in.
+func (h *hub) startLaunch(app string) *response {
+	secret, id := randomHex(), randomHex()
+	return redirect("https://"+h.cfg.loginHost()+"/web/launch/"+app+"?state="+secret+"_"+id).
+		add("set-cookie", stateCookiePrefix+id+"="+secret+"; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=60").
+		add("referrer-policy", "no-referrer")
+}
+
+// handoff checks the handoff from the launcher for an app session of the
+// request's host and its launch state, and sets the app cookies.
+func (h *hub) handoff(req *request) *response {
+	host := req.host
 	var in struct {
 		Sid     string `json:"sid"`
 		Subject string `json:"subject"`
+		State   string `json:"state"`
 	}
-	if err := json.Unmarshal(body, &in); err != nil {
+	if err := json.Unmarshal(req.body, &in); err != nil {
 		return textError("bad handoff", 400)
 	}
 	if in.Sid == "" || in.Subject == "" {
 		return textError("bad handoff", 400)
+	}
+	secret, id, ok := parseState(in.State)
+	if !ok {
+		return textError("bad handoff", 403)
+	}
+	if c, ok := req.cookie(stateCookiePrefix + id); !ok || !ctEq(c, secret) {
+		return textError("bad handoff", 403)
 	}
 	resp, err := h.auth.call(getAppSession, getAppSessionRequest(in.Sid))
 	if err != nil {
@@ -209,6 +232,7 @@ func (h *hub) handoff(host string, body []byte) *response {
 		return textError("bad handoff", 403)
 	}
 	return (&response{status: 204}).
+		add("set-cookie", expireCookie(stateCookiePrefix+id)).
 		add("set-cookie", setCookie(appCookie, in.Sid)).
 		add("set-cookie", setCookie(subjectCookie, in.Subject))
 }
@@ -284,6 +308,16 @@ func (h *hub) launch(req *request, name string) *response {
 	if start == "" {
 		return textError("not found", 404)
 	}
+	state, ok := req.queryValue("state")
+	if !ok {
+		return redirect("https://" + h.cfg.appHost(name) + authPath)
+	}
+	if _, _, ok := parseState(state); !ok {
+		return textError("bad launch", 400)
+	}
+	if !req.fromSameSite() {
+		return textError("bad origin", 403)
+	}
 	user, s, _ := h.webSession(req)
 	if s == nil {
 		return redirect("/web/login")
@@ -320,7 +354,7 @@ func (h *hub) launch(req *request, name string) *response {
 		return textError("launch failed", 502)
 	}
 	return (&response{status: 303}).
-		add("location", "https://"+publicAddr+authPath+"#"+sid+"."+bearer+"."+b64([]byte(start))).
+		add("location", "https://"+publicAddr+authPath+"?state="+state+"#"+sid+"."+bearer+"."+b64([]byte(start))).
 		add("referrer-policy", "no-referrer")
 }
 

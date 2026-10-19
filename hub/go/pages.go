@@ -266,7 +266,8 @@ try {
   const segs = p.split(/[?#]/)[0].toLowerCase().replace(/%2e/g, '.').split('/');
   if (/^\/(?!\/)[\x21-\x5b\x5d-\x7e]*$/.test(p) && !segs.some(s => s === '.' || s === '..')) path = p;
 } catch (e) {}
+const state = new URLSearchParams(location.search).get('state');
 history.replaceState(null, '', location.pathname);
-fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject }) })
+fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sid, subject, state }) })
   .then(r => r.ok ? location.replace(path) : r.text().then(t => { document.getElementById('out').textContent = 'error: ' + r.status + ' ' + t; }));
 </script>`

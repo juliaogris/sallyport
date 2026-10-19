@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -262,22 +263,60 @@ func TestSameOriginFetch(t *testing.T) {
 	}
 }
 
-func TestFromOwnPage(t *testing.T) {
+func TestFromSameSite(t *testing.T) {
 	tests := []struct {
 		header map[string]string
 		want   bool
 	}{
 		{map[string]string{"sec-fetch-site": "same-origin"}, true},
+		{map[string]string{"sec-fetch-site": "same-site"}, true},
 		{map[string]string{}, false},
 		{map[string]string{"origin": "https://h"}, false},
 		{map[string]string{"sec-fetch-site": "none"}, false},
-		{map[string]string{"sec-fetch-site": "same-site"}, false},
 		{map[string]string{"sec-fetch-site": "cross-site"}, false},
-		{map[string]string{"sec-fetch-site": "same-origin", "sec-purpose": "prefetch"}, false},
+		{map[string]string{"sec-fetch-site": "same-site", "sec-purpose": "prefetch"}, false},
 	}
 	for _, tt := range tests {
-		if got := (&request{header: tt.header}).fromOwnPage(); got != tt.want {
-			t.Errorf("fromOwnPage(%v) = %v, want %v", tt.header, got, tt.want)
+		if got := (&request{header: tt.header}).fromSameSite(); got != tt.want {
+			t.Errorf("fromSameSite(%v) = %v, want %v", tt.header, got, tt.want)
+		}
+	}
+}
+
+func TestQueryValue(t *testing.T) {
+	r := &request{query: "?state=a_b&x=1&e="}
+	if v, ok := r.queryValue("state"); v != "a_b" || !ok {
+		t.Errorf("state = %q, %v", v, ok)
+	}
+	if v, ok := r.queryValue("e"); v != "" || !ok {
+		t.Errorf("e = %q, %v", v, ok)
+	}
+	if _, ok := r.queryValue("y"); ok {
+		t.Error("y found")
+	}
+	if _, ok := (&request{}).queryValue("state"); ok {
+		t.Error("state found in an empty query")
+	}
+}
+
+func TestParseState(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	tests := []struct {
+		state, secret, id string
+		ok                bool
+	}{
+		{a + "_" + b, a, b, true},
+		{"", "", "", false},
+		{"x", "", "", false},
+		{a + b, "", "", false},
+		{a + "_" + b[1:], "", "", false},
+		{a + "_" + strings.Repeat("B", 64), "", "", false},
+		{a + "_" + b + "_" + b, "", "", false},
+	}
+	for _, tt := range tests {
+		secret, id, ok := parseState(tt.state)
+		if secret != tt.secret || id != tt.id || ok != tt.ok {
+			t.Errorf("parseState(%q) = %q, %q, %v, want %q, %q, %v", tt.state, secret, id, ok, tt.secret, tt.id, tt.ok)
 		}
 	}
 }
