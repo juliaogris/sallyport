@@ -135,14 +135,14 @@ func testSubApps(t *testing.T, s *stack) {
 			require.Equal(t, http.StatusSeeOther, resp.StatusCode, tt.host)
 			require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"), tt.host)
 		}
-		for _, tt := range []struct{ host, sid, bearer string }{
-			{appHost("bench"), sid, bearer},
-			{host, benchSID, benchBearer},
+		for _, tt := range []struct{ app, sid, bearer string }{
+			{"bench", sid, bearer},
+			{"tp", benchSID, benchBearer},
 		} {
-			body, _ := json.Marshal(map[string]string{"sid": tt.sid, "subject": tt.bearer})
-			resp := s.post(t, tt.host, "/x-teleport-auth", origin(tt.host), string(body))
-			require.Equal(t, "bad handoff", string(readBody(t, resp)), tt.host)
-			require.Equal(t, http.StatusForbidden, resp.StatusCode, tt.host)
+			state, sc := s.startLaunch(t, tt.app)
+			resp := s.post(t, s.hostOf(tt.app), "/x-teleport-auth", origin(s.hostOf(tt.app)), handoffJSON(tt.sid, tt.bearer, state), sc)
+			require.Equal(t, "bad handoff", string(readBody(t, resp)), tt.app)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, tt.app)
 			require.Nil(t, cookie(resp, "__Host-sp_app"))
 		}
 	})
@@ -241,7 +241,7 @@ func testSubApps(t *testing.T, s *stack) {
 			{LoginHost, "/web/login"},
 			{LoginHost, "/web/invite/x"},
 			{LoginHost, "/web/add-passkey"},
-			{host, "/x-teleport-auth"},
+			{host, "/x-teleport-auth?state=x"},
 		} {
 			resp := s.get(t, tt.host, tt.path)
 			readBody(t, resp)

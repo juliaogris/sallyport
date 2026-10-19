@@ -181,28 +181,53 @@ func TestWeb(t *testing.T) {
 	})
 
 	t.Run("launch unknown app", func(t *testing.T) {
-		resp := s.launchFrom(t, "nope", "same-origin", s.login(t))
-		readBody(t, resp)
-		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		state, _ := s.startLaunch(t, "bench")
+		for _, path := range []string{"nope", "nope?state=" + state} {
+			resp := s.launchFrom(t, path, "same-site", s.login(t))
+			readBody(t, resp)
+			require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+		}
 	})
 
 	t.Run("launch without session", func(t *testing.T) {
-		resp := s.launchFrom(t, "bench", "same-origin")
+		state, _ := s.startLaunch(t, "bench")
+		resp := s.launchFrom(t, "bench?state="+state, "same-site")
 		readBody(t, resp)
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		require.Equal(t, "/web/login", resp.Header.Get("Location"))
 	})
 
-	t.Run("launch not from the dashboard", func(t *testing.T) {
+	t.Run("launch without state", func(t *testing.T) {
+		before := countCalls(s.auth, "/proto.AuthService/CreateAppSession")
+		resp := s.launchFrom(t, "bench", "cross-site", s.login(t))
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+		require.Equal(t, "https://"+appHost("bench")+"/x-teleport-auth", resp.Header.Get("Location"))
+		require.Equal(t, before, countCalls(s.auth, "/proto.AuthService/CreateAppSession"))
+	})
+
+	t.Run("launch with a bad state", func(t *testing.T) {
 		session := s.login(t)
 		before := countCalls(s.auth, "/proto.AuthService/CreateAppSession")
-		for _, site := range []string{"", "none", "same-site", "cross-site"} {
-			resp := s.launchFrom(t, "bench", site, session)
+		for _, state := range []string{"x", "a_b", strings.Repeat("a", 64), strings.Repeat("a", 64) + "_" + strings.Repeat("g", 64)} {
+			resp := s.launchFrom(t, "bench?state="+state, "same-site", session)
+			readBody(t, resp)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, state)
+		}
+		require.Equal(t, before, countCalls(s.auth, "/proto.AuthService/CreateAppSession"))
+	})
+
+	t.Run("launch from another site", func(t *testing.T) {
+		session := s.login(t)
+		state, _ := s.startLaunch(t, "bench")
+		before := countCalls(s.auth, "/proto.AuthService/CreateAppSession")
+		for _, site := range []string{"", "none", "cross-site"} {
+			resp := s.launchFrom(t, "bench?state="+state, site, session)
 			readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "Sec-Fetch-Site %q", site)
 		}
-		req, _ := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/bench", nil)
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req, _ := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/bench?state="+state, nil)
+		req.Header.Set("Sec-Fetch-Site", "same-site")
 		req.Header.Set("Sec-Purpose", "prefetch")
 		req.AddCookie(session)
 		resp, err := s.hub.Do(req)
@@ -222,24 +247,73 @@ func TestWeb(t *testing.T) {
 		}
 	})
 
+	t.Run("launch state cookie", func(t *testing.T) {
+		_, c := s.startLaunch(t, "bench")
+		require.Equal(t, "/", c.Path)
+		require.Empty(t, c.Domain)
+		require.True(t, c.Secure)
+		require.True(t, c.HttpOnly)
+		require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+		require.Equal(t, 60, c.MaxAge)
+	})
+
+	t.Run("handoff clears the state cookie", func(t *testing.T) {
+		sid, bearer, _ := s.launch(t, s.login(t), "bench")
+		state, sc := s.stateOf(t, sid)
+		resp := s.post(t, appHost("bench"), "/x-teleport-auth", origin(appHost("bench")), handoffJSON(sid, bearer, state), sc)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		c := cookie(resp, sc.Name)
+		require.NotNil(t, c, "state cookie not cleared")
+		require.Equal(t, -1, c.MaxAge)
+	})
+
+	t.Run("handoff without the launch state", func(t *testing.T) {
+		sid, bearer, _ := s.launch(t, s.login(t), "bench")
+		state, sc := s.stateOf(t, sid)
+		other, oc := s.startLaunch(t, "bench")
+		secret, id, _ := strings.Cut(state, "_")
+		wrongSecret := &http.Cookie{Name: sc.Name, Value: strings.Repeat("0", len(secret))}
+		cases := []struct {
+			name, state string
+			cookies     []*http.Cookie
+		}{
+			{"no state cookie", state, nil},
+			{"no state", "", []*http.Cookie{sc}},
+			{"wrong secret", state, []*http.Cookie{wrongSecret}},
+			{"state of another launch", other, []*http.Cookie{sc}},
+			{"cookie of another launch", state, []*http.Cookie{oc}},
+			{"bad state", secret + id, []*http.Cookie{sc}},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				resp := s.post(t, appHost("bench"), "/x-teleport-auth", origin(appHost("bench")), handoffJSON(sid, bearer, c.state), c.cookies...)
+				require.Equal(t, "bad handoff", string(readBody(t, resp)))
+				require.Equal(t, http.StatusForbidden, resp.StatusCode)
+				require.Nil(t, cookie(resp, "__Host-sp_app"))
+			})
+		}
+	})
+
 	t.Run("handoff refused", func(t *testing.T) {
 		sid, bearer, _ := s.launch(t, s.login(t), "bench")
-		good, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-		wrong, _ := json.Marshal(map[string]string{"sid": sid, "subject": "x" + bearer[1:]})
+		state, sc := s.stateOf(t, sid)
+		good := handoffJSON(sid, bearer, state)
+		wrong := handoffJSON(sid, "x"+bearer[1:], state)
 		cases := []struct {
 			name, origin, body string
 			status             int
 		}{
-			{"wrong subject", origin(appHost("bench")), string(wrong), http.StatusForbidden},
+			{"wrong subject", origin(appHost("bench")), wrong, http.StatusForbidden},
 			{"not json", origin(appHost("bench")), "sid=x", http.StatusBadRequest},
 			{"empty", origin(appHost("bench")), `{}`, http.StatusBadRequest},
-			{"login host origin", origin(LoginHost), string(good), http.StatusForbidden},
-			{"sibling app origin", origin(appHost("cam")), string(good), http.StatusForbidden},
-			{"no origin", "", string(good), http.StatusForbidden},
+			{"login host origin", origin(LoginHost), good, http.StatusForbidden},
+			{"sibling app origin", origin(appHost("cam")), good, http.StatusForbidden},
+			{"no origin", "", good, http.StatusForbidden},
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
-				resp := s.post(t, appHost("bench"), "/x-teleport-auth", c.origin, c.body)
+				resp := s.post(t, appHost("bench"), "/x-teleport-auth", c.origin, c.body, sc)
 				readBody(t, resp)
 				require.Equal(t, c.status, resp.StatusCode)
 				require.Nil(t, cookie(resp, "__Host-sp_app"))

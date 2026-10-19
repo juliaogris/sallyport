@@ -179,7 +179,7 @@ func TestHandoffStartPath(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not found")
 	}
-	resp, err := shared.Get(appHost("bench"), "/x-teleport-auth")
+	resp, err := shared.Get(appHost("bench"), "/x-teleport-auth?state=x")
 	require.NoError(t, err)
 	page := readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -223,11 +223,11 @@ func runHandoffScript(t *testing.T, script, hash string) string {
 const vm = require('vm');
 let replaced = null;
 const location = {
-  hash: process.argv[2], pathname: '/x-teleport-auth',
+  hash: process.argv[2], search: '?state=x', pathname: '/x-teleport-auth',
   replace: p => { replaced = p; }, set href(p) { replaced = p; },
 };
 const ctx = {
-  location, atob,
+  location, atob, URLSearchParams,
   history: { replaceState() {} },
   document: { getElementById: () => ({}) },
   fetch: () => Promise.resolve({ ok: true, text: () => Promise.resolve('') }),

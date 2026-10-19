@@ -1,7 +1,6 @@
 package conformance
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
@@ -101,8 +100,8 @@ func TestAppSessionOtherHost(t *testing.T) {
 			require.Equal(t, http.StatusSeeOther, resp.StatusCode, "bench's cookies on the cam host")
 			require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
 
-			body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-			resp = s.post(t, appHost("cam"), "/x-teleport-auth", origin(appHost("cam")), string(body))
+			state, sc := s.startLaunch(t, "cam")
+			resp = s.post(t, appHost("cam"), "/x-teleport-auth", origin(appHost("cam")), handoffJSON(sid, bearer, state), sc)
 			got := readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "bench's session handed off on the cam host")
 			require.Equal(t, "bad handoff", string(got))

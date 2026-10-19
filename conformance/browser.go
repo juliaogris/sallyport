@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// AppSession logs Alice in on h with the fake auth, launches app and posts
-// the handoff. It returns the app session ID and bearer token, which are
+// AppSession logs Alice in on h with the fake auth, launches app through
+// its app host, as the dashboard's launch link does, and posts the handoff. It returns the app session ID and bearer token, which are
 // the values of the __Host-sp_app and __Host-sp_subject cookies.
 func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 	post := func(host, path, body string, cookie *http.Cookie) (*http.Response, error) {
@@ -47,30 +47,58 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 		return "", "", fmt.Errorf("login: status %d", resp.StatusCode)
 	}
 
-	req, err := http.NewRequest("GET", "https://"+LoginHost+"/web/launch/"+app, nil)
+	get := func(rawURL, site string, cookie *http.Cookie) (*http.Response, error) {
+		req, err := http.NewRequest("GET", rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Sec-Fetch-Site", site)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		resp, err := h.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusSeeOther {
+			return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+		}
+		return resp, nil
+	}
+
+	resp, err = get("https://"+LoginHost+"/web/launch/"+app, "same-origin", session)
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.AddCookie(session)
-	resp, err = h.Do(req)
+	resp, err = get(resp.Header.Get("Location"), "same-site", nil)
 	if err != nil {
 		return "", "", err
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	var state *http.Cookie
+	for _, c := range resp.Cookies() {
+		if strings.HasPrefix(c.Name, "__Host-sp_state_") {
+			state = c
+		}
+	}
+	launch := resp.Header.Get("Location")
+	resp, err = get(launch, "same-site", session)
+	if err != nil {
+		return "", "", err
+	}
 	loc, err := url.Parse(resp.Header.Get("Location"))
-	if resp.StatusCode != http.StatusSeeOther || err != nil {
-		return "", "", fmt.Errorf("launch: status %d, location %q", resp.StatusCode, resp.Header.Get("Location"))
+	if err != nil {
+		return "", "", err
 	}
 	parts := strings.Split(loc.Fragment, ".")
-	if len(parts) != 3 {
-		return "", "", fmt.Errorf("launch: fragment %q", loc.Fragment)
+	if len(parts) != 3 || state == nil {
+		return "", "", fmt.Errorf("launch: location %q", resp.Header.Get("Location"))
 	}
 	sid, bearer = parts[0], parts[1]
 
-	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp, err = post(loc.Host, "/x-teleport-auth", string(body), nil)
+	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer, "state": loc.Query().Get("state")})
+	resp, err = post(loc.Host, "/x-teleport-auth", string(body), state)
 	if err != nil {
 		return "", "", err
 	}

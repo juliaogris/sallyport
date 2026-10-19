@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,18 @@ type stack struct {
 	agent *Agent
 	// sub are the apps in the hub's SUB_APPS.
 	sub map[string]bool
+
+	mu sync.Mutex
+	// states holds the launch state and the state cookie of each launched
+	// app session, by app session ID.
+	states map[string]launchState
+}
+
+// launchState is the state of one launch and the state cookie the app host
+// set for it.
+type launchState struct {
+	state  string
+	cookie *http.Cookie
 }
 
 // newStack starts a hub, keeps 4 callout streams open to it, and connects
@@ -167,11 +180,39 @@ func (s *stack) login(t *testing.T) *http.Cookie {
 	return c
 }
 
+// startLaunch starts a launch of app on its app host, as the dashboard's
+// launch link does. It returns the state in the redirect to the login host
+// and the state cookie the app host set.
+func (s *stack) startLaunch(t *testing.T, app string) (string, *http.Cookie) {
+	t.Helper()
+	resp := s.launchFrom(t, app, "same-origin")
+	readBody(t, resp)
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	require.Equal(t, "https://"+s.hostOf(app)+"/x-teleport-auth", resp.Header.Get("Location"))
+
+	resp = s.get(t, s.hostOf(app), "/x-teleport-auth")
+	readBody(t, resp)
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	require.Equal(t, LoginHost, loc.Host)
+	require.Equal(t, "/web/launch/"+app, loc.Path)
+	state := loc.Query().Get("state")
+	secret, id, ok := strings.Cut(state, "_")
+	require.True(t, ok, "state %q", state)
+	c := cookie(resp, "__Host-sp_state_"+id)
+	require.NotNil(t, c, "no state cookie")
+	require.Equal(t, secret, c.Value)
+	return state, c
+}
+
 // launch launches app and returns the app session ID, the bearer token
-// and the start path from the handoff URL.
+// and the start path from the handoff URL. The handoff's state is kept for
+// handoff and stateOf.
 func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bearer, start string) {
 	t.Helper()
-	resp := s.launchFrom(t, app, "same-origin", session)
+	state, c := s.startLaunch(t, app)
+	resp := s.launchFrom(t, app+"?state="+url.QueryEscape(state), "same-site", session)
 	readBody(t, resp)
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	loc, err := url.Parse(resp.Header.Get("Location"))
@@ -179,18 +220,43 @@ func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bea
 	require.Equal(t, "https", loc.Scheme)
 	require.Equal(t, s.hostOf(app), loc.Host)
 	require.Equal(t, "/x-teleport-auth", loc.Path)
+	require.Equal(t, state, loc.Query().Get("state"))
 	parts := strings.Split(loc.Fragment, ".")
 	require.Len(t, parts, 3, "fragment %q", loc.Fragment)
 	p, err := base64.RawURLEncoding.DecodeString(parts[2])
 	require.NoError(t, err)
+	s.mu.Lock()
+	if s.states == nil {
+		s.states = map[string]launchState{}
+	}
+	s.states[parts[0]] = launchState{state, c}
+	s.mu.Unlock()
 	return parts[0], parts[1], string(p)
 }
 
-// handoff posts the handoff to the app host and returns the app cookies.
+// stateOf returns the state and the state cookie of the launch of the app
+// session sid.
+func (s *stack) stateOf(t *testing.T, sid string) (string, *http.Cookie) {
+	t.Helper()
+	s.mu.Lock()
+	ls, ok := s.states[sid]
+	s.mu.Unlock()
+	require.True(t, ok, "no launch for %s", sid)
+	return ls.state, ls.cookie
+}
+
+// handoffJSON is the body of a handoff POST.
+func handoffJSON(sid, subject, state string) string {
+	b, _ := json.Marshal(map[string]string{"sid": sid, "subject": subject, "state": state})
+	return string(b)
+}
+
+// handoff posts the handoff to the app host, with the launch's state and
+// state cookie, and returns the app cookies.
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-	resp := s.post(t, s.hostOf(app), "/x-teleport-auth", origin(s.hostOf(app)), string(body))
+	state, c := s.stateOf(t, sid)
+	resp := s.post(t, s.hostOf(app), "/x-teleport-auth", origin(s.hostOf(app)), handoffJSON(sid, bearer, state), c)
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")
