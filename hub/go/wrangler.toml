@@ -55,6 +55,10 @@ APPS = "printer"
 # comma-separated. A web UI that logs in with a passkey must be under the
 # login host, the WebAuthn relying party.
 # SUB_APPS = ""
+# The apps in SUB_APPS that are a Teleport web UI, comma-separated. A
+# launch of one also logs the UI in with the user's login, so the UI does
+# not ask for a passkey again.
+# WEB_UI_APPS = ""
 
 [[env.home.durable_objects.bindings]]
 name = "HUB"

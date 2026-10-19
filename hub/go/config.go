@@ -16,7 +16,7 @@ import (
 // that multi-line PEM survives `wrangler secret put`.
 var envNames = []string{
 	"CLUSTER_NAME", "PUBLIC_ADDR", "SERVER_VERSION", "CALLOUT_HOST",
-	"DOMAIN", "OWNER", "APPS", "SUB_APPS",
+	"DOMAIN", "OWNER", "APPS", "SUB_APPS", "WEB_UI_APPS",
 	"HUB_TLS_CERT", "HUB_TLS_KEY", "HUB_SSH_KEY", "HUB_SSH_CERT",
 	"HOST_CA_SSH", "HOST_CA_TLS", "AUTH_CALLOUT_PUBKEY", "HUB_MODE",
 }
@@ -34,6 +34,9 @@ type config struct {
 	// host, in place of <app>-<owner>.<domain>. A web UI that logs in with a
 	// passkey must be under the login host, the WebAuthn relying party.
 	subApps map[string]bool
+	// webUIApps are the apps in subApps that are a Teleport web UI. A launch
+	// of one also logs the UI in with the user's web session.
+	webUIApps map[string]bool
 	// lazy is true when HUB_MODE is lazy: auth's callout keeps one control
 	// socket open, and the hub asks it for a stream each time it needs one.
 	// HUB_MODE unset or pool is the pool hub, and any other value is an
@@ -71,6 +74,7 @@ func parseConfig(env map[string]string) *config {
 		lazy:        env["HUB_MODE"] == "lazy",
 		errs:        make(map[string]error),
 	}
+	c.webUIApps = parseWebUIApps(env["WEB_UI_APPS"], c.subApps)
 	switch env["HUB_MODE"] {
 	case "", "pool", "lazy":
 	default:
@@ -277,6 +281,18 @@ func (c *config) appHost(name string) string {
 
 // parseSubApps parses SUB_APPS, a comma-separated list of app names. A name
 // that does not match ^[a-z][a-z0-9]*$ is dropped.
+// parseWebUIApps reads WEB_UI_APPS, a comma-separated list of app names.
+// Names that are not in subApps, and invalid names, are dropped.
+func parseWebUIApps(s string, subApps map[string]bool) map[string]bool {
+	m := parseSubApps(s)
+	for n := range m {
+		if !subApps[n] {
+			delete(m, n)
+		}
+	}
+	return m
+}
+
 func parseSubApps(s string) map[string]bool {
 	m := make(map[string]bool)
 	for _, n := range strings.Split(s, ",") {

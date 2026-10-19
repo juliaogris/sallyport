@@ -415,6 +415,7 @@ under the login host, at `tp.me.example.com`.
    [env.home.vars]
    APPS = "printer,tp:/web"
    SUB_APPS = "tp"
+   WEB_UI_APPS = "tp"
    ```
 
    ```
@@ -422,7 +423,14 @@ under the login host, at `tp.me.example.com`.
    ```
 
    The start path is `/web`, because the proxy redirects `/` to its own
-   address.
+   address. With `tp` in `WEB_UI_APPS`, a launch also logs the UI in with
+   your hub login, so the UI does not ask for a passkey again. Leave it
+   out to log in to the UI separately.
+
+The UI and the hub share one login until the UI renews it, which it does
+on its own every few minutes. Until then, logging out of the UI also logs
+out of the hub. After that, logging out of the hub does not log out of
+the UI, so log out of both.
 
 The app tiles in the UI do not work, because the hub does not answer
 Teleport's app launch.

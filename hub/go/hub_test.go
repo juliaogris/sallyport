@@ -424,3 +424,51 @@ func TestCheckClientData(t *testing.T) {
 
 // clientData encodes s as the pages encode clientDataJSON.
 func clientData(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+func TestParseWebUIApps(t *testing.T) {
+	sub := map[string]bool{"tp": true, "ui": true}
+	got := parseWebUIApps("tp, bench,,Bad,ui", sub)
+	want := map[string]bool{"tp": true, "ui": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseWebUIApps = %v, want %v", got, want)
+	}
+	if got := parseWebUIApps("", sub); len(got) != 0 {
+		t.Errorf("parseWebUIApps(\"\") = %v, want none", got)
+	}
+}
+
+func TestUISessions(t *testing.T) {
+	now := time.Unix(1000, 0)
+	u := &uiSessions{now: func() time.Time { return now }}
+	s := uiSession{user: "u", sid: "w"}
+
+	u.put("a", s)
+	got, ok := u.take("a")
+	if !ok || got.user != "u" || got.sid != "w" {
+		t.Fatalf("take(a) = %+v, %v", got, ok)
+	}
+	if _, ok := u.take("a"); ok {
+		t.Error("take(a) twice")
+	}
+	if _, ok := u.take("b"); ok {
+		t.Error("take(b) without put")
+	}
+
+	u.put("old", s)
+	now = now.Add(uiSessionTTL)
+	if _, ok := u.take("old"); !ok {
+		t.Error("take at uiSessionTTL after the launch")
+	}
+	u.put("old", s)
+	now = now.Add(uiSessionTTL + time.Second)
+	if _, ok := u.take("old"); ok {
+		t.Error("take after uiSessionTTL")
+	}
+
+	u.put("x", s)
+	now = now.Add(uiSessionTTL + time.Second)
+	u.put("y", s)
+	if _, ok := u.m["x"]; ok || len(u.m) != 1 {
+		t.Errorf("put kept an old entry: %v", u.m)
+	}
+}

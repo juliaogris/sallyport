@@ -4,10 +4,13 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // The browser side of the hub: invite, login, launcher and app hosts.
@@ -38,7 +41,20 @@ const (
 	// stateCookiePrefix is the prefix of the state cookie of a launch, which
 	// is followed by the ID part of the launch state.
 	stateCookiePrefix = "__Host-sp_state_"
+	// uiSessionCookie is the Teleport web UI's session cookie.
+	uiSessionCookie = "__Host-session"
 )
+
+// uiCookieValue returns the value of the Teleport web UI's session cookie
+// for the web session sid of user: the hex of a JSON object, as the proxy
+// writes it.
+func uiCookieValue(user, sid string) string {
+	b, _ := json.Marshal(struct {
+		User string `json:"user"`
+		SID  string `json:"sid"`
+	}{user, sid})
+	return hex.EncodeToString(b)
+}
 
 // loginHostRequest answers a request for the login host.
 func (h *hub) loginHostRequest(req *request) *response {
@@ -231,10 +247,33 @@ func (h *hub) handoff(req *request) *response {
 	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, in.Subject) || !certForHost(s.tlsCert, host) {
 		return textError("bad handoff", 403)
 	}
-	return (&response{status: 204}).
+	out := (&response{status: 204}).
 		add("set-cookie", expireCookie(stateCookiePrefix+id)).
 		add("set-cookie", setCookie(appCookie, in.Sid)).
 		add("set-cookie", setCookie(subjectCookie, in.Subject))
+	if ui, ok := h.ui.take(in.Sid); ok {
+		h.addUISession(out, ui)
+	}
+	return out
+}
+
+// addUISession adds the Teleport web UI's session cookie for ui to out, if
+// auth still has the web session and it has not expired. The cookie lives
+// as long as the session.
+func (h *hub) addUISession(out *response, ui uiSession) {
+	resp, err := h.auth.call(getWebSession, getWebSessionRequest(ui.user, ui.sid))
+	if err != nil {
+		if !notFound(err) {
+			logf("web: handoff GetWebSession: %v", err)
+		}
+		return
+	}
+	s := sessionOf(resp)
+	if s == nil || !s.unexpired() {
+		return
+	}
+	left := s.expires - time.Now().Unix()
+	out.add("set-cookie", uiSessionCookie+"="+uiCookieValue(ui.user, ui.sid)+"; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age="+strconv.FormatInt(left, 10))
 }
 
 // webSession returns the logged-in user and the web session, if the
@@ -352,6 +391,9 @@ func (h *hub) launch(req *request, name string) *response {
 			return textError("auth unavailable", 503)
 		}
 		return textError("launch failed", 502)
+	}
+	if h.cfg.webUIApps[name] {
+		h.ui.put(sid, uiSession{user: user, sid: s.name})
 	}
 	return (&response{status: 303}).
 		add("location", "https://"+publicAddr+authPath+"?state="+state+"#"+sid+"."+bearer+"."+b64([]byte(start))).

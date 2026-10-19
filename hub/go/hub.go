@@ -47,6 +47,10 @@ type hub struct {
 	// requests with the same privilege token cannot both add a passkey.
 	tokenMu sync.Mutex
 
+	// ui holds the web session of each launch of an app in WEB_UI_APPS until
+	// its handoff.
+	ui uiSessions
+
 	pool *authPool
 	auth *hubAuth
 	// lazy is the lazy hub, when HUB_MODE is lazy, or nil.
