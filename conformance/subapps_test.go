@@ -1,8 +1,10 @@
 package conformance
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,12 +20,15 @@ const notFoundBody = "404 page not found\n"
 
 // subStackFor returns a new stack in mode whose hub also serves the app tp,
 // in SUB_APPS, at tp.hub.test. SUB_APPS also holds an empty entry and two
-// names that are not app names, which the hub drops.
+// names that are not app names, which the hub drops. tp is also in
+// WEB_UI_APPS, with bench, which the hub drops because it is not in
+// SUB_APPS.
 func subStackFor(t *testing.T, mode string) *stack {
 	t.Helper()
 	vars := BaseVars()
 	vars["APPS"] = "bench,cam:/stream,tp:/web"
 	vars["SUB_APPS"] = "tp,, Bad,a.b"
+	vars["WEB_UI_APPS"] = "tp,bench"
 	return stackForVars(t, mode, vars)
 }
 
@@ -72,9 +77,9 @@ func testSubApps(t *testing.T, s *stack) {
 	})
 
 	t.Run("hub cookies stripped", func(t *testing.T) {
-		extra := append([]*http.Cookie{{Name: "app", Value: "1"}, session}, cookies...)
+		extra := append([]*http.Cookie{{Name: "app", Value: "1"}, {Name: "__Host-session", Value: "ui"}, session}, cookies...)
 		e := s.echoAt(t, host, extra, nil)
-		require.Equal(t, []string{"app=1"}, e.Header["Cookie"])
+		require.Equal(t, []string{"app=1; __Host-session=ui"}, e.Header["Cookie"])
 
 		resp := s.get(t, host, "/t/setcookie", cookies...)
 		readBody(t, resp)
@@ -82,6 +87,46 @@ func testSubApps(t *testing.T, s *stack) {
 		require.Nil(t, cookie(resp, "__Host-sp_app"))
 		require.Nil(t, cookie(resp, "__Host-sp_subject"))
 		require.NotNil(t, cookie(resp, "app"))
+		require.NotNil(t, cookie(resp, "__Host-session"), "the web UI's session cookie did not reach the browser")
+	})
+
+	t.Run("web UI session", func(t *testing.T) {
+		session := s.login(t)
+		user, wsid, _ := strings.Cut(session.Value, ":")
+		sid, bearer, _ := s.launch(t, session, "tp")
+		resp := s.handoffResp(t, "tp", sid, bearer)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		requireUISession(t, cookie(resp, "__Host-session"), user, wsid)
+
+		resp = s.handoffResp(t, "tp", sid, bearer)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.Nil(t, cookie(resp, "__Host-session"), "second handoff of one launch")
+	})
+
+	t.Run("web UI session after a refused handoff", func(t *testing.T) {
+		session := s.login(t)
+		user, wsid, _ := strings.Cut(session.Value, ":")
+		sid, bearer, _ := s.launch(t, session, "tp")
+		state, sc := s.stateOf(t, sid)
+		resp := s.post(t, host, "/x-teleport-auth", origin(host), handoffJSON(sid, "x"+bearer[1:], state), sc)
+		readBody(t, resp)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Nil(t, cookie(resp, "__Host-session"))
+
+		resp = s.handoffResp(t, "tp", sid, bearer)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		requireUISession(t, cookie(resp, "__Host-session"), user, wsid)
+	})
+
+	t.Run("no web UI session for other apps", func(t *testing.T) {
+		sid, bearer, _ := s.launch(t, s.login(t), "bench")
+		resp := s.handoffResp(t, "bench", sid, bearer)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.Nil(t, cookie(resp, "__Host-session"))
 	})
 
 	t.Run("other apps unchanged", func(t *testing.T) {
@@ -251,6 +296,16 @@ func testSubApps(t *testing.T, s *stack) {
 		}
 	})
 
+	t.Run("no web UI session once the web session expired", func(t *testing.T) {
+		sid, bearer, _ := s.launch(t, s.login(t), "tp")
+		s.auth.ExpireWebSessions()
+		resp := s.handoffResp(t, "tp", sid, bearer)
+		readBody(t, resp)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.NotNil(t, cookie(resp, "__Host-sp_app"))
+		require.Nil(t, cookie(resp, "__Host-session"))
+	})
+
 	// A web terminal can be quiet for minutes. wrangler dev does not close
 	// an idle WebSocket as the Cloudflare edge may, so this checks only the
 	// hub's own timers over several of their periods.
@@ -270,4 +325,23 @@ func testSubApps(t *testing.T, s *stack) {
 			require.Equal(t, msg, string(got))
 		}
 	})
+}
+
+// requireUISession checks that c is the Teleport web UI's session cookie
+// for the web session sid of user, with the attributes the proxy sets.
+func requireUISession(t *testing.T, c *http.Cookie, user, sid string) {
+	t.Helper()
+	require.NotNil(t, c, "no __Host-session")
+	raw, err := hex.DecodeString(c.Value)
+	require.NoError(t, err)
+	var v struct{ User, SID string }
+	require.NoError(t, json.Unmarshal(raw, &v))
+	require.Equal(t, user, v.User)
+	require.Equal(t, sid, v.SID)
+	require.Equal(t, "/", c.Path)
+	require.Empty(t, c.Domain)
+	require.True(t, c.Secure)
+	require.True(t, c.HttpOnly)
+	require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+	require.InDelta(t, time.Hour.Seconds(), c.MaxAge, 120, "Max-Age is not the web session's remaining time")
 }

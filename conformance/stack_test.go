@@ -245,6 +245,14 @@ func (s *stack) stateOf(t *testing.T, sid string) (string, *http.Cookie) {
 	return ls.state, ls.cookie
 }
 
+// handoffResp posts the handoff to the app host, with the launch's state
+// and state cookie, and returns the response.
+func (s *stack) handoffResp(t *testing.T, app, sid, bearer string) *http.Response {
+	t.Helper()
+	state, c := s.stateOf(t, sid)
+	return s.post(t, s.hostOf(app), "/x-teleport-auth", origin(s.hostOf(app)), handoffJSON(sid, bearer, state), c)
+}
+
 // handoffJSON is the body of a handoff POST.
 func handoffJSON(sid, subject, state string) string {
 	b, _ := json.Marshal(map[string]string{"sid": sid, "subject": subject, "state": state})
@@ -255,8 +263,7 @@ func handoffJSON(sid, subject, state string) string {
 // state cookie, and returns the app cookies.
 func (s *stack) handoff(t *testing.T, app, sid, bearer string) []*http.Cookie {
 	t.Helper()
-	state, c := s.stateOf(t, sid)
-	resp := s.post(t, s.hostOf(app), "/x-teleport-auth", origin(s.hostOf(app)), handoffJSON(sid, bearer, state), c)
+	resp := s.handoffResp(t, app, sid, bearer)
 	readBody(t, resp)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	a, sub := cookie(resp, "__Host-sp_app"), cookie(resp, "__Host-sp_subject")

@@ -138,6 +138,7 @@ func Handler(dir string) http.Handler {
 		w.Header().Add("Set-Cookie", "__Host-sp_app=evil; Path=/; Secure")
 		w.Header().Add("Set-Cookie", "__Host-sp_subject=evil; Path=/; Secure")
 		w.Header().Add("Set-Cookie", "app=1; Path=/")
+		w.Header().Add("Set-Cookie", "__Host-session=ui; Path=/; Secure; HttpOnly")
 		w.WriteHeader(http.StatusOK)
 	})
 	// /t/quiet?secs=S sends nothing for S seconds, then answers 200, like a
