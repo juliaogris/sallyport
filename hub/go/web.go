@@ -58,7 +58,7 @@ func (h *hub) loginHostRequest(req *request) *response {
 	case req.method == "POST" && p == "/webapi/login/finish":
 		return h.loginFinish(req.body)
 	case req.method == "POST" && p == "/web/logout":
-		return redirect("/web/login").add("set-cookie", expireCookie(sessionCookie))
+		return h.logout(req)
 	case req.method == "GET" && strings.HasPrefix(p, "/web/invite/"):
 		return html(invitePage)
 	case req.method == "POST" && strings.HasPrefix(p, "/webapi/invite/"):
@@ -152,6 +152,9 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	// Auth is asked on every request, and any error denies.
 	resp, err := h.auth.call(getAppSession, getAppSessionRequest(sid))
 	if err != nil {
+		if notFound(err) {
+			return h.toLogin()
+		}
 		logf("web: GetAppSession for %s: %v", app, err)
 		return textError("auth unavailable", 503)
 	}
@@ -233,6 +236,29 @@ func (h *hub) webSession(req *request) (string, *webSession, error) {
 		return "", nil, nil
 	}
 	return user, s, nil
+}
+
+// logout deletes the user's app sessions and the web session at auth, as
+// the user, and expires the session cookie. The cookie is expired even if
+// a delete fails.
+func (h *hub) logout(req *request) *response {
+	resp := redirect("/web/login").add("set-cookie", expireCookie(sessionCookie))
+	user, s, _ := h.webSession(req)
+	if s == nil {
+		return resp
+	}
+	cert, err := h.sessionCert(s)
+	if err != nil {
+		logf("web: logout: %v", err)
+		return resp
+	}
+	if _, err := h.callAs(cert, deleteUserAppSessions, deleteUserAppSessionsRequest(user)); err != nil {
+		logf("web: logout: DeleteUserAppSessions: %v", err)
+	}
+	if _, err := h.callAs(cert, deleteWebSession, deleteWebSessionRequest(user, s.name)); err != nil && !notFound(err) {
+		logf("web: logout: DeleteWebSession: %v", err)
+	}
+	return resp
 }
 
 func (h *hub) dashboard(req *request) *response {

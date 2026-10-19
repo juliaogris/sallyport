@@ -143,6 +143,14 @@ func getWebSessionRequest(user, sid string) []byte {
 	return pb(nil).str(1, user).str(2, sid)
 }
 
+func deleteWebSessionRequest(user, sid string) []byte {
+	return pb(nil).str(1, user).str(2, sid)
+}
+
+func deleteUserAppSessionsRequest(user string) []byte {
+	return pb(nil).str(1, user)
+}
+
 func createAppSessionRequest(user, publicAddr, cluster, app string) []byte {
 	return pb(nil).str(1, user).str(3, publicAddr).str(4, cluster).str(9, app)
 }

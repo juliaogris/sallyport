@@ -138,8 +138,8 @@ with a probe every minute (see [Rust and Go](#rust-and-go)).
 - Auth trusts the hub by the public TLS certificate of the login host. A
   takeover of the Cloudflare account or the Worker can act as the proxy,
   so the Cloudflare account needs strong login protection.
-- Logout clears the browser's cookies, but the session stays valid at auth
-  until it expires.
+- Logout ends the user's app sessions in every browser, as Teleport's own
+  logout does, not only in the one that logs out.
 - The hub does not limit requests per client. See
   [Rate limiting](#rate-limiting).
 
