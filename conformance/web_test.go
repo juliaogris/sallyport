@@ -118,6 +118,49 @@ func TestWeb(t *testing.T) {
 		require.Equal(t, -1, c.MaxAge, "cookie not expired")
 	})
 
+	t.Run("logout ends the sessions", func(t *testing.T) {
+		session := s.login(t)
+		sid, bearer, _ := s.launch(t, session, "bench")
+		app := s.handoff(t, "bench", sid, bearer)
+		before := len(s.auth.Calls())
+
+		resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+		var deletes []string
+		for _, c := range s.auth.Calls()[before:] {
+			if c.Path == "/proto.AuthService/DeleteUserAppSessions" || c.Path == "/proto.AuthService/DeleteWebSession" {
+				require.Equal(t, Alice, c.Client, "%s not called as the user", c.Path)
+				deletes = append(deletes, c.Path)
+			}
+		}
+		require.Equal(t, []string{"/proto.AuthService/DeleteUserAppSessions", "/proto.AuthService/DeleteWebSession"}, deletes)
+
+		resp = s.get(t, LoginHost, "/", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+		require.Equal(t, "/web/login", resp.Header.Get("Location"))
+
+		resp = s.get(t, appHost("bench"), "/", app...)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+		require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
+	})
+
+	t.Run("logout without a session", func(t *testing.T) {
+		bad := &http.Cookie{Name: "__Host-sp_session", Value: Alice + ":nope"}
+		for _, cookies := range [][]*http.Cookie{nil, {bad}} {
+			before := countCalls(s.auth, "/proto.AuthService/DeleteWebSession")
+			resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", cookies...)
+			readBody(t, resp)
+			require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+			c := cookie(resp, "__Host-sp_session")
+			require.NotNil(t, c)
+			require.Equal(t, -1, c.MaxAge, "cookie not expired")
+			require.Equal(t, before, countCalls(s.auth, "/proto.AuthService/DeleteWebSession"))
+		}
+	})
+
 	t.Run("launch", func(t *testing.T) {
 		session := s.login(t)
 		sid, bearer, start := s.launch(t, session, "bench")

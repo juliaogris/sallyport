@@ -404,6 +404,32 @@ func (a *FakeAuth) grpc(w http.ResponseWriter, r *http.Request, method string) {
 		a.app[s.name] = s
 		a.mu.Unlock()
 		resp = pbMsg(nil).msg(1, pbMsg(nil).msg(4, pbMsg(nil).str(1, s.name)))
+	case "DeleteWebSession":
+		user := req.str(1)
+		if client != user {
+			code, message = codePermissionDenied, fmt.Sprintf("DeleteWebSession for %q as %q", user, client)
+			break
+		}
+		a.mu.Lock()
+		if s := a.web[req.str(2)]; s != nil && s.user == user {
+			delete(a.web, s.name)
+		}
+		a.mu.Unlock()
+		resp = pbMsg(nil)
+	case "DeleteUserAppSessions":
+		user := req.str(1)
+		if client != user {
+			code, message = codePermissionDenied, fmt.Sprintf("DeleteUserAppSessions for %q as %q", user, client)
+			break
+		}
+		a.mu.Lock()
+		for name, s := range a.app {
+			if s.user == user {
+				delete(a.app, name)
+			}
+		}
+		a.mu.Unlock()
+		resp = pbMsg(nil)
 	case "GetAppSession":
 		a.mu.Lock()
 		s := a.app[req.str(1)]
