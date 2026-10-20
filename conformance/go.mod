@@ -2,6 +2,8 @@ module github.com/juliaogris/sallyport/conformance
 
 go 1.26.1
 
+toolchain go1.27.3
+
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/stretchr/testify v1.12.1
