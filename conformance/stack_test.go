@@ -207,8 +207,8 @@ func (s *stack) startLaunch(t *testing.T, app string) (string, *http.Cookie) {
 }
 
 // launch launches app and returns the app session ID, the bearer token
-// and the start path from the handoff URL. The handoff's state is kept for
-// handoff and stateOf.
+// and the start path from the handoff URL. The launch state and its cookie
+// are kept for handoff and stateOf.
 func (s *stack) launch(t *testing.T, session *http.Cookie, app string) (sid, bearer, start string) {
 	t.Helper()
 	state, c := s.startLaunch(t, app)

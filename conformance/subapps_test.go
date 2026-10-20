@@ -198,8 +198,8 @@ func testSubApps(t *testing.T, s *stack) {
 			readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "origin %s", o)
 
-			body, _ := json.Marshal(map[string]string{"sid": sid, "subject": bearer})
-			resp = s.post(t, host, "/x-teleport-auth", o, string(body))
+			state, sc := s.stateOf(t, sid)
+			resp = s.post(t, host, "/x-teleport-auth", o, handoffJSON(sid, bearer, state), sc)
 			readBody(t, resp)
 			require.Equal(t, http.StatusForbidden, resp.StatusCode, "handoff from origin %s", o)
 			require.Nil(t, cookie(resp, "__Host-sp_app"))
@@ -324,6 +324,20 @@ func testSubApps(t *testing.T, s *stack) {
 			require.NoError(t, err)
 			require.Equal(t, msg, string(got))
 		}
+	})
+
+	t.Run("logout ends the app session", func(t *testing.T) {
+		session := s.login(t)
+		sid, bearer, _ := s.launch(t, session, "tp")
+		app := s.handoff(t, "tp", sid, bearer)
+		resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+
+		resp = s.get(t, host, "/", app...)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+		require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
 	})
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -129,12 +130,12 @@ func TestWeb(t *testing.T) {
 		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 		var deletes []string
 		for _, c := range s.auth.Calls()[before:] {
-			if c.Path == "/proto.AuthService/DeleteUserAppSessions" || c.Path == "/proto.AuthService/DeleteWebSession" {
+			if slices.Contains(logoutDeletes, c.Path) {
 				require.Equal(t, Alice, c.Client, "%s not called as the user", c.Path)
 				deletes = append(deletes, c.Path)
 			}
 		}
-		require.Equal(t, []string{"/proto.AuthService/DeleteUserAppSessions", "/proto.AuthService/DeleteWebSession"}, deletes)
+		require.Equal(t, logoutDeletes, deletes)
 
 		resp = s.get(t, LoginHost, "/", session)
 		readBody(t, resp)
@@ -150,15 +151,30 @@ func TestWeb(t *testing.T) {
 	t.Run("logout without a session", func(t *testing.T) {
 		bad := &http.Cookie{Name: "__Host-sp_session", Value: Alice + ":nope"}
 		for _, cookies := range [][]*http.Cookie{nil, {bad}} {
-			before := countCalls(s.auth, "/proto.AuthService/DeleteWebSession")
+			before := len(s.auth.Calls())
 			resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", cookies...)
 			readBody(t, resp)
 			require.Equal(t, http.StatusSeeOther, resp.StatusCode)
 			c := cookie(resp, "__Host-sp_session")
 			require.NotNil(t, c)
 			require.Equal(t, -1, c.MaxAge, "cookie not expired")
-			require.Equal(t, before, countCalls(s.auth, "/proto.AuthService/DeleteWebSession"))
+			for _, c := range s.auth.Calls()[before:] {
+				require.NotContains(t, logoutDeletes, c.Path)
+			}
 		}
+	})
+
+	t.Run("handoff after logout", func(t *testing.T) {
+		session := s.login(t)
+		sid, bearer, _ := s.launch(t, session, "bench")
+		resp := s.post(t, LoginHost, "/web/logout", origin(LoginHost), "", session)
+		readBody(t, resp)
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+
+		resp = s.handoffResp(t, "bench", sid, bearer)
+		require.Equal(t, "bad handoff", strings.TrimSpace(string(readBody(t, resp))))
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Nil(t, cookie(resp, "__Host-sp_app"))
 	})
 
 	t.Run("launch", func(t *testing.T) {
@@ -178,6 +194,16 @@ func TestWeb(t *testing.T) {
 			}
 		}
 		require.True(t, asUser, "no CreateAppSession call")
+	})
+
+	t.Run("launch state cookie", func(t *testing.T) {
+		_, c := s.startLaunch(t, "bench")
+		require.Equal(t, "/", c.Path)
+		require.Empty(t, c.Domain)
+		require.True(t, c.Secure)
+		require.True(t, c.HttpOnly)
+		require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+		require.Equal(t, 60, c.MaxAge)
 	})
 
 	t.Run("launch unknown app", func(t *testing.T) {
@@ -245,16 +271,6 @@ func TestWeb(t *testing.T) {
 		for _, c := range s.handoff(t, "bench", sid, bearer) {
 			requireSessionCookie(t, c)
 		}
-	})
-
-	t.Run("launch state cookie", func(t *testing.T) {
-		_, c := s.startLaunch(t, "bench")
-		require.Equal(t, "/", c.Path)
-		require.Empty(t, c.Domain)
-		require.True(t, c.Secure)
-		require.True(t, c.HttpOnly)
-		require.Equal(t, http.SameSiteLaxMode, c.SameSite)
-		require.Equal(t, 60, c.MaxAge)
 	})
 
 	t.Run("handoff clears the state cookie", func(t *testing.T) {
@@ -343,6 +359,9 @@ func requireSessionCookie(t *testing.T, c *http.Cookie) {
 }
 
 // countCalls returns how many calls to path the fake auth has answered.
+// logoutDeletes are the calls a logout makes to end the user's sessions.
+var logoutDeletes = []string{"/proto.AuthService/DeleteUserAppSessions", "/proto.AuthService/DeleteWebSession"}
+
 func countCalls(a *FakeAuth, path string) int {
 	n := 0
 	for _, c := range a.Calls() {

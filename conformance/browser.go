@@ -3,6 +3,7 @@ package conformance
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,8 +12,9 @@ import (
 )
 
 // AppSession logs Alice in on h with the fake auth, launches app through
-// its app host, as the dashboard's launch link does, and posts the handoff. It returns the app session ID and bearer token, which are
-// the values of the __Host-sp_app and __Host-sp_subject cookies.
+// its app host, as the dashboard's launch link does, and posts the handoff.
+// It returns the app session ID and bearer token, which are the values of
+// the __Host-sp_app and __Host-sp_subject cookies.
 func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 	post := func(host, path, body string, cookie *http.Cookie) (*http.Response, error) {
 		req, err := http.NewRequest("POST", "https://"+host+path, strings.NewReader(body))
@@ -82,6 +84,9 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 			state = c
 		}
 	}
+	if state == nil {
+		return "", "", errors.New("launch: no state cookie")
+	}
 	launch := resp.Header.Get("Location")
 	resp, err = get(launch, "same-site", session)
 	if err != nil {
@@ -92,7 +97,7 @@ func AppSession(h *Hub, app string) (sid, bearer string, err error) {
 		return "", "", err
 	}
 	parts := strings.Split(loc.Fragment, ".")
-	if len(parts) != 3 || state == nil {
+	if len(parts) != 3 {
 		return "", "", fmt.Errorf("launch: location %q", resp.Header.Get("Location"))
 	}
 	sid, bearer = parts[0], parts[1]
