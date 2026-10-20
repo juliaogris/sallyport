@@ -22,17 +22,20 @@ import (
 //     cookie is __Host-sp_session, the user and the web session ID.
 //   - <app>-<owner>.<domain> is an app host. An app in SUB_APPS is at
 //     <app>.<owner>.<domain> instead, under the login host, and is not
-//     served at <app>-<owner>.<domain>. A launch creates an app session
-//     and redirects to /x-teleport-auth on the app host with the session ID
-//     and its bearer token in the URL fragment. The page there posts them
-//     back and the hub sets __Host-sp_app and __Host-sp_subject. Every other
+//     served at <app>-<owner>.<domain>. A launch starts on the app host,
+//     which sets a state cookie and sends the browser to the launch on the
+//     login host. The launch creates an app session and redirects to
+//     /x-teleport-auth on the app host with the state in the query and the
+//     session ID and its bearer token in the URL fragment. The page there
+//     posts them back, and if the state matches the cookie, the hub sets
+//     __Host-sp_app and __Host-sp_subject. Every other
 //     request is checked with GetAppSession and forwarded to the app service
 //     over the tunnel. An app session is valid only on the app host of its
 //     certificate's app public address.
 //
 // Every POST must have an Origin equal to its own host. A launch is a GET,
 // so that a launch link opens in a new tab, and is taken only from a page
-// on the login host.
+// on the same site and only with a launch state.
 const (
 	sessionCookie = "__Host-sp_session"
 	appCookie     = "__Host-sp_app"
@@ -41,6 +44,8 @@ const (
 	// stateCookiePrefix is the prefix of the state cookie of a launch, which
 	// is followed by the ID part of the launch state.
 	stateCookiePrefix = "__Host-sp_state_"
+	// stateMaxAge is the lifetime of a state cookie in seconds.
+	stateMaxAge = "60"
 	// uiSessionCookie is the Teleport web UI's session cookie.
 	uiSessionCookie = "__Host-session"
 )
@@ -210,14 +215,16 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 // takes only a state whose cookie this browser has, so a handoff link made
 // by another browser does not sign this one in.
 func (h *hub) startLaunch(app string) *response {
-	secret, id := randomHex(), randomHex()
-	return redirect("https://"+h.cfg.loginHost()+"/web/launch/"+app+"?state="+secret+"_"+id).
-		add("set-cookie", stateCookiePrefix+id+"="+secret+"; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=60").
+	state, secret, id := newState()
+	return redirect("https://"+h.cfg.loginHost()+"/web/launch/"+app+"?state="+state).
+		add("set-cookie", setCookie(stateCookiePrefix+id, secret)+"; Max-Age="+stateMaxAge).
 		add("referrer-policy", "no-referrer")
 }
 
 // handoff checks the handoff from the launcher for an app session of the
-// request's host and its launch state, and sets the app cookies.
+// request's host and its launch state, clears the state cookie, and sets
+// the app cookies. For an app in WEB_UI_APPS it also sets the web UI's
+// session cookie.
 func (h *hub) handoff(req *request) *response {
 	host := req.host
 	var in struct {
@@ -240,6 +247,9 @@ func (h *hub) handoff(req *request) *response {
 	}
 	resp, err := h.auth.call(getAppSession, getAppSessionRequest(in.Sid))
 	if err != nil {
+		if notFound(err) {
+			return textError("bad handoff", 403)
+		}
 		logf("web: handoff GetAppSession: %v", err)
 		return textError("auth unavailable", 503)
 	}
@@ -247,33 +257,33 @@ func (h *hub) handoff(req *request) *response {
 	if s == nil || !s.unexpired() || !ctEq(s.bearerToken, in.Subject) || !certForHost(s.tlsCert, host) {
 		return textError("bad handoff", 403)
 	}
-	out := (&response{status: 204}).
+	result := (&response{status: 204}).
 		add("set-cookie", expireCookie(stateCookiePrefix+id)).
 		add("set-cookie", setCookie(appCookie, in.Sid)).
 		add("set-cookie", setCookie(subjectCookie, in.Subject))
-	if ui, ok := h.ui.take(in.Sid); ok {
-		h.addUISession(out, ui)
+	if ui, ok := h.ui.take(in.Sid, time.Now()); ok {
+		h.addUISession(result, ui)
 	}
-	return out
+	return result
 }
 
-// addUISession adds the Teleport web UI's session cookie for ui to out, if
+// addUISession adds the Teleport web UI's session cookie for ui to resp, if
 // auth still has the web session and it has not expired. The cookie lives
 // as long as the session.
-func (h *hub) addUISession(out *response, ui uiSession) {
-	resp, err := h.auth.call(getWebSession, getWebSessionRequest(ui.user, ui.sid))
+func (h *hub) addUISession(resp *response, ui uiSession) {
+	got, err := h.auth.call(getWebSession, getWebSessionRequest(ui.user, ui.sid))
 	if err != nil {
 		if !notFound(err) {
 			logf("web: handoff GetWebSession: %v", err)
 		}
 		return
 	}
-	s := sessionOf(resp)
+	s := sessionOf(got)
 	if s == nil || !s.unexpired() {
 		return
 	}
-	left := s.expires - time.Now().Unix()
-	out.add("set-cookie", uiSessionCookie+"="+uiCookieValue(ui.user, ui.sid)+"; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age="+strconv.FormatInt(left, 10))
+	left := strconv.FormatInt(s.expires-time.Now().Unix(), 10)
+	resp.add("set-cookie", setCookie(uiSessionCookie, uiCookieValue(ui.user, ui.sid))+"; Max-Age="+left)
 }
 
 // webSession returns the logged-in user and the web session, if the
@@ -348,6 +358,8 @@ func (h *hub) launch(req *request, name string) *response {
 		return textError("not found", 404)
 	}
 	state, ok := req.queryValue("state")
+	// Without a state the launch did not start on the app host, which is
+	// where the state cookie must be set, so send the browser there first.
 	if !ok {
 		return redirect("https://" + h.cfg.appHost(name) + authPath)
 	}
@@ -393,7 +405,7 @@ func (h *hub) launch(req *request, name string) *response {
 		return textError("launch failed", 502)
 	}
 	if h.cfg.webUIApps[name] {
-		h.ui.put(sid, uiSession{user: user, sid: s.name})
+		h.ui.put(sid, user, s.name, time.Now())
 	}
 	return (&response{status: 303}).
 		add("location", "https://"+publicAddr+authPath+"?state="+state+"#"+sid+"."+bearer+"."+b64([]byte(start))).

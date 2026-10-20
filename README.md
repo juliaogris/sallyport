@@ -290,6 +290,9 @@ In this repo, edit the `home` env in
   trust with passkey prompts.
   Cloudflare issues the certificate for a custom domain two levels below
   the zone a minute or two after the deploy.
+- `WEB_UI_APPS`, the apps in `SUB_APPS` that are a Teleport web UI,
+  comma-separated. A launch of one also logs the UI in with the hub login,
+  so the UI gets a full Teleport login. See S5 in the security review.
 
 Then deploy, and set the secrets. The hub reads each secret as base64, so
 that a PEM file keeps its line breaks.

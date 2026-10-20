@@ -17,9 +17,7 @@ const uiSessionTTL = 60 * time.Second
 // then asks for its own login.
 type uiSessions struct {
 	mu sync.Mutex
-	// now is time.Now, or a fake clock in tests.
-	now func() time.Time
-	m   map[string]uiSession
+	m  map[string]uiSession
 }
 
 // uiSession is the web session sid of user, and the time of the launch it
@@ -29,44 +27,36 @@ type uiSession struct {
 	launched  time.Time
 }
 
-// put holds s for the app session appSID.
-func (u *uiSessions) put(appSID string, s uiSession) {
+// put holds the web session webSID of user for the app session appSID,
+// launched at now.
+func (u *uiSessions) put(appSID, user, webSID string, now time.Time) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.purge()
+	u.purge(now)
 	if u.m == nil {
 		u.m = make(map[string]uiSession)
 	}
-	s.launched = u.clock()
-	u.m[appSID] = s
+	u.m[appSID] = uiSession{user: user, sid: webSID, launched: now}
 }
 
 // take returns and deletes the session held for the app session appSID.
 // It returns false if there is none, or if its launch was more than
-// uiSessionTTL ago.
-func (u *uiSessions) take(appSID string) (uiSession, bool) {
+// uiSessionTTL before now.
+func (u *uiSessions) take(appSID string, now time.Time) (uiSession, bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.purge()
+	u.purge(now)
 	s, ok := u.m[appSID]
 	delete(u.m, appSID)
 	return s, ok
 }
 
-// purge deletes the entries whose launch was more than uiSessionTTL ago.
-// u.mu must be held.
-func (u *uiSessions) purge() {
-	now := u.clock()
+// purge deletes the entries whose launch was more than uiSessionTTL before
+// now. u.mu must be held.
+func (u *uiSessions) purge(now time.Time) {
 	for id, s := range u.m {
 		if now.Sub(s.launched) > uiSessionTTL {
 			delete(u.m, id)
 		}
 	}
-}
-
-func (u *uiSessions) clock() time.Time {
-	if u.now != nil {
-		return u.now()
-	}
-	return time.Now()
 }

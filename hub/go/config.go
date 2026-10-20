@@ -70,7 +70,7 @@ func parseConfig(env map[string]string) *config {
 		owner:       env["OWNER"],
 		domain:      env["DOMAIN"],
 		apps:        parseApps(env["APPS"]),
-		subApps:     parseSubApps(env["SUB_APPS"]),
+		subApps:     parseAppNames(env["SUB_APPS"]),
 		lazy:        env["HUB_MODE"] == "lazy",
 		errs:        make(map[string]error),
 	}
@@ -279,12 +279,10 @@ func (c *config) appHost(name string) string {
 	return name + "-" + c.owner + "." + c.domain
 }
 
-// parseSubApps parses SUB_APPS, a comma-separated list of app names. A name
-// that does not match ^[a-z][a-z0-9]*$ is dropped.
 // parseWebUIApps reads WEB_UI_APPS, a comma-separated list of app names.
 // Names that are not in subApps, and invalid names, are dropped.
 func parseWebUIApps(s string, subApps map[string]bool) map[string]bool {
-	m := parseSubApps(s)
+	m := parseAppNames(s)
 	for n := range m {
 		if !subApps[n] {
 			delete(m, n)
@@ -293,7 +291,9 @@ func parseWebUIApps(s string, subApps map[string]bool) map[string]bool {
 	return m
 }
 
-func parseSubApps(s string) map[string]bool {
+// parseAppNames parses a comma-separated list of app names. A name that
+// does not match ^[a-z][a-z0-9]*$ is dropped.
+func parseAppNames(s string) map[string]bool {
 	m := make(map[string]bool)
 	for _, n := range strings.Split(s, ",") {
 		if n = strings.TrimSpace(n); validName(n) {
