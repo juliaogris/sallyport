@@ -153,6 +153,11 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 		}
 	case req.path == "/teleport-logout":
 		return h.toLogin()
+	case req.method == "GET" && req.path == "/web/login" && h.cfg.webUIApps[app]:
+		// The web UI's logout deletes the web session, and auth deletes
+		// the app session with it, so the UI's own login page could not
+		// reach the UI. The login is on the login host.
+		return h.toLogin()
 	case strings.HasPrefix(req.path, "/x-teleport-dbsc"):
 		return textError("not found", 404)
 	}

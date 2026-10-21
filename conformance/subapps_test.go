@@ -217,7 +217,7 @@ func testSubApps(t *testing.T, s *stack) {
 
 	t.Run("login pages not served at tp", func(t *testing.T) {
 		gets := []string{
-			"/", "/web/login", "/web/passkeys", "/web/add-passkey",
+			"/", "/web/passkeys", "/web/add-passkey",
 			"/web/invite/x", "/web/launch/bench", "/webapi/passkeys", "/webapi/find", "/webapi/ping",
 		}
 		posts := []string{
@@ -244,6 +244,18 @@ func testSubApps(t *testing.T, s *stack) {
 			resp := s.failWS(t, host, p, origin(host), cookies...)
 			require.Equal(t, http.StatusNotFound, resp.StatusCode, p)
 		}
+	})
+
+	t.Run("web UI login goes to the login host", func(t *testing.T) {
+		for _, c := range [][]*http.Cookie{nil, cookies} {
+			resp := s.get(t, host, "/web/login?redirect_uri=x", c...)
+			readBody(t, resp)
+			require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+			require.Equal(t, "https://"+LoginHost+"/", resp.Header.Get("Location"))
+		}
+		resp := s.get(t, appHost("bench"), "/web/login", s.appCookies(t, "bench")...)
+		require.Equal(t, notFoundBody, string(readBody(t, resp)))
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 
 	// A page on tp can ask for the login host's passkeys, and a server can
