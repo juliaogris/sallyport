@@ -1,9 +1,9 @@
 package main
 
 // style makes text and buttons larger, so they are easy to tap on a phone.
-const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button,a.app{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}a.app{display:inline-block;box-sizing:border-box;text-align:center;text-decoration:none;color:ButtonText;background:ButtonFace;border:2px outset ButtonBorder;line-height:normal}</style>`
+const style = `<style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button,a.app{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active,a.app:active{background:#ddd}form{margin:0}a.app{display:inline-block;box-sizing:border-box;text-align:center;text-decoration:none;line-height:normal}</style>`
 
-const loginPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport login</title>
+const loginPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active{background:#ddd}form{margin:0}</style><title>sallyport login</title>
 <button id="go">Log in with passkey</button><pre id="out"></pre><script>
 const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -33,7 +33,7 @@ document.getElementById('go').onclick = async () => {
 };
 </script>`
 
-const invitePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport invite</title>
+const invitePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active{background:#ddd}form{margin:0}</style><title>sallyport invite</title>
 <button id="go">Register a passkey</button><pre id="out"></pre><script>
 const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const enc = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -63,7 +63,7 @@ document.getElementById('go').onclick = async () => {
 };
 </script>`
 
-const passkeysPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport passkeys</title>
+const passkeysPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active{background:#ddd}form{margin:0}</style><title>sallyport passkeys</title>
 <style>main{max-width:40em}h1{font-size:28px;margin:8px 0 16px}h2{font-size:20px;margin:28px 0 4px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:8px 12px 8px 0;border-bottom:1px solid #ccc;vertical-align:middle}th{font-weight:600;color:#555}td.act{text-align:right;padding-right:0}td button{min-width:0;margin:0;padding:6px 14px;font-size:16px}.row{display:flex;flex-wrap:wrap;align-items:center;gap:0 10px}input{font-size:18px;padding:10px;flex:1 1 10em;max-width:20em;box-sizing:border-box}#out{color:#b00;white-space:pre-wrap}#qr{display:block;margin-top:8px}</style>
 <main><p><a href="/">Back</a></p><h1>Passkeys</h1>
 <table><thead><tr><th>Name</th><th>Added</th><th></th></tr></thead><tbody id="list"></tbody></table>
@@ -220,7 +220,7 @@ nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 load().catch(e => { out.textContent = 'error: ' + e; });
 </script>`
 
-const addPasskeyPage = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><title>sallyport add passkey</title>
+const addPasskeyPage = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active{background:#ddd}form{margin:0}</style><title>sallyport add passkey</title>
 <p>Add a passkey for this device, then log in with it.</p>
 <p><input id="name" maxlength="30" size="24"> <button id="go">Add a passkey</button></p><pre id="out"></pre><script>
 const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
@@ -254,7 +254,7 @@ document.getElementById('go').onclick = async () => {
 nameInput.value = 'passkey ' + new Date().toISOString().slice(0, 10);
 </script>`
 
-const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{font-size:18px;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px}form{margin:0}</style><meta name="referrer" content="no-referrer"><title>sallyport</title>
+const handoffPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>body{font:18px/1.5 system-ui,sans-serif;margin:24px 16px}button{-webkit-appearance:none;appearance:none;font:inherit;padding:14px 22px;margin:10px 0;min-width:12em;border-radius:10px;border:1px solid #999;background:#eee;color:#111;cursor:pointer}button:active{background:#ddd}form{margin:0}</style><meta name="referrer" content="no-referrer"><title>sallyport</title>
 <pre id="out">Signing in...</pre><script>
 const [sid, subject, start] = location.hash.slice(1).split('.');
 let path = '/';
