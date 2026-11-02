@@ -215,6 +215,8 @@ class program {
     // socket ID.
     this.parts = new Map();
     this.streams = new Map();
+    // The controllers of the response streams Go has not ended, by ID.
+    this.ctls = new Map();
     this.pending = new Set();
     // The app request bodies Go reads as they arrive, by ID, each with its
     // reader and the rest of the chunk Go has not taken.
@@ -271,6 +273,12 @@ class program {
       s.resolve();
     }
     this.streams.clear();
+    for (const ctl of this.ctls.values()) {
+      try {
+        ctl.error(new Error('service restart'));
+      } catch {}
+    }
+    this.ctls.clear();
     for (const b of this.bodies.values()) {
       try {
         b.reader.cancel();
@@ -419,6 +427,13 @@ class program {
       stream(sid, buf) {
         return new ReadableStream(
           {
+            // The controller is kept from the start, so that Go can end the
+            // stream while no pull waits. Otherwise a stream whose reader
+            // went away stays open, and its request keeps the object from
+            // hibernating until the next event.
+            start(ctl) {
+              p.ctls.set(sid, ctl);
+            },
             pull(ctl) {
               if (p.exited) return ctl.error(new Error('service restart'));
               return new Promise((resolve) => {
@@ -427,6 +442,7 @@ class program {
                 // and a later pull would wait for good.
                 if (!p.api.pull(sid)) {
                   p.streams.delete(sid);
+                  p.ctls.delete(sid);
                   ctl.error(new Error('response body closed'));
                   resolve();
                 }
@@ -434,6 +450,7 @@ class program {
             },
             cancel() {
               p.streams.delete(sid);
+              p.ctls.delete(sid);
               if (!p.exited) p.api.cancel(sid);
             },
           },
@@ -441,17 +458,20 @@ class program {
         );
       },
       // Delivers the answer to one pull: n >= 0 bytes in buf, then the end
-      // if last is true, or -2 for an error.
+      // if last is true, or -2 for an error. An end or an error also comes
+      // while no pull waits, when Go gives up on a stream nobody reads.
       chunk(sid, n, last) {
         const s = p.streams.get(sid);
-        if (!s) return;
+        const ctl = s ? s.ctl : p.ctls.get(sid);
+        if (!ctl) return;
         p.streams.delete(sid);
+        if (n === -2 || last) p.ctls.delete(sid);
         try {
-          if (n > 0) s.ctl.enqueue(s.buf.slice(0, n));
-          if (n === -2) s.ctl.error(new Error('upstream body error'));
-          else if (last) s.ctl.close();
+          if (s && n > 0) ctl.enqueue(s.buf.slice(0, n));
+          if (n === -2) ctl.error(new Error('upstream body error'));
+          else if (last) ctl.close();
         } catch {}
-        s.resolve();
+        s?.resolve();
       },
       // Copies the next bytes of app request body id into buf, at most its
       // length, and passes Go their count with api.bodyChunk, or -1 at the

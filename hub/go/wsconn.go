@@ -422,6 +422,9 @@ func (s *bodyStream) run() {
 			return
 		case <-idle.C:
 			logf("appproxy: response body not read for %v, closing", streamIdle)
+			// The runtime may not pull again, so the stream is ended here,
+			// or its request would stay open.
+			glue.chunk.Invoke(s.id, -2, false)
 			return
 		}
 		n, err := s.r.Read(buf)
