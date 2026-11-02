@@ -120,7 +120,7 @@ func StartHub(ctx context.Context, hubDir, dir string, vars, secrets map[string]
 	if err != nil {
 		return nil, err
 	}
-	h.cmd = exec.Command("npx", "wrangler@4", "dev",
+	h.cmd = exec.Command("npx", wranglerPackage(), "dev",
 		"--config", filepath.Join(dir, "wrangler.toml"),
 		"--ip", "127.0.0.1", "--port", fmt.Sprint(port),
 		"--inspector-port", "0",
@@ -288,4 +288,18 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, b, 0o600)
+}
+
+// wrangler is the wrangler release the tests run. It is pinned because
+// `npx wrangler@4` runs whichever 4.x release is in the npx cache, so two
+// machines could run different releases.
+const wrangler = "wrangler@4.151.1"
+
+// wranglerPackage returns $SP_WRANGLER if it is set, for trying another
+// release, and wrangler if not.
+func wranglerPackage() string {
+	if v := os.Getenv("SP_WRANGLER"); v != "" {
+		return v
+	}
+	return wrangler
 }
