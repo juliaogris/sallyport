@@ -448,8 +448,7 @@ class program {
         p.streams.delete(sid);
         try {
           if (n > 0) s.ctl.enqueue(s.buf.slice(0, n));
-          if (n === -2) s.ctl.error(new Error('upstream body error'));
-          else if (last) s.ctl.close();
+          if (n === -2 || last) s.ctl.close();
         } catch {}
         s.resolve();
       },
