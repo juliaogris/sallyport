@@ -222,6 +222,14 @@ func (a *FakeAuth) SetLazyAuthDial(d LazyDial) {
 	a.mu.Unlock()
 }
 
+// SetProxyWeb sends the proxy streams to w, as auth does with
+// callout_proxy_addr set.
+func (a *FakeAuth) SetProxyWeb(w *ProxyWeb) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxyWeb = w
+}
+
 // SetStreamAcks sets whether new streams ask for upload acks. It is on by
 // default, as in auth's callout.
 func (a *FakeAuth) SetStreamAcks(on bool) {
@@ -342,6 +350,13 @@ func (a *FakeAuth) serveLazyStream(ctx context.Context, h *Hub, app *AppServer, 
 		}
 	case "app":
 		if app == nil || !app.ln.put(newDeadlineConn(newFlowConn(ws, acks))) {
+			ws.Close()
+		}
+	case "proxy":
+		a.mu.Lock()
+		pw := a.proxyWeb
+		a.mu.Unlock()
+		if pw == nil || !pw.ln.put(newDeadlineConn(newFlowConn(ws, acks))) {
 			ws.Close()
 		}
 	default:

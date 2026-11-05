@@ -62,6 +62,8 @@ type FakeAuth struct {
 	pki *PKI
 	srv *http.Server
 	ln  *connListener
+	// proxyWeb takes the proxy streams, or nil.
+	proxyWeb *ProxyWeb
 
 	mu      sync.Mutex
 	web     map[string]*session
