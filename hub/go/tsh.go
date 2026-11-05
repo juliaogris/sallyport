@@ -284,7 +284,9 @@ func gateHello(h clientHello, cluster string) error {
 		"teleport-proxy-ssh":       true,
 		"teleport-proxy-ssh-grpc":  true,
 		"teleport-proxy-grpc-mtls": true,
-		"teleport-auth@" + encoded: true,
+		// tsh names auth's cluster as its SNI does (api/utils,
+		// EncodeClusterName).
+		"teleport-auth@" + encoded + "." + apiDomain: true,
 	}
 	if !allowed[h.alpn[0]] {
 		return fmt.Errorf("ALPN protocol %q is not allowed", h.alpn[0])

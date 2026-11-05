@@ -248,7 +248,7 @@ func TestTshPath(t *testing.T) {
 	t.Run("upgrade passes an allowed hello", func(t *testing.T) {
 		for _, protos := range [][]string{
 			{"teleport-proxy-ssh-grpc", "h2"},
-			{"teleport-auth@" + hex.EncodeToString([]byte(pki.Cluster)), "h2"},
+			{"teleport-auth@" + clusterSNI(), "h2"},
 		} {
 			ws, resp, err := s.dialUpgrade(t, "alpn-ping")
 			require.NoError(t, err, protos)

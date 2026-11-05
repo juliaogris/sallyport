@@ -199,7 +199,8 @@ func TestGateHello(t *testing.T) {
 		ok   bool
 	}{
 		{"ssh grpc", clientHello{sni, []string{"teleport-proxy-ssh-grpc", "h2"}}, true},
-		{"auth", clientHello{sni, []string{"teleport-auth@" + enc, "h2"}}, true},
+		{"auth", clientHello{sni, []string{"teleport-auth@" + sni, "h2"}}, true},
+		{"auth without the domain", clientHello{sni, []string{"teleport-auth@" + enc, "h2"}}, false},
 		{"ssh", clientHello{sni, []string{"teleport-proxy-ssh"}}, true},
 		{"grpc mtls", clientHello{sni, []string{"teleport-proxy-grpc-mtls", "h2"}}, true},
 
@@ -209,7 +210,7 @@ func TestGateHello(t *testing.T) {
 		{"h2 only", clientHello{sni, []string{"h2"}}, false},
 		{"join service", clientHello{sni, []string{"teleport-proxy-grpc", "h2"}}, false},
 		{"mixed", clientHello{sni, []string{"teleport-proxy-ssh-grpc", "http/1.1"}}, false},
-		{"other cluster auth", clientHello{sni, []string{"teleport-auth@" + hex.EncodeToString([]byte("other"))}}, false},
+		{"other cluster auth", clientHello{sni, []string{"teleport-auth@" + hex.EncodeToString([]byte("other")) + "." + apiDomain}}, false},
 		{"reverse tunnel", clientHello{sni, []string{"teleport-reversetunnel"}}, false},
 		{"wrong sni", clientHello{"tp.julia.sally.red", []string{"teleport-proxy-ssh-grpc"}}, false},
 		{"other cluster sni", clientHello{hex.EncodeToString([]byte("other")) + "." + apiDomain, []string{"teleport-proxy-ssh-grpc"}}, false},
