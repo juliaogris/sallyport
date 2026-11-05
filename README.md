@@ -438,6 +438,59 @@ the UI, so log out of both.
 The app tiles in the UI do not work, because the hub does not answer
 Teleport's app launch.
 
+### tsh from the command line
+
+With the Teleport web UI set up as above, `tsh` can log in and connect
+through the hub, on the UI's host and with no VPN or open port at home:
+
+```
+tsh login --proxy=tp.me.example.com:443 --user=me --auth=passwordless
+tsh ssh me@<node>
+```
+
+`tsh` sends no hub cookie, so the hub passes only a short list of
+requests to the home proxy: ping, the passwordless login, and the
+connection upgrade. Every other request without a hub cookie still goes
+to the login page. Inside the upgrade, the hub reads the TLS ClientHello
+and lets through only the SSH, proxy gRPC and auth protocols of the home
+cluster. Each of them needs a user certificate. The hub rewrites the
+proxy address in the ping answer, so that `tsh` keeps using the hub.
+
+The hub runs this on streams of a third kind, `proxy`, from auth's
+callout. The callout connects them only to `callout_proxy_addr`, the home
+proxy's web listener:
+
+1. In auth's `teleport.yaml`, next to `callout_mode: on_demand`:
+
+   ```yaml
+   callout_proxy_addr: 127.0.0.1:3080
+   ```
+
+2. Give the proxy a certificate from Let's Encrypt for the host of its
+   `public_addr`. The hub verifies it and never skips verification.
+3. In `hub/go/wrangler.toml`, set the proxy's `public_addr`, and put the
+   Let's Encrypt roots in a secret. A Go program on `js/wasm` has no
+   system roots:
+
+   ```toml
+   [env.home.vars]
+   PROXY_WEB_ADDR = "teleport.lan:3080"
+   ```
+
+   ```
+   cat /etc/ssl/certs/ISRG_Root_X1.pem /etc/ssl/certs/ISRG_Root_X2.pem |
+     base64 | tr -d '\n' | npx wrangler@4 secret put PROXY_WEB_CA --env home
+   npx wrangler@4 deploy --env home
+   ```
+
+Update auth first. An older callout closes its control socket when the
+hub asks for a `proxy` stream.
+
+`tsh` needs a YubiKey or another security key added as a passkey on the
+hub's passkeys page. A passkey made by a browser cannot be used by `tsh`.
+After the first login, `tsh mfa add --type=TOUCHID` adds Touch ID for
+`tsh`. At home, log in to the home proxy directly, as a second profile.
+
 ## Conformance tests
 
 `conformance/` is a black-box test suite for the hub. It runs the hub
