@@ -30,10 +30,6 @@ import (
 // The requests of one app session share up to appConnsPerSession
 // connections, which close after appConnIdle without a request.
 
-// apiDomain is the SNI suffix the app service expects after the hex
-// cluster name (api/utils/cluster.go, EncodeClusterName).
-const apiDomain = "teleport.cluster.local"
-
 // spCookiePrefix is the prefix of the session cookies the hub itself sets.
 // The app service never sees them, and the app cannot set them.
 const spCookiePrefix = "__Host-sp_"
@@ -176,14 +172,6 @@ func (h *hub) dialAppTLS(ctx context.Context, cert tls.Certificate) (net.Conn, e
 		return nil, fmt.Errorf("tls connect: %w", err)
 	}
 	return tc, nil
-}
-
-// hopByHop are the header names that describe one hop of the connection,
-// per RFC 7230 6.1, plus the ones browsers and proxies add in practice.
-// None are forwarded in either direction.
-var hopByHop = map[string]bool{
-	"connection": true, "keep-alive": true, "proxy-connection": true,
-	"transfer-encoding": true, "te": true, "trailer": true, "upgrade": true,
 }
 
 // buildRequest builds the request the hub sends upstream: the method and

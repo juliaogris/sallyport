@@ -59,6 +59,10 @@ APPS = "printer"
 # launch of one also logs the UI in with the user's login, so the UI does
 # not ask for a passkey again.
 # WEB_UI_APPS = ""
+# The home proxy's public_addr, for tsh through the hub on the host of an
+# app in WEB_UI_APPS. The lazy hub only. The secret PROXY_WEB_CA holds the
+# roots of the proxy's web certificate. Unset turns tsh through the hub off.
+# PROXY_WEB_ADDR = ""
 
 [[env.home.durable_objects.bindings]]
 name = "HUB"

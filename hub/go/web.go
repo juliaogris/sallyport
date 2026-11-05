@@ -175,6 +175,13 @@ func (h *hub) appHostRequest(req *request, app string) *response {
 	}
 	sid, ok1 := req.cookie(appCookie)
 	subject, ok2 := req.cookie(subjectCookie)
+	// tsh sends no hub cookie. A request with one of the two takes the
+	// browser path's answer.
+	if !ok1 && !ok2 && h.tshEnabled(app) {
+		if route := routeTsh(req.method, req.path, req.isUpgrade(), req.header["sec-websocket-protocol"]); route != tshNone {
+			return h.tshRequest(req, route)
+		}
+	}
 	if !ok1 || !ok2 {
 		return h.toLogin()
 	}

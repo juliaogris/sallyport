@@ -51,6 +51,9 @@ type hub struct {
 	// its handoff.
 	ui uiSessions
 
+	// tshCaps counts the open upgrades on the tsh path.
+	tshCaps upgradeCaps
+
 	pool *authPool
 	auth *hubAuth
 	// lazy is the lazy hub, when HUB_MODE is lazy, or nil.

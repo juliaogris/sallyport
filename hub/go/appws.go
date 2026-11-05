@@ -141,6 +141,14 @@ type browserWS struct {
 	code         int
 	reason       string
 	upstreamDone bool
+	// queued is the bytes in queue. With maxQueued above 0, a message that
+	// would take queued past it closes both sides with 1009.
+	queued, maxQueued int
+	// timedOut is set by wait's timer.
+	timedOut bool
+	// onDone, if set, runs once when the upstream side has ended.
+	onDone   func()
+	doneOnce sync.Once
 }
 
 type wsMessage struct {
@@ -162,6 +170,14 @@ func browserOf(id int) *browserWS {
 // acceptBrowserWS accepts a new WebSocket pair for the browser and starts
 // copying messages between it and up. The response must carry b.client.
 func acceptBrowserWS(up *websocket.Conn) *browserWS {
+	b := newBrowserWS()
+	b.start(up)
+	return b
+}
+
+// newBrowserWS accepts a new WebSocket pair for the browser. Its messages
+// queue until start. The response must carry b.client.
+func newBrowserWS() *browserWS {
 	// IDs come from the connection table, so that worker.mjs, which keeps
 	// both kinds in one map, never sees one twice.
 	conns.mu.Lock()
@@ -173,17 +189,21 @@ func acceptBrowserWS(up *websocket.Conn) *browserWS {
 		out:   uint8Array.New(outBytes),
 		in:    uint8Array.New(inBytes),
 		inBuf: make([]byte, inBytes),
-		up:    up,
 	}
 	b.cond = sync.NewCond(&b.mu)
 	browsers.mu.Lock()
 	browsers.m[id] = b
 	browsers.mu.Unlock()
 	b.client = glue.acceptBrowser.Invoke(id, b.in)
+	return b
+}
+
+// start copies messages between the browser and up, the queued ones first.
+func (b *browserWS) start(up *websocket.Conn) {
+	b.up = up
 	go b.readUp()
 	go b.writeUp()
 	go b.pingUp()
-	return b
 }
 
 // text queues a text message from the browser. It runs inside the
@@ -211,11 +231,76 @@ func (b *browserWS) binary(n int, last bool) {
 
 func (b *browserWS) enqueue(m wsMessage) {
 	b.mu.Lock()
-	if !b.closing {
-		b.queue = append(b.queue, m)
-		b.cond.Broadcast()
+	if b.closing {
+		b.mu.Unlock()
+		return
 	}
+	if b.maxQueued > 0 && b.queued+len(m.data) > b.maxQueued {
+		b.mu.Unlock()
+		logf("appws: more than %d bytes from the browser are queued, closing", b.maxQueued)
+		b.closeBrowser(websocket.CloseMessageTooBig, "too much queued")
+		if b.up != nil {
+			b.up.Close()
+		}
+		b.finish()
+		return
+	}
+	b.queue = append(b.queue, m)
+	b.queued += len(m.data)
+	b.cond.Broadcast()
 	b.mu.Unlock()
+}
+
+// finish runs onDone, once.
+func (b *browserWS) finish() {
+	b.doneOnce.Do(func() {
+		if b.onDone != nil {
+			b.onDone()
+		}
+	})
+}
+
+// waitBinary waits until ok accepts the bytes of the queued binary
+// messages, joined, and returns them. It leaves the queue as it is. It
+// fails when a text message is queued, when the browser closes, after
+// timeout, or when ok returns an error other than errShortHello.
+func (b *browserWS) waitBinary(timeout time.Duration, ok func([]byte) error) ([]byte, error) {
+	t := time.AfterFunc(timeout, func() {
+		b.mu.Lock()
+		b.timedOut = true
+		b.cond.Broadcast()
+		b.mu.Unlock()
+	})
+	defer t.Stop()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	seen := 0
+	for {
+		if len(b.queue) > seen {
+			seen = len(b.queue)
+			var data []byte
+			for _, m := range b.queue {
+				if m.typ != websocket.BinaryMessage {
+					return nil, errors.New("text message before the client hello")
+				}
+				data = append(data, m.data...)
+			}
+			err := ok(data)
+			if err == nil {
+				return data, nil
+			}
+			if !errors.Is(err, errShortHello) {
+				return nil, err
+			}
+		}
+		switch {
+		case b.closing:
+			return nil, errors.New("browser closed")
+		case b.timedOut:
+			return nil, errors.New("no client hello in time")
+		}
+		b.cond.Wait()
+	}
 }
 
 // browserClosed handles the browser's close, or its error with code 0. The
@@ -251,6 +336,7 @@ func (b *browserWS) writeUp() {
 		m := b.queue[0]
 		b.queue[0] = wsMessage{}
 		b.queue = b.queue[1:]
+		b.queued -= len(m.data)
 		b.mu.Unlock()
 		if err := b.up.WriteMessage(m.typ, m.data); err != nil {
 			logf("appws: write to the app: %v", err)
@@ -286,6 +372,7 @@ func (b *browserWS) readUp() {
 		b.cond.Broadcast()
 		b.mu.Unlock()
 		b.up.Close()
+		b.finish()
 	}()
 	for {
 		typ, data, err := b.up.ReadMessage()

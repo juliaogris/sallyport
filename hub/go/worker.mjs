@@ -106,8 +106,45 @@ function appRequest(req, env, url) {
     case 'OPTIONS':
       break;
   }
-  if (!cookie(req, APP_COOKIE) || !cookie(req, SUBJECT_COOKIE)) return toLogin(env);
+  const app = cookie(req, APP_COOKIE);
+  const subject = cookie(req, SUBJECT_COOKIE);
+  // tsh sends no hub cookie. Only its short allowlist goes to the Durable
+  // Object without one, as tsh.go routes it.
+  if (!app && !subject && tshRequest(req, env, url, upgrade)) return hub(env).fetch(req);
+  if (!app || !subject) return toLogin(env);
   return hub(env).fetch(req);
+}
+
+// The requests of the tsh path, by method and path, as routeTsh in tsh.go
+// matches them.
+const TSH_ROUTES = new Set([
+  'GET /webapi/ping',
+  'GET /webapi/ping/passwordless',
+  'POST /webapi/mfa/login/begin',
+  'POST /webapi/mfa/login/finish',
+]);
+const TSH_SUBPROTOCOLS = ['alpn-ping', 'alpn'];
+
+// Returns true for a request the tsh path takes: on the host of an app in
+// WEB_UI_APPS, in the lazy hub with PROXY_WEB_ADDR set, a route in
+// TSH_ROUTES, or the connection upgrade with a tsh subprotocol.
+function tshRequest(req, env, url, upgrade) {
+  if (env.HUB_MODE !== 'lazy' || !env.PROXY_WEB_ADDR) return false;
+  const label = url.hostname.slice(0, -('.' + env.OWNER + '.' + env.DOMAIN).length);
+  if (!url.hostname.endsWith('.' + env.OWNER + '.' + env.DOMAIN) || !webUIApps(env).includes(label)) return false;
+  if (upgrade) {
+    if (req.method !== 'GET' || url.pathname !== '/webapi/connectionupgrade') return false;
+    const offered = (req.headers.get('Sec-WebSocket-Protocol') || '').split(',').map((p) => p.trim());
+    return TSH_SUBPROTOCOLS.some((p) => offered.includes(p));
+  }
+  return TSH_ROUTES.has(req.method + ' ' + url.pathname);
+}
+
+// Returns the app names in WEB_UI_APPS that are also in SUB_APPS, as
+// config.go reads them.
+function webUIApps(env) {
+  const sub = subApps(env);
+  return (env.WEB_UI_APPS || '').split(',').map((n) => n.trim()).filter((n) => APP_NAME.test(n) && sub.includes(n));
 }
 
 // Sends the browser to the login host and clears the app cookies.

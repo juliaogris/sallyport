@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -19,6 +20,7 @@ var envNames = []string{
 	"DOMAIN", "OWNER", "APPS", "SUB_APPS", "WEB_UI_APPS",
 	"HUB_TLS_CERT", "HUB_TLS_KEY", "HUB_SSH_KEY", "HUB_SSH_CERT",
 	"HOST_CA_SSH", "HOST_CA_TLS", "AUTH_CALLOUT_PUBKEY", "HUB_MODE",
+	"PROXY_WEB_ADDR", "PROXY_WEB_CA",
 }
 
 // config is the hub's parsed env. A secret that does not parse leaves its
@@ -54,6 +56,14 @@ type config struct {
 	hostCA    ssh.PublicKey
 	hostCATLS *x509.CertPool
 	calloutPK ed25519.PublicKey
+
+	// proxyWebAddr is the home proxy's public_addr, host and port, for the
+	// tsh path. The hub sends it as Host and verifies the proxy's web
+	// certificate for its host against proxyWebCA. An empty proxyWebAddr
+	// turns the tsh path off.
+	proxyWebAddr string
+	proxyWebHost string
+	proxyWebCA   *x509.CertPool
 
 	errs map[string]error
 }
@@ -122,6 +132,24 @@ func parseConfig(env map[string]string) *config {
 			c.errs["HOST_CA_TLS"] = errors.New("HOST_CA_TLS: no certificates")
 		} else {
 			c.hostCATLS = pool
+		}
+	}
+	if addr := strings.TrimSpace(env["PROXY_WEB_ADDR"]); addr != "" {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" || port == "" {
+			c.errs["PROXY_WEB_ADDR"] = fmt.Errorf("PROXY_WEB_ADDR: %q is not host:port", addr)
+		} else {
+			c.proxyWebAddr, c.proxyWebHost = addr, host
+		}
+		// The tsh path never skips verification, and a Go program on
+		// js/wasm has no system roots, so the root comes from the secret.
+		if b := secret("PROXY_WEB_CA"); b != nil {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(b) {
+				c.errs["PROXY_WEB_CA"] = errors.New("PROXY_WEB_CA: no certificates")
+			} else {
+				c.proxyWebCA = pool
+			}
 		}
 	}
 	if b := secret("AUTH_CALLOUT_PUBKEY"); b != nil {

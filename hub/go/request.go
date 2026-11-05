@@ -26,6 +26,18 @@ type request struct {
 	bodyTaken  bool
 }
 
+// apiDomain is the SNI suffix the app service expects after the hex
+// cluster name (api/utils/cluster.go, EncodeClusterName).
+const apiDomain = "teleport.cluster.local"
+
+// hopByHop are the header names that describe one hop of the connection,
+// per RFC 7230 6.1, plus the ones browsers and proxies add in practice.
+// None are forwarded in either direction.
+var hopByHop = map[string]bool{
+	"connection": true, "keep-alive": true, "proxy-connection": true,
+	"transfer-encoding": true, "te": true, "trailer": true, "upgrade": true,
+}
+
 // response is what the Durable Object answers. At most one of body,
 // stream, ws and browser is set.
 type response struct {
